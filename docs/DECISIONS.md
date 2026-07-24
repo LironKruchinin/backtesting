@@ -143,3 +143,44 @@ propose a superseding entry — don't silently diverge.
   the quote path the free, fully testable part of `pull` — coverage
   subtraction can be proven end to end for $0.00 before it is trusted to
   guard four figures of entitlement.
+- **D-0025** (2026-07-24) — `crucible-data`'s public API is sync. The async
+  Databento client is reached through the sync `ingest::BatchProvider` trait,
+  whose only network implementation lives in `ingest::databento` behind the
+  non-default `databento` cargo feature and owns a private **current-thread**
+  tokio runtime; `async fn`/`.await` appear in no other file. The trait names
+  no `databento::` type. *Supersedes only the "tokio confined to bin targets"
+  clause of D-0005 and §3; D-0005's parallelism decision stands.* Why: the
+  original rule was unimplementable as written — `crucible-data` has no bin
+  targets, Cargo dependencies are per-crate rather than per-target (so a bin
+  would pull tokio into the library's graph anyway), and a second binary
+  would break M1's "one command" acceptance criterion. The trait is also what
+  makes the cost gate testable at all: a scripted fake with a call log turns
+  "a dry run submits nothing" into an assertion instead of a hope.
+  Current-thread, not multi-thread, so `crucible-data` spawns no worker pool
+  (§3 reserves thread-spawning for `funnel`); the honest caveat is that any
+  HTTP client resolves DNS on a blocking thread, which is not
+  result-affecting parallelism but should not be discovered by surprise.
+- **D-0026** (2026-07-24) — Archive windows are named `{yyyy-mm}` when they
+  cover exactly one calendar month and `{yyyy-mm-dd}--{yyyy-mm-dd}`
+  otherwise, and requested ranges must be UTC-midnight aligned on both ends.
+  Why: with a month-only template, a cheap one-day validation pull of
+  2024-01-02 and a later full-month pull of January 2024 compute the *same*
+  `file_path`, so the second is rejected by `Catalog::append` as a duplicate
+  (raw is immutable, D-0017) — **after** the bytes have been bought. Partial
+  windows are not an edge case: they are the norm at dataset-range boundaries
+  and at the "up to yesterday" end of the monthly job. Coverage is unaffected
+  because it subtracts ranges, not paths. Day alignment is required because a
+  sub-day window has no unambiguous name.
+- **D-0027** (2026-07-24) — Vendor-quoted costs convert to `NanoUsd` at the
+  API boundary, rounding **up**, and `--max-cost-usd` parses decimal text to
+  nanodollars without ever constructing an `f64`; the budget comparison is
+  integer and is `quoted <= cap`. Why: §2.3's ban on `f64` in accounting
+  covers money leaving the machine, not just PnL. `(1.2597_f64 * 1e9).ceil()`
+  is 1_259_700_001 — a naive conversion is wrong in a way that looks right —
+  and `"0.20"` through `f64` is not 0.2, so a cap could refuse a quote that
+  exactly equals it. Rounding up means an understated quote can never
+  authorise a charge nobody consented to, and a sub-nanodollar quote reads as
+  one nanodollar rather than as free. Making the comparison `<=` is what lets
+  the recurring archival job run at `--max-cost-usd 0.00`: it proceeds while
+  the subscription entitles the data at zero and refuses the month the
+  entitlement lapses, instead of quietly billing for it.

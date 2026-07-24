@@ -23,6 +23,17 @@ deadline-driven (see `crucible-data::ingest` module docs).
 - [ ] `crucible pull`: Databento batch download → `raw/` (`.dbn.zst`), each
       slice recorded through `Catalog::append`; `Catalog::coverage` decides
       what is actually requested, so nothing is paid for twice
+      - [x] Quote path (`ingest::{plan,quote}`, 2026-07-24): coverage-subtracted
+            month-aligned planning, live dataset-range clipping, per-window
+            `get_cost`/`get_billable_size`, exact nano-USD spending gate,
+            metered-vs-billed entitlement check. Spends nothing; no caller for
+            `BatchProvider::submit` yet
+      - [ ] Execute path: submit → poll → download → verify → append, with a
+            crash-resumable job journal outside `raw/`
+      - [ ] `ManifestRecord.symbols` = requested key ∪ raw symbols observed in
+            the delivered DBN metadata (the assumption the validation slice
+            exists to prove)
+      - [ ] CLI wiring: `clap`, `--execute`, `--max-cost-usd`, exit codes
 - [ ] Bootstrap pulls: 16y `ohlcv-1s`/`ohlcv-1m` + `definition` for the
       starting symbol set (ES first; NQ/RTY when cross-instrument checks land)
 - [ ] Monthly archival job for the rolling L1/L3 windows — `trades`, `tbbo`,

@@ -109,7 +109,7 @@ gain an edge from consuming fewer warmup bars or different dates.
 
 ```
 crucible-core        types/events/traits. NO dependencies, NO I/O, NO threads.
-crucible-data        network+filesystem for market data. async ONLY in bin targets.
+crucible-data        network+filesystem for market data. sync public API; async confined to ingest::databento (feature-gated).
 crucible-engine      deterministic replay. depends on core ONLY. sync, single-threaded, clock-free.
 crucible-strategies  indicators + strategies. depends on core ONLY.
 crucible-funnel      orchestration/stats/registry/scorecards. the ONLY crate that spawns threads.
@@ -121,8 +121,13 @@ Dependency edges (enforce in review; Cargo.tomls encode them):
 - `engine`, `strategies` → `core` only. They must compile with no I/O, no
   async, no threads, forever. Dev-dependencies on `data`/`strategies` for
   tests are fine.
-- `data` → `core`. Only crate touching network/filesystem for market data;
-  tokio confined to its bin targets; library code stays sync.
+- `data` → `core`. Only crate touching network/filesystem for market data.
+  Its **public API is sync, always**. The Databento client is async, so the
+  one module that calls it (`ingest::databento`) owns a private
+  *current-thread* tokio runtime and `block_on`s behind the sync
+  `ingest::BatchProvider` trait, gated on the non-default `databento`
+  feature. `async fn`, `.await`, and `tokio` appear nowhere else in the
+  workspace (D-0025, superseding D-0005's "bin targets" clause).
 - `funnel` → `core` + `engine` + `strategies` (+ rayon/duckdb when M3
   starts). All parallelism lives here.
 - `cli` → everything, but stays thin: arg parsing, wiring, printing. Logic
@@ -223,8 +228,9 @@ when the code that uses them lands**, never speculatively. Blessed set:
 | `duckdb` | funnel only | registry/results store |
 | `serde`, `toml`, `serde_json` | funnel, data, cli | configs, manifest |
 | `blake3` | funnel, data | config identity, archive checksums |
-| `databento`, `dbn` | data only | acquisition + DBN decoding |
-| `tokio` | data **bin targets** only | Databento client is async |
+| `dbn` | data only | DBN decoding (sync) |
+| `databento` | data, `databento` feature, `ingest::databento` only | acquisition; async |
+| `tokio` | data, `databento` feature, `ingest::databento` only | current-thread runtime behind the sync `BatchProvider` seam (D-0025) |
 | `polars` | data only | Parquet transcode/QA. NEVER in engine. |
 | `chrono` + `chrono-tz` | data::calendar only | the one timezone-aware module |
 | `rand_chacha` | where seeded randomness is needed | resampling/permutation |
