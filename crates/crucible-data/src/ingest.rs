@@ -17,8 +17,11 @@
 //!
 //! ## Rules
 //! - Batch API with `.dbn.zst` outputs (not streaming) for bulk pulls.
-//! - `DATABENTO_API_KEY` comes from the environment. Never a file, never an
-//!   argument, never logged.
+//! - `DATABENTO_API_KEY` comes from the **process environment**, read as
+//!   late as possible and never stored. A bin target may populate that
+//!   environment from a gitignored `.env` at startup (D-0022) — but the key
+//!   never appears in a config struct, a CLI argument, a manifest record, or
+//!   a log line, and library code never reads it from anywhere.
 //! - tokio/async is confined to this crate's bin targets; library code stays
 //!   sync so the engine's no-async rule holds trivially.
 //! - Timestamps pass through as UTC nanoseconds untouched. The `ohlcv`

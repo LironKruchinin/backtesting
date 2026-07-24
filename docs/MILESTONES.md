@@ -17,8 +17,12 @@ command, decision log, this plan.
 The archive is the asset; rolling entitlement windows make archiving
 deadline-driven (see `crucible-data::ingest` module docs).
 
-- [ ] `crucible pull`: Databento batch download → `raw/` (`.dbn.zst`),
-      manifest records with checksums; coverage check prevents re-downloads
+- [x] Archive catalog (`crucible-data::catalog`, 2026-07-24): append-only
+      `manifest.jsonl`, blake3 checksums as manifest ids, per-symbol coverage
+      (requested minus owned), integrity `verify`, hard-error load validation
+- [ ] `crucible pull`: Databento batch download → `raw/` (`.dbn.zst`), each
+      slice recorded through `Catalog::append`; `Catalog::coverage` decides
+      what is actually requested, so nothing is paid for twice
 - [ ] Bootstrap pulls: 16y `ohlcv-1s`/`ohlcv-1m` + `definition` for the
       starting symbol set (ES first; NQ/RTY when cross-instrument checks land)
 - [ ] Monthly archival job for the rolling L1/L2/L3 windows (documented cron;

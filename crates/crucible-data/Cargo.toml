@@ -16,5 +16,11 @@ blake3 = "1.8"
 # dbn = "..."         # DBN decoding
 # polars = "..."      # Parquet read/write + transcode (lazy, feature-gated)
 
+[dev-dependencies]
+# Property tests for the coverage interval algebra (CLAUDE.md §6). Default
+# features off: `fork`/`timeout` only matter for tests that crash the process,
+# and they drag in tempfile/rusty-fork/wait-timeout for nothing here.
+proptest = { version = "1.11", default-features = false, features = ["std"] }
+
 [lints]
 workspace = true

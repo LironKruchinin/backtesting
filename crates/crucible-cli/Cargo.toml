@@ -15,6 +15,9 @@ crucible-data = { path = "../crucible-data" }
 crucible-engine = { path = "../crucible-engine" }
 crucible-funnel = { path = "../crucible-funnel" }
 crucible-strategies = { path = "../crucible-strategies" }
+# `.env` -> process environment, in BIN TARGETS ONLY (D-0022). Library code
+# never reads the environment, so this must not migrate into any lib crate.
+dotenvy = "0.15"
 
 # M1+: clap (derive) for real arg parsing; anyhow for error context in main.
 # Hand-rolled matching is fine only while `demo` is the sole command.

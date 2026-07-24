@@ -89,3 +89,27 @@ propose a superseding entry — don't silently diverge.
   a CRLF hand edit parses identically but silently breaks the byte-identical
   portability guarantee; path hygiene should be uniform; dir-fsync is
   platform-specific complexity for a loud, recoverable failure.
+- **D-0020** (2026-07-24) — `Catalog::coverage` validates its
+  `CoverageRequest` with the same rules as an append and therefore returns
+  `Result`. Why: coverage is the input to a *paid* download — a symbol with a
+  stray space matches no record, so an unvalidated request answers "you own
+  none of it", funds the download, and only then gets refused by `append`;
+  an empty symbols list returns an empty map that reads as "nothing to do".
+- **D-0021** (2026-07-24) — `dataset`, `schema`, `symbols`, and `file_path`
+  must be ASCII; non-ASCII is a hard error on append and on load. Why:
+  Databento symbology is ASCII, and macOS normalizes filenames to NFD while
+  Linux stores the bytes given, so a non-ASCII path can be byte-different per
+  host while looking identical — the exact portability guarantee D-0019
+  pinned down.
+- **D-0022** (2026-07-24) — Bin targets may load a gitignored `.env` (repo
+  root) into the process environment at startup via `dotenvy` (blessed in §6,
+  bins only); real environment variables always win, a missing file is fine,
+  and a malformed one is a hard exit. Library crates still never read the
+  environment. Relaxes `ingest`'s original "never a file" wording, which was
+  aimed at secrets living in *configs* — the invariant that survives is that
+  the key never enters a config struct, CLI argument, manifest record, or log
+  line. Why: one file beats re-exporting two variables in every new shell,
+  and a half-loaded secrets file must fail as loudly as a config typo.
+  Windows note: a backslash starts an escape sequence in dotenv syntax, so
+  `E:/crucible-data` or `'E:\crucible-data'`, never bare `E:\crucible-data`
+  (pinned by `crucible-cli/tests/env_file.rs`).

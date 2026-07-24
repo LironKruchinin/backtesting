@@ -46,7 +46,9 @@
 //!   corrections are new acquisitions at new paths.
 //! - **Coverage check before download.** [`Catalog::coverage`] computes
 //!   requested-range minus owned-range per symbol so ingest downloads only
-//!   the gap.
+//!   the gap. The request is validated by the same rules as an append: this
+//!   is the one query whose wrong answer costs money, so a malformed symbol
+//!   is an error, never a confident "you own nothing" (D-0020).
 //! - **Curated is disposable** and NOT tracked by this manifest. Curated
 //!   files are rebuilt from raw; recording the transcoder version that
 //!   produced them belongs to the transcode task (M1, later), not here.
@@ -69,6 +71,12 @@
 //! validated on append **and** on load (a hand-edited manifest gets no more
 //! trust than a caller). The manifest is byte-identical regardless of host
 //! OS; `data_dir` is the only absolute root, held in memory only.
+//!
+//! `dataset`, `schema`, `symbols`, and `file_path` are ASCII-only (D-0021).
+//! Databento symbology is ASCII, and a non-ASCII path would let the same
+//! visible name be stored as different bytes per host (macOS normalizes
+//! filenames to NFD, Linux does not), quietly breaking the byte-identical
+//! guarantee above.
 //!
 //! ## Crash safety
 //!
@@ -643,8 +651,26 @@ impl Catalog {
     /// `BTreeMap`); the value is the sorted, disjoint list of sub-ranges of
     /// `req.range` NOT owned. An empty list means fully covered — visible,
     /// not silently absent.
-    #[must_use]
-    pub fn coverage(&self, req: &CoverageRequest) -> BTreeMap<String, Vec<TsRange>> {
+    ///
+    /// The request is validated with exactly the rules [`Catalog::append`]
+    /// applies (D-0020). This answer is the input to a *paid* download: a
+    /// symbol carrying a stray space matches no record, so an unvalidated
+    /// request would confidently report the full range as missing, buy the
+    /// bytes, and only then be refused by `append`; an empty symbols list
+    /// would return an empty map that reads as "nothing to do".
+    ///
+    /// # Errors
+    /// [`CatalogError::InvalidName`] if `dataset`/`schema` are unusable,
+    /// [`CatalogError::InvalidSymbols`] if the symbols list is empty or
+    /// contains an unusable symbol.
+    pub fn coverage(
+        &self,
+        req: &CoverageRequest,
+    ) -> Result<BTreeMap<String, Vec<TsRange>>, CatalogError> {
+        validate_name("dataset", &req.dataset)?;
+        validate_name("schema", &req.schema)?;
+        validate_symbols(&req.symbols)?;
+
         let mut out = BTreeMap::new();
         for symbol in &req.symbols {
             if out.contains_key(symbol) {
@@ -664,7 +690,7 @@ impl Catalog {
             let merged = merge_ranges(owned);
             out.insert(symbol.clone(), subtract_from(req.range, &merged));
         }
-        out
+        Ok(out)
     }
 
     /// Re-checks every record's file on disk: existence, size, blake3.
@@ -797,7 +823,16 @@ fn validate_file_blake3(file_blake3: &str) -> Result<(), CatalogError> {
     Ok(())
 }
 
-/// `dataset`/`schema` hygiene: non-empty, no separators/whitespace/control.
+/// Shared rejection reason for non-ASCII text in manifest identifiers
+/// (D-0021). Databento dataset/schema/symbol names are ASCII, and a
+/// non-ASCII `file_path` is a portability trap: macOS stores decomposed
+/// (NFD) filenames while Linux stores whatever bytes it was given, so the
+/// same-looking path can differ byte-wise per host — exactly the guarantee
+/// D-0019 pinned down.
+const NON_ASCII_REASON: &str = "must contain ASCII characters only";
+
+/// `dataset`/`schema` hygiene: non-empty, ASCII, no separators/whitespace/
+/// control.
 fn validate_name(field: &'static str, value: &str) -> Result<(), CatalogError> {
     let err = |reason| CatalogError::InvalidName {
         field,
@@ -806,6 +841,9 @@ fn validate_name(field: &'static str, value: &str) -> Result<(), CatalogError> {
     };
     if value.is_empty() {
         return Err(err("must not be empty"));
+    }
+    if !value.is_ascii() {
+        return Err(err(NON_ASCII_REASON));
     }
     if value.contains(['/', '\\']) {
         return Err(err("must not contain path separators"));
@@ -816,9 +854,10 @@ fn validate_name(field: &'static str, value: &str) -> Result<(), CatalogError> {
     Ok(())
 }
 
-/// Symbols hygiene: at least one; each non-empty and path-safe (symbols
-/// appear inside ingest's path template). Deliberately loose otherwise —
-/// Databento symbology varies and the catalog must not over-guess.
+/// Symbols hygiene: at least one; each non-empty, ASCII, and path-safe
+/// (symbols appear inside ingest's path template). Deliberately loose
+/// otherwise — Databento symbology varies and the catalog must not
+/// over-guess.
 fn validate_symbols(symbols: &[String]) -> Result<(), CatalogError> {
     if symbols.is_empty() {
         return Err(CatalogError::InvalidSymbols {
@@ -829,6 +868,11 @@ fn validate_symbols(symbols: &[String]) -> Result<(), CatalogError> {
         if symbol.is_empty() {
             return Err(CatalogError::InvalidSymbols {
                 detail: "a symbol is empty".to_owned(),
+            });
+        }
+        if !symbol.is_ascii() {
+            return Err(CatalogError::InvalidSymbols {
+                detail: format!("symbol {symbol:?} {NON_ASCII_REASON}"),
             });
         }
         if symbol.contains(['/', '\\'])
@@ -844,9 +888,9 @@ fn validate_symbols(symbols: &[String]) -> Result<(), CatalogError> {
     Ok(())
 }
 
-/// `file_path` rules: relative, forward slashes, strictly under `raw/`, no
-/// `.`/`..`/empty components, no backslashes, no colons (kills `C:` drive
-/// prefixes), no whitespace or control characters (same hygiene as
+/// `file_path` rules: relative, ASCII, forward slashes, strictly under
+/// `raw/`, no `.`/`..`/empty components, no backslashes, no colons (kills
+/// `C:` drive prefixes), no whitespace or control characters (same hygiene as
 /// dataset/schema/symbols). Dots *inside* a component (`GLBX.MDP3`,
 /// `2026-06.dbn.zst`) are fine — only whole components equal to `.` or `..`
 /// are rejected.
@@ -857,6 +901,9 @@ fn validate_file_path(file_path: &str) -> Result<(), CatalogError> {
     };
     if file_path.is_empty() {
         return Err(err("must not be empty"));
+    }
+    if !file_path.is_ascii() {
+        return Err(err(NON_ASCII_REASON));
     }
     if file_path.contains('\\') {
         return Err(err("must use forward slashes, never backslashes"));
@@ -1032,7 +1079,7 @@ mod tests {
             symbols: vec!["ESU6".to_owned()],
             range: ts_range(start, end),
         };
-        let mut cov = catalog.coverage(&req);
+        let mut cov = catalog.coverage(&req).expect("valid coverage request");
         cov.remove("ESU6").expect("requested symbol present as key")
     }
 
@@ -1290,6 +1337,20 @@ mod tests {
                 ..
             })
         ));
+
+        // (g) A non-ASCII file_path must be refused on load: it is exactly
+        // the manifest a foreign/hand-edited archive would carry, and the
+        // same visible name can be different bytes per host (D-0021).
+        let dir7 = TempDir::new();
+        let mut bad = record();
+        bad.file_path = "raw/ESÜ6.dbn.zst".to_owned();
+        let line = serde_json::to_string(&bad).expect("serialize");
+        fs::write(dir7.path().join(MANIFEST_FILE_NAME), format!("{line}\n"))
+            .expect("write manifest");
+        assert!(matches!(
+            Catalog::open(dir7.path()),
+            Err(CatalogError::InvalidFilePath { .. })
+        ));
     }
 
     #[test]
@@ -1440,6 +1501,7 @@ mod tests {
             "curated/x.parquet", // not under raw/
             "raw/my file.zst",   // whitespace
             "raw/x\t.zst",       // control/tab
+            "raw/ESÜ6.dbn.zst",  // non-ASCII (unicode normalization trap)
         ];
         for bad in bad_paths {
             let mut a = acq(FIXTURE_REL_PATH);
@@ -1461,6 +1523,7 @@ mod tests {
             vec![String::new()],
             vec!["ES/U6".to_owned()],
             vec!["ES U6".to_owned()],
+            vec!["ESÜ6".to_owned()],
         ] {
             let mut a = acq(FIXTURE_REL_PATH);
             a.symbols = bad_symbols.clone();
@@ -1485,6 +1548,15 @@ mod tests {
             catalog.append(a),
             Err(CatalogError::InvalidName {
                 field: "schema",
+                ..
+            })
+        ));
+        let mut a = acq(FIXTURE_REL_PATH);
+        a.dataset = "GLBX.MDP³".to_owned();
+        assert!(matches!(
+            catalog.append(a),
+            Err(CatalogError::InvalidName {
+                field: "dataset",
                 ..
             })
         ));
@@ -1610,7 +1682,7 @@ mod tests {
             symbols: vec!["ESU6".to_owned(), "NQU6".to_owned()],
             range: ts_range(100, 200),
         };
-        let cov = catalog.coverage(&req);
+        let cov = catalog.coverage(&req).expect("valid coverage request");
         // One record listing both symbols covers [100,200) for each.
         assert_eq!(cov.len(), 2);
         assert_eq!(cov["ESU6"], Vec::<TsRange>::new());
@@ -1630,7 +1702,7 @@ mod tests {
             symbols: vec!["NQU6".to_owned(), "ESU6".to_owned(), "NQU6".to_owned()],
             range: ts_range(100, 200),
         };
-        let cov = catalog.coverage(&req);
+        let cov = catalog.coverage(&req).expect("valid coverage request");
         let keys: Vec<&str> = cov.keys().map(String::as_str).collect();
         assert_eq!(keys, vec!["ESU6", "NQU6"]);
         assert_eq!(cov["ESU6"], Vec::<TsRange>::new());
@@ -1654,13 +1726,70 @@ mod tests {
                 symbols: vec!["ESU6".to_owned()],
                 range: ts_range(100, 200),
             };
-            let cov = catalog.coverage(&req);
+            let cov = catalog.coverage(&req).expect("valid coverage request");
             assert_eq!(
                 cov["ESU6"],
                 vec![ts_range(100, 200)],
                 "({dataset}, {schema}) must not be credited by (GLBX.MDP3, trades)"
             );
         }
+    }
+
+    #[test]
+    fn coverage_rejects_invalid_request() {
+        // The one query with money consequences: an unvalidated request
+        // reports the full range as missing (nothing matches a malformed
+        // symbol) and would fund a download that `append` then refuses.
+        // Empty symbols is worse — an empty map reads as "nothing to do".
+        let dir = TempDir::new();
+        let catalog = catalog_with_ranges(&dir, &[(100, 200)]);
+        let req = || CoverageRequest {
+            dataset: "GLBX.MDP3".to_owned(),
+            schema: "trades".to_owned(),
+            symbols: vec!["ESU6".to_owned()],
+            range: ts_range(100, 200),
+        };
+
+        let mut bad = req();
+        bad.symbols = vec![];
+        assert!(matches!(
+            catalog.coverage(&bad),
+            Err(CatalogError::InvalidSymbols { .. })
+        ));
+
+        let mut bad = req();
+        bad.symbols = vec!["ESU6 ".to_owned()];
+        assert!(matches!(
+            catalog.coverage(&bad),
+            Err(CatalogError::InvalidSymbols { .. })
+        ));
+
+        let mut bad = req();
+        bad.dataset = String::new();
+        assert!(matches!(
+            catalog.coverage(&bad),
+            Err(CatalogError::InvalidName {
+                field: "dataset",
+                ..
+            })
+        ));
+
+        let mut bad = req();
+        bad.schema = "oh no".to_owned();
+        assert!(matches!(
+            catalog.coverage(&bad),
+            Err(CatalogError::InvalidName {
+                field: "schema",
+                ..
+            })
+        ));
+
+        // The unmangled request still answers (validation rejects typos, not
+        // legitimate queries).
+        assert_eq!(
+            catalog.coverage(&req()).expect("valid request")["ESU6"],
+            Vec::<TsRange>::new()
+        );
     }
 
     // --------------------------------------------------------------- verify
@@ -1791,6 +1920,131 @@ mod tests {
             &report.findings[1],
             VerifyFinding::MissingFile { file_path } if file_path == "raw/other.dbn.zst"
         ));
+    }
+
+    // ------------------------------------------------ coverage algebra (prop)
+
+    /// Property tests for the interval algebra behind [`Catalog::coverage`],
+    /// run directly against the pure helpers. The enumerated `coverage_*`
+    /// tests above pin the wiring and the hand-derived cases; these close the
+    /// *class* — a gap this arithmetic invents costs a re-download, and a gap
+    /// it drops silently leaves a hole in the archive.
+    mod interval_props {
+        use super::*;
+        use proptest::prelude::*;
+        use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
+
+        /// A declared seed, never entropy: a property test that fails only on
+        /// the machine that happened to draw the bad case is a rumor
+        /// (CLAUDE.md §2.2 — all randomness flows from explicit seeds).
+        /// 32 bytes, the ChaCha seed length.
+        const PROP_SEED: [u8; 32] = *b"crucible-coverage-interval-props";
+
+        fn runner() -> TestRunner {
+            TestRunner::new_with_rng(
+                Config {
+                    cases: 1024,
+                    // No `proptest-regressions` file: the fixed seed already
+                    // makes any counterexample reappear on the next run.
+                    failure_persistence: None,
+                    ..Config::default()
+                },
+                TestRng::from_seed(RngAlgorithm::ChaCha, &PROP_SEED),
+            )
+        }
+
+        /// Ranges in a deliberately cramped universe (starts 0..32, widths
+        /// 1..=`max_width`) so overlap, adjacency, containment and
+        /// disjointness all occur constantly. The algebra is scale-free, so a
+        /// crowded small universe exercises it far better than a sparse
+        /// realistic one.
+        fn any_range(max_width: i64) -> impl Strategy<Value = TsRange> {
+            (0i64..32, 1i64..=max_width).prop_map(|(start, width)| {
+                TsRange::new(Ts(start), Ts(start + width)).expect("width >= 1")
+            })
+        }
+
+        fn any_owned() -> impl Strategy<Value = Vec<TsRange>> {
+            prop::collection::vec(any_range(8), 0..8)
+        }
+
+        #[test]
+        fn gaps_are_exactly_the_unowned_part_of_the_request() {
+            let mut runner = runner();
+            runner
+                .run(&(any_range(32), any_owned()), |(request, owned)| {
+                    let merged = merge_ranges(owned.clone());
+                    let gaps = subtract_from(request, &merged);
+
+                    // Merge output is sorted, positive-width, and separated by
+                    // real holes — `<` not `<=`, so adjacent slices [a,b)+[b,c)
+                    // must have fused (the half-open payoff).
+                    for range in &merged {
+                        prop_assert!(range.start_ts < range.end_ts);
+                    }
+                    for pair in merged.windows(2) {
+                        prop_assert!(
+                            pair[0].end_ts < pair[1].start_ts,
+                            "merged must be disjoint and non-touching: {:?}",
+                            merged
+                        );
+                    }
+                    prop_assert_eq!(
+                        merge_ranges(merged.clone()),
+                        merged.clone(),
+                        "merge must be idempotent"
+                    );
+
+                    // Gaps: same shape, and never outside what was asked for
+                    // (a gap beyond the request would fund an unasked-for
+                    // download).
+                    for gap in &gaps {
+                        prop_assert!(gap.start_ts < gap.end_ts, "gaps have positive width");
+                        prop_assert!(
+                            request.start_ts <= gap.start_ts && gap.end_ts <= request.end_ts,
+                            "gap {:?} escapes request {:?}",
+                            gap,
+                            request
+                        );
+                    }
+                    for pair in gaps.windows(2) {
+                        prop_assert!(
+                            pair[0].end_ts < pair[1].start_ts,
+                            "gaps must be sorted, disjoint and non-touching: {:?}",
+                            gaps
+                        );
+                    }
+
+                    // The partition itself, checked point-wise against the
+                    // *unmerged* owned set (the universe is <= 32 wide by
+                    // construction): every point of the request is in a gap
+                    // XOR owned — never both (paying twice), never neither
+                    // (a hole nothing will ever fill).
+                    for point in request.start_ts.0..request.end_ts.0 {
+                        let in_gap = gaps
+                            .iter()
+                            .any(|g| g.start_ts.0 <= point && point < g.end_ts.0);
+                        let is_owned = owned
+                            .iter()
+                            .any(|o| o.start_ts.0 <= point && point < o.end_ts.0);
+                        prop_assert_ne!(
+                            in_gap,
+                            is_owned,
+                            "point {} is {} (owned {:?}, gaps {:?})",
+                            point,
+                            if in_gap {
+                                "both owned and a gap"
+                            } else {
+                                "neither owned nor a gap"
+                            },
+                            owned,
+                            gaps
+                        );
+                    }
+                    Ok(())
+                })
+                .expect("coverage interval algebra holds");
+        }
     }
 
     // ----------------------------------------------------------- manifest id

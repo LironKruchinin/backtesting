@@ -233,6 +233,7 @@ when the code that uses them lands**, never speculatively. Blessed set:
 | `proptest` | dev | property tests (accounting invariants) |
 | `anyhow` | cli/bins | error context |
 | `thiserror` | libs | error enums |
+| `dotenvy` | **bin targets** only | `.env` → process environment (D-0022) |
 
 Anything else: propose it with a one-line justification and add a
 `docs/DECISIONS.md` entry when adopted. Pin minor versions. When a blessed
@@ -281,7 +282,9 @@ While working:
 
 Hard NEVERs (in addition to §2):
 - Never commit market data, `results/`, or anything matching `.gitignore`'s
-  data patterns. Never hardcode or log `DATABENTO_API_KEY` (env only).
+  data patterns — including `.env`, which is where the API key now lives
+  locally (D-0022). Never hardcode or log `DATABENTO_API_KEY`: it is read
+  from the process environment, at the last moment, by bin targets only.
 - Never mutate or delete files under the raw archive (`raw/`) from code.
 - Never add a dependency outside §6 without asking.
 - Never weaken a lint, delete a failing test, or loosen a golden value to
@@ -330,23 +333,27 @@ cargo clippy --all-targets -- -D warnings       # CI-equivalent lint
 cargo fmt --all                                 # format
 cargo run -p crucible-cli -- demo               # the vertical slice
 cargo run -p crucible-cli -- demo --hash-only   # determinism hash (CI gate)
+cargo run -p crucible-cli -- env                # what .env/env actually resolved to
 ```
 
 ---
 
 ## 11. Status snapshot
 
-**M0 complete** (2026-07-24): workspace + core types with availability
-invariant; deterministic engine (fills→mark→decide loop, integer
-accounting); `free_fills`/`spread_cross`; SMA/EMA/Bollinger + `SmaCross`;
-seeded synthetic feeds; golden + determinism + hand-computed indicator
-tests; CI with determinism gate; decision log D-0001…D-0013; module-doc
-specs for all of M1/M3.
+**M0 complete** (2026-07-24). **M1 in progress** — data foundation.
 
-**Next: M1** — data foundation. Entry point: `crucible-data::ingest` and
-`::catalog` module docs, then `docs/MILESTONES.md` M1 checklist. Note the
-rolling-window archival deadlines described in `ingest` — the monthly pull
-is time-sensitive by design.
+*What is done lives in exactly one place:* the checkboxes in
+`docs/MILESTONES.md`. This section deliberately does not restate them — two
+copies of the same state means one is lying by next week, and §8 makes every
+session read a stale snapshot first. Tick the checkbox in the commit that
+does the work.
+
+Where to start reading in M1: the `crucible-data::catalog` module docs (the
+archive/manifest contract — implemented), then `crucible-data::ingest`
+(still spec-only). Note the rolling-window archival deadlines described in
+`ingest` — the monthly pull is time-sensitive by design. Unimplemented
+modules still carry their spec in `//!` docs; `docs/DECISIONS.md` is the
+source of truth for why anything looks the way it does.
 
 Known open questions (decide when reached, log when decided): margin
 modeling (M2); multi-instrument portfolio accounting (post-M4); Welford vs

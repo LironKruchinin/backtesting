@@ -64,6 +64,38 @@ under two fill models and prints the comparison. The punchline is the point:
 the data is a random walk, so the honest line should lose — an engine change
 that makes the demo profitable under costs introduced a bug, not an edge.
 
+The demo needs no configuration at all. Real data does:
+
+## Configuration
+
+Two environment variables, neither with a default:
+
+| Variable | Meaning |
+|---|---|
+| `DATABENTO_API_KEY` | Databento API key. Read from the environment by bin targets only, never passed as an argument or written to a config, manifest, or log. |
+| `CRUCIBLE_DATA_DIR` | Archive root (`raw/`, `curated/`, `manifest.jsonl`). Must live **outside** the repo — it grows to 16 years of bars plus rolling L1/L2/L3 windows. |
+
+Export them in your shell, or put them in a `.env` at the repo root — it is
+gitignored, and a real environment variable always beats the file, so CI
+secrets and one-off overrides keep working:
+
+```dotenv
+DATABENTO_API_KEY=db-your-key-here
+CRUCIBLE_DATA_DIR=E:/crucible-data
+```
+
+**Windows paths:** a backslash starts an escape sequence in dotenv syntax.
+Use forward slashes (`E:/crucible-data`) or single quotes
+(`'E:\crucible-data'`); a bare `E:\crucible-data` is a parse error, and the
+binary exits rather than starting up half-configured.
+
+Check what actually resolved — presence and length for the key, never its
+value:
+
+```bash
+cargo run -p crucible-cli -- env
+```
+
 ## Workspace layout
 
 | Crate | Role |

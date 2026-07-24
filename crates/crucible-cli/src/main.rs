@@ -3,7 +3,21 @@
 //! v0 ships one real command, `demo`, which runs the reference strategy on a
 //! seeded random walk under two fill models. It exists to prove the vertical
 //! slice end-to-end, to show the cost-of-costs lesson in one screen, and to
-//! give CI a determinism hash (`demo --hash-only`).
+//! give CI a determinism hash (`demo --hash-only`). `env` reports what the
+//! process environment looks like, so a misconfigured key is found before a
+//! download is paid for rather than after.
+//!
+//! ## Environment (D-0022)
+//!
+//! This is a **bin target**, so it owns environment resolution: [`main`]
+//! loads `.env` into the process environment before dispatching, and library
+//! crates keep reading plain `std::env` (or, better, take resolved values as
+//! arguments — `Catalog::open` takes a `PathBuf`, never a variable name).
+//! Real environment variables always win over the file. The values that
+//! matter are `DATABENTO_API_KEY` and `CRUCIBLE_DATA_DIR`; neither has a
+//! default, and the key is never printed, logged, or passed as an argument.
+
+use std::path::{Path, PathBuf};
 
 use crucible_core::prelude::*;
 use crucible_data::SyntheticFeed;
@@ -16,12 +30,18 @@ const DEMO_SEED: u64 = 42;
 const DEMO_BARS: usize = 100_000;
 
 fn main() {
+    // First statement in the process: every command below (and every crate it
+    // calls) must see the same environment, and `set_var` is only sound while
+    // we are still single-threaded.
+    let env_file = load_env_file();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("demo") => {
             let hash_only = args.iter().any(|a| a == "--hash-only");
             demo(hash_only);
         }
+        Some("env") => env_report(env_file.as_deref()),
         Some("help") | None => help(),
         Some(other) => {
             eprintln!("unknown command: {other}\n");
@@ -31,13 +51,87 @@ fn main() {
     }
 }
 
+/// Loads `.env` (searching the working directory and its parents) into the
+/// process environment, returning the file that was used.
+///
+/// Precedence is deliberate: `dotenvy` never overwrites a variable that is
+/// already set, so a real environment variable — a CI secret, a `$env:` you
+/// exported for one command — always beats the file. A missing file is
+/// normal (the environment alone is a complete configuration). A file that
+/// exists but does not parse is **fatal**: `dotenvy` stops at the bad line
+/// having already applied the good ones, and a half-loaded secrets file is
+/// exactly the silent misconfiguration CLAUDE.md §5.5 refuses to tolerate in
+/// configs.
+fn load_env_file() -> Option<PathBuf> {
+    match dotenvy::dotenv() {
+        Ok(path) => Some(path),
+        Err(err) if err.not_found() => None,
+        Err(err) => {
+            eprintln!("error: .env exists but could not be loaded: {err}");
+            eprintln!(
+                "       it is applied line by line, so a partial load would leave the process\n\
+                 \x20      half-configured. Fix the file (KEY=value, one per line) and retry."
+            );
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Reports what the environment looks like *after* `.env` is applied, so a
+/// missing or mangled key is found here rather than halfway through a paid
+/// download.
+///
+/// `CRUCIBLE_DATA_DIR` is a path, not a secret, and is printed in full.
+/// `DATABENTO_API_KEY` is never printed — only its presence and length,
+/// which is enough to catch the classic "I pasted the surrounding quotes"
+/// error without putting key material in a terminal scrollback.
+fn env_report(env_file: Option<&Path>) {
+    match env_file {
+        Some(path) => println!("env file: {}", path.display()),
+        None => println!("env file: none found (using the process environment only)"),
+    }
+    println!();
+
+    match std::env::var("DATABENTO_API_KEY") {
+        Ok(key) if !key.is_empty() => {
+            println!(
+                "  DATABENTO_API_KEY  set, {} chars (value never printed)",
+                key.chars().count()
+            );
+        }
+        _ => println!("  DATABENTO_API_KEY  NOT SET — `pull` cannot authenticate without it"),
+    }
+
+    match std::env::var("CRUCIBLE_DATA_DIR") {
+        Ok(dir) if !dir.is_empty() => {
+            println!("  CRUCIBLE_DATA_DIR  {dir}");
+            if !Path::new(&dir).is_dir() {
+                println!(
+                    "                     ^ not a directory yet — the catalog refuses a missing\n\
+                     \x20                      data dir rather than treating it as an empty archive"
+                );
+            }
+        }
+        _ => println!(
+            "  CRUCIBLE_DATA_DIR  NOT SET — the archive root has no default, and must live\n\
+             \x20                    outside the repo"
+        ),
+    }
+}
+
 fn help() {
     println!(
         "crucible — a backtesting engine designed to reject strategies\n\n\
          USAGE:\n  crucible <command>\n\n\
          COMMANDS:\n\
          \x20 demo [--hash-only]   run the reference SMA-cross demo on synthetic data\n\
+         \x20 env                  show which environment variables are configured\n\
          \x20 help                 show this message\n\n\
+         ENVIRONMENT:\n\
+         \x20 DATABENTO_API_KEY    Databento API key (never passed as an argument)\n\
+         \x20 CRUCIBLE_DATA_DIR    archive root; must live OUTSIDE the repo\n\
+         \x20 Both may be set in a .env file at the repo root; real environment\n\
+         \x20 variables take precedence over it. .env is gitignored — never commit it.\n\n\
          PLANNED (see docs/MILESTONES.md):\n\
          \x20 pull        M1  batch-download entitled Databento windows into the archive\n\
          \x20 transcode   M1  DBN -> curated Parquet\n\
