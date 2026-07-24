@@ -25,8 +25,10 @@ deadline-driven (see `crucible-data::ingest` module docs).
       what is actually requested, so nothing is paid for twice
 - [ ] Bootstrap pulls: 16y `ohlcv-1s`/`ohlcv-1m` + `definition` for the
       starting symbol set (ES first; NQ/RTY when cross-instrument checks land)
-- [ ] Monthly archival job for the rolling L1/L2/L3 windows (documented cron;
-      later automated)
+- [ ] Monthly archival job for the rolling L1/L3 windows — `trades`, `tbbo`,
+      `mbo`; `mbp-10` deliberately excluded (D-0023). Documented cron, later
+      automated; runs `--max-cost-usd 0.00` so it refuses rather than bills
+      if the entitlement lapses
 - [ ] `crucible transcode`: DBN → curated Parquet, partitioned, versioned
 - [ ] `ParquetBarFeed` implementing `Feed` (mmap'd, availability-ordered)
 - [ ] Session calendar v1 (Globex sessions, holidays, `bars_per_year`)

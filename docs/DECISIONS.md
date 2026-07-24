@@ -113,3 +113,33 @@ propose a superseding entry — don't silently diverge.
   Windows note: a backslash starts an escape sequence in dotenv syntax, so
   `E:/crucible-data` or `'E:\crucible-data'`, never bare `E:\crucible-data`
   (pinned by `crucible-cli/tests/env_file.rs`).
+- **D-0023** (2026-07-24) — The archive is acquired inside **one Databento
+  Standard month** ($199), not incrementally metered, and `mbp-10` is dropped
+  from the recurring monthly job. Quotes verified that day against
+  `GLBX.MDP3`: the bootstrap list is ~53 GiB / ~$1,901 at pay-as-you-go
+  rates, and Standard *includes* unlimited historical inside its windows
+  (L0 16y, L1 12mo, L2/L3 1mo) rather than metering on top, so one
+  subscription month buys the lot; the recurring job afterwards is ~$63/month
+  metered, below the $199 subscription, so we unsubscribe until M4 needs the
+  live feed. Why (cost shape): unit prices are per GB and *aggregates are
+  dearest* — `ohlcv-1s` and `ohlcv-1m` are both $70/GB — so 16y of 1s bars is
+  $1,377, more than every L1/L2/L3 tier combined. The expensive thing is
+  one-second bars, not the order book, which is the opposite of what tier
+  names suggest and the reason this is written down. Why (`mbp-10`): `mbo` is
+  the strictly richer L3 book and is what M4's queue model calibrates
+  against, at 16.5 GiB/month against `mbp-10`'s 86.5 — five times the disk
+  for a derivable view, and ~1 TB/year against a 1.4 TB drive. Consequence:
+  the subscription is a 30-day clock against a large batch run, so `pull`
+  must be finished and unattended-capable *before* it starts, and no data is
+  bought until then. Prices drift; re-derive with `pull --dry-run` rather
+  than trusting the table in `ingest`'s module docs.
+- **D-0024** (2026-07-24) — `pull` defaults to a **dry run**: it quotes
+  `get_cost` / `get_billable_size` per job, coverage-subtracted, and exits
+  without spending; spending needs an explicit opt-in flag and honours a
+  `--max-cost-usd` cap that hard-errors rather than proceeding. Why: the
+  original `ingest` spec had no pre-purchase cost gate at all, while the
+  archive's only cost control (`Catalog::coverage`, D-0020) prevents paying
+  *twice* and says nothing about the price of paying *once*. It also makes
+  the quote path the free, fully testable part of `pull` — coverage
+  subtraction can be proven end to end for $0.00 before it is trusted to
+  guard four figures of entitlement.
