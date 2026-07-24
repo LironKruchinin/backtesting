@@ -1,0 +1,16 @@
+[package]
+name = "crucible-engine"
+description = "Single-threaded, deterministic event replay: portfolio accounting, fill models, metrics. Parallelism lives in crucible-funnel, never here."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+crucible-core = { path = "../crucible-core" }
+
+[dev-dependencies]
+crucible-data = { path = "../crucible-data" }
+crucible-strategies = { path = "../crucible-strategies" }
+
+[lints]
+workspace = true

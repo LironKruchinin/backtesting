@@ -1,0 +1,41 @@
+# Crucible — an event-driven backtesting engine designed to reject strategies.
+# Workspace manifest. Crate-level manifests live in crates/*/Cargo.toml.
+#
+# Dependency policy: see CLAUDE.md §6. The skeleton is intentionally
+# dependency-free (pure std) so `cargo check` is instant. Blessed crates are
+# added per-milestone, never speculatively.
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/crucible-core",
+    "crates/crucible-data",
+    "crates/crucible-engine",
+    "crates/crucible-strategies",
+    "crates/crucible-funnel",
+    "crates/crucible-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["Liron Kruch <lironkruch@gmail.com>"]
+repository = "https://github.com/CHANGEME/crucible"
+
+[workspace.lints.rust]
+# Correctness-first engine: no unsafe anywhere, ever. See CLAUDE.md §2.
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+# .unwrap() is banned in non-test code. Use `?`, or `.expect("INVARIANT: ...")`
+# with a message explaining why failure is impossible. See CLAUDE.md §5.
+unwrap_used = "deny"
+
+# Financial accounting must never silently wrap. The ~1% perf cost of overflow
+# checks in release builds is an accepted trade (docs/DECISIONS.md D-0004).
+[profile.release]
+overflow-checks = true
+
+[profile.bench]
+overflow-checks = true

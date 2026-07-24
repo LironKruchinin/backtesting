@@ -1,0 +1,12 @@
+[package]
+name = "crucible-strategies"
+description = "Streaming indicators and strategy implementations. Depends only on crucible-core."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+crucible-core = { path = "../crucible-core" }
+
+[lints]
+workspace = true

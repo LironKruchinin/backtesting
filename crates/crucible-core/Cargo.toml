@@ -1,0 +1,13 @@
+[package]
+name = "crucible-core"
+description = "Domain types, events, and traits shared by every Crucible crate. Zero I/O, zero dependencies."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# This crate must stay dependency-free. If you think it needs a dependency,
+# the code you're writing probably belongs in another crate. See CLAUDE.md §3.
+[dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,23 @@
+[package]
+name = "crucible-cli"
+description = "Command-line entry point. Thin: parses args, wires crates together, prints."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "crucible"
+path = "src/main.rs"
+
+[dependencies]
+crucible-core = { path = "../crucible-core" }
+crucible-data = { path = "../crucible-data" }
+crucible-engine = { path = "../crucible-engine" }
+crucible-funnel = { path = "../crucible-funnel" }
+crucible-strategies = { path = "../crucible-strategies" }
+
+# M1+: clap (derive) for real arg parsing; anyhow for error context in main.
+# Hand-rolled matching is fine only while `demo` is the sole command.
+
+[lints]
+workspace = true

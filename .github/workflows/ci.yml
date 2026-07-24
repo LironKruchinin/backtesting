@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --all-targets --workspace -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace
+
+      # Determinism gate: the demo backtest must produce bit-identical results
+      # across two runs. Any nondeterminism in the engine fails CI.
+      - name: Determinism smoke test
+        run: |
+          A=$(cargo run -q -p crucible-cli -- demo --hash-only)
+          B=$(cargo run -q -p crucible-cli -- demo --hash-only)
+          test "$A" = "$B" && echo "deterministic: $A"

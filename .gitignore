@@ -1,0 +1,25 @@
+# Build
+/target
+**/*.rs.bk
+
+# Market data is NEVER committed (size + licensing). The archive lives outside
+# git; its location is configured via CRUCIBLE_DATA_DIR. See CLAUDE.md §8.
+/data
+*.dbn
+*.dbn.zst
+*.parquet
+*.duckdb
+
+# Research outputs (regenerable from configs + archive)
+/results
+/reports
+
+# Secrets — API keys come from the environment, never from files in the repo.
+.env
+.env.*
+
+# Editor noise
+.vscode/
+.idea/
+*.swp
+.DS_Store

@@ -1,0 +1,20 @@
+[package]
+name = "crucible-funnel"
+description = "Research orchestration: grid expansion, parallel scheduling, funnel stages, overfitting statistics, trial registry, scorecards."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+crucible-core = { path = "../crucible-core" }
+
+# --- Milestone M3 additions (do not add before implementing; CLAUDE.md §6) ---
+# crucible-engine     = { path = "../crucible-engine" }
+# crucible-strategies = { path = "../crucible-strategies" }
+# rayon  = "..."      # run-level parallelism (the ONLY place threads are spawned)
+# duckdb = "..."      # results store + trial registry
+# serde / toml        # config parsing (deny_unknown_fields everywhere)
+# blake3 = "..."      # canonical config hashes
+
+[lints]
+workspace = true

@@ -1,0 +1,20 @@
+[package]
+name = "crucible-data"
+description = "Data acquisition, archive/catalog, calendars, continuous contracts, and synthetic feeds."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+crucible-core = { path = "../crucible-core" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+blake3 = "1.8"
+
+# --- Milestone M1 additions (do not add before implementing; CLAUDE.md §6) ---
+# databento = "..."   # official client; async — tokio stays CONFINED to this crate's bin targets
+# dbn = "..."         # DBN decoding
+# polars = "..."      # Parquet read/write + transcode (lazy, feature-gated)
+
+[lints]
+workspace = true

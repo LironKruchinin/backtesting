@@ -1,0 +1,5 @@
+[toolchain]
+# Pin to stable. If you need to bump, bump deliberately and record it in
+# docs/DECISIONS.md — toolchain drift between sessions breaks reproducibility.
+channel = "stable"
+components = ["rustfmt", "clippy"]

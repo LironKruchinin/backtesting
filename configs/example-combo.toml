@@ -1,0 +1,68 @@
+# Reference config: Bollinger mean-reversion gated by an EMA trend filter.
+# This file is the canonical example of the config schema (parsed from M2;
+# see crucible-strategies::combo and crucible-funnel::grid module docs).
+#
+# Parsing rules (CLAUDE.md §5.5):
+# - unknown fields are a HARD ERROR (deny_unknown_fields) — typos must not
+#   silently become no-ops in a research pipeline
+# - every config declares schema_version and a hypothesis_family
+# - ranges: { start, end, step } (inclusive) or explicit lists
+
+schema_version = 1
+
+[meta]
+name = "bb-meanrev-ema-filter"
+# Trial-registry key: every run under this family increments the trial count
+# that feeds the deflated Sharpe. Choose the family honestly — it should
+# cover the whole idea, not one parameterization of it.
+hypothesis_family = "es-meanrev-bb"
+# One sentence. If you can't write it, the idea isn't ready to test.
+economic_rationale = "Short-horizon overreaction in ES mean-reverts intraday except in strong trends; the EMA filter avoids fighting the trend."
+
+[universe]
+instruments = ["ES.v.0"]   # volume-rolled continuous; raw contracts also valid
+timeframes = ["5m"]
+
+[data]
+source = "curated"          # "curated" | "synthetic:seed=42" (null harness)
+start = "2012-01-01"
+end = "2026-06-30"
+
+[indicators.bb]
+kind = "bollinger"
+period = { start = 10, end = 40, step = 5 }
+k = [1.5, 2.0, 2.5]
+
+[indicators.trend]
+kind = "ema"
+period = [100, 200]
+
+[rules]                      # M2 rule DSL, evaluated on completed bars only
+enter_long = "close < bb.lower and close > trend"
+exit_long = "close > bb.mid"
+enter_short = "close > bb.upper and close < trend"
+exit_short = "close < bb.mid"
+
+[execution]
+fill_model = "spread_cross"  # "free_fills" is only legal in stages s0/s1
+half_spread_ticks = 1
+fee_per_contract_usd = 1.25
+
+[walk_forward]
+scheme = "rolling"           # "rolling" | "anchored"
+train_months = 24
+test_months = 6
+
+[funnel]
+stages = ["s0", "s1", "s2", "s3"]
+cost_sensitivity_ticks = [0.0, 0.5, 1.0, 2.0]
+# Pre-registered kill criteria — written BEFORE running, judged by machines.
+min_oos_sharpe_after_costs = 0.5
+max_pbo = 0.5
+require_plateau = true
+kill_if_dead_at_ticks = 1.0
+
+[run]
+seed = 42
+initial_cash_usd = 100000
+qty_contracts = 1
