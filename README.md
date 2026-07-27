@@ -96,6 +96,43 @@ value:
 cargo run -p crucible-cli -- env
 ```
 
+## Acquiring data
+
+`pull` downloads entitled Databento windows into the archive. It is a **dry
+run by default**: it plans (subtracting what the manifest already records),
+prices every window through free metadata endpoints, prints the total, and
+exits without spending. Buying needs `--execute` *and* an explicit
+`--max-cost-usd`, which is compared in integer nanodollars and refuses rather
+than proceeding.
+
+The Databento client is behind a non-default feature, so ordinary builds and
+CI stay free of its dependency graph:
+
+```bash
+# Quote it. Costs nothing, can be run as often as you like.
+cargo run -p crucible-cli --features databento -- \
+  pull --dataset GLBX.MDP3 --schema ohlcv-1m --symbols ES.FUT \
+       --start 2024-01-01 --end 2024-02-01
+
+# Buy it, with a ceiling you chose.
+cargo run -p crucible-cli --features databento -- \
+  pull --dataset GLBX.MDP3 --schema ohlcv-1m --symbols ES.FUT \
+       --start 2024-01-01 --end 2024-02-01 --execute --max-cost-usd 1.00
+
+# Re-hash every archived file against the manifest.
+cargo run -p crucible-cli -- verify
+```
+
+Re-running the same command is always safe: intents are identified
+deterministically and reconciled against the vendor's own job list, so an
+interrupted pull resumes and never buys a window twice. Exit codes: `0` done,
+`2` usage, `3` refused to spend, `4` failed, `5` still in flight (re-run to
+resume).
+
+What to buy and what to refuse: [docs/DATA_PLAN.md](docs/DATA_PLAN.md). The
+ordered procedure for the subscription month:
+[docs/RUNBOOK_BLITZ.md](docs/RUNBOOK_BLITZ.md).
+
 ## Workspace layout
 
 | Crate | Role |
@@ -107,8 +144,10 @@ cargo run -p crucible-cli -- env
 | `crucible-funnel` | Grid expansion, parallel scheduling, funnel stages, overfitting stats, trial registry, scorecards. |
 | `crucible-cli` | `crucible` binary. |
 
-Status: **M0 (skeleton) complete** — vertical slice runs end-to-end with
-golden and determinism tests. Roadmap: [docs/MILESTONES.md](docs/MILESTONES.md).
+Status: **M0 (skeleton) complete**, **M1 (data foundation) in progress** —
+vertical slice runs end-to-end with golden and determinism tests, and
+`crucible pull` acquires real data into a checksummed, append-only archive.
+Roadmap: [docs/MILESTONES.md](docs/MILESTONES.md).
 Working conventions and invariants: [CLAUDE.md](CLAUDE.md). Decision log:
 [docs/DECISIONS.md](docs/DECISIONS.md).
 

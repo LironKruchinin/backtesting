@@ -20,26 +20,33 @@ deadline-driven (see `crucible-data::ingest` module docs).
 - [x] Archive catalog (`crucible-data::catalog`, 2026-07-24): append-only
       `manifest.jsonl`, blake3 checksums as manifest ids, per-symbol coverage
       (requested minus owned), integrity `verify`, hard-error load validation
-- [ ] `crucible pull`: Databento batch download → `raw/` (`.dbn.zst`), each
-      slice recorded through `Catalog::append`; `Catalog::coverage` decides
-      what is actually requested, so nothing is paid for twice
+- [x] `crucible pull` (2026-07-26): Databento batch download → `raw/`
+      (`.dbn.zst`), each slice recorded through `Catalog::append`;
+      `Catalog::coverage` decides what is actually requested, so nothing is
+      paid for twice
       - [x] Quote path (`ingest::{plan,quote}`, 2026-07-24): coverage-subtracted
             month-aligned planning, live dataset-range clipping, per-window
             `get_cost`/`get_billable_size`, exact nano-USD spending gate,
             metered-vs-billed entitlement check. Spends nothing; no caller for
             `BatchProvider::submit` yet
-      - [ ] Execute path: submit → poll → download → verify → append, with a
-            crash-resumable job journal outside `raw/`
-      - [ ] `ManifestRecord.symbols` = requested key ∪ raw symbols observed in
+      - [x] Execute path (`ingest::{execute,journal,databento}`, 2026-07-26):
+            submit → poll → download → verify → append, with a crash-resumable
+            job journal outside `raw/`, a single-instance pull lock, and
+            vendor-side reconciliation so a lost journal cannot buy twice
+            (D-0028..D-0035)
+      - [x] `ManifestRecord.symbols` = requested key ∪ raw symbols observed in
             the delivered DBN metadata (the assumption the validation slice
             exists to prove)
-      - [ ] CLI wiring: `clap`, `--execute`, `--max-cost-usd`, exit codes
-- [ ] Bootstrap pulls: 16y `ohlcv-1s`/`ohlcv-1m` + `definition` for the
-      starting symbol set (ES first; NQ/RTY when cross-instrument checks land)
+      - [x] CLI wiring: `clap`, `--execute`, `--max-cost-usd`, exit codes
+            (0 done / 2 usage / 3 refused / 4 failed / 5 resumable)
+- [ ] Bootstrap pulls: 16y `ohlcv-1s`/`ohlcv-1m` + `definition` + `statistics`
+      for the seven-parent basket in `docs/DATA_PLAN.md` — the acquisition
+      itself, run against a live Standard subscription per
+      `docs/RUNBOOK_BLITZ.md`. Tooling is done; this box is the shopping trip
 - [ ] Monthly archival job for the rolling L1/L3 windows — `trades`, `tbbo`,
-      `mbo`; `mbp-10` deliberately excluded (D-0023). Documented cron, later
-      automated; runs `--max-cost-usd 0.00` so it refuses rather than bills
-      if the entitlement lapses
+      `mbo`; `mbp-10` deliberately excluded (D-0023). Documented cron in
+      `docs/RUNBOOK_BLITZ.md`, later automated; runs `--max-cost-usd 0.00` so
+      it refuses rather than bills if the entitlement lapses
 - [ ] `crucible transcode`: DBN → curated Parquet, partitioned, versioned
 - [ ] `ParquetBarFeed` implementing `Feed` (mmap'd, availability-ordered)
 - [ ] Session calendar v1 (Globex sessions, holidays, `bars_per_year`)

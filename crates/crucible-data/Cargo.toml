@@ -5,15 +5,34 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Everything that talks to Databento. Non-default (D-0025): a plain build of
+# this crate stays pure-std plus serde/blake3, `cargo check` stays instant, and
+# `.await` exists in exactly one file. CI builds `--all-features` so the gated
+# module cannot rot unnoticed.
+databento = ["dep:databento", "dep:tokio", "dep:sha2", "dep:time"]
+
 [dependencies]
 crucible-core = { path = "../crucible-core" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 blake3 = "1.8"
 
+# Acquisition. Async; reached only through the sync `ingest::BatchProvider`
+# seam in `ingest::databento`, which owns a private current-thread runtime.
+# DBN decoding comes from this crate's `databento::dbn` re-export rather than a
+# separately pinned `dbn`, so the client and the decoder cannot drift apart.
+databento = { version = "0.55", optional = true }
+tokio = { version = "1.53", features = ["rt", "time", "net"], optional = true }
+# Verifying a delivered file against the vendor's published digest before it
+# is allowed into the immutable archive.
+sha2 = { version = "0.11", optional = true }
+# Not a choice: the Databento API spells its timestamps `time::OffsetDateTime`,
+# so the adapter has to name the type to convert them to `Ts` nanoseconds. It
+# appears nowhere outside `ingest::databento`.
+time = { version = "0.3", optional = true }
+
 # --- Milestone M1 additions (do not add before implementing; CLAUDE.md §6) ---
-# databento = "..."   # official client; async — tokio stays CONFINED to this crate's bin targets
-# dbn = "..."         # DBN decoding
 # polars = "..."      # Parquet read/write + transcode (lazy, feature-gated)
 
 [dev-dependencies]

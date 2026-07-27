@@ -11,9 +11,13 @@
 //! inconsistent plan all stop the run. The cost of a false refusal is a
 //! re-run; the cost of a false proceed is money.
 
+use std::path::PathBuf;
+
 use crate::catalog::{CatalogError, TsRange};
+use crate::ingest::delivery::DeliveryError;
+use crate::ingest::journal::JournalError;
 use crate::ingest::money::{MoneyError, format_usd};
-use crate::ingest::provider::ProviderError;
+use crate::ingest::provider::{JobState, ProviderError};
 use crucible_core::types::NanoUsd;
 
 /// Why a pull could not be planned, quoted, or authorised.
@@ -77,6 +81,91 @@ pub enum IngestError {
     },
     /// Execution was requested without an explicit spending cap.
     ExecuteWithoutCap,
+
+    /// The job journal could not be read or written.
+    Journal(JournalError),
+    /// A delivered file did not check out.
+    Delivery(DeliveryError),
+    /// Filesystem failure during the execute path.
+    Io {
+        /// What we were doing.
+        during: &'static str,
+        /// Path involved.
+        path: PathBuf,
+        /// Underlying failure.
+        source: std::io::Error,
+    },
+
+    /// Another `pull` holds the execute lock on this archive.
+    PullLockHeld {
+        /// Lock file whose holder must finish first.
+        path: PathBuf,
+    },
+    /// The vendor rejected a submission.
+    SubmitFailed {
+        /// Window that was being bought.
+        target_file_path: String,
+        /// The underlying provider failure.
+        source: ProviderError,
+    },
+    /// More than one vendor job matches a window we were about to buy.
+    ///
+    /// Refusing is the only safe answer: adopting the wrong one archives the
+    /// wrong bytes, and submitting anyway buys a window we already own.
+    AmbiguousReconciliation {
+        /// Window that could not be resolved.
+        target_file_path: String,
+        /// Candidate job ids, sorted.
+        job_ids: Vec<String>,
+    },
+    /// A job did not finish within the time the operator allowed.
+    ///
+    /// Not a failure of the purchase — the job is recorded and its output
+    /// stays downloadable — so the remedy is to run the same command again.
+    PollTimedOut {
+        /// Vendor batch job id, already journalled.
+        job_id: String,
+        /// Window being waited on.
+        target_file_path: String,
+        /// State the job was in when we stopped waiting.
+        last_state: JobState,
+        /// How long we waited.
+        waited_secs: u64,
+    },
+    /// A job's download window closed before we collected it.
+    JobExpired {
+        /// Vendor batch job id.
+        job_id: String,
+        /// Window that was lost.
+        target_file_path: String,
+    },
+    /// The job delivered something other than exactly one payload file.
+    UnexpectedDelivery {
+        /// Vendor batch job id.
+        job_id: String,
+        /// Window being collected.
+        target_file_path: String,
+        /// How many `.dbn.zst` files the job listed.
+        data_file_count: usize,
+        /// The file names, for the operator to look at.
+        detail: String,
+    },
+    /// A delivered file is not the length the vendor said it would be.
+    DeliverySizeMismatch {
+        /// Vendor batch job id.
+        job_id: String,
+        /// Delivered file name.
+        filename: String,
+        /// Length the vendor published.
+        expected_bytes: u64,
+        /// Length actually on disk.
+        actual_bytes: u64,
+    },
+    /// A file already occupies the archive path this window would take.
+    DestinationOccupied {
+        /// Relative archive path.
+        file_path: String,
+    },
 }
 
 impl core::fmt::Display for IngestError {
@@ -135,6 +224,94 @@ impl core::fmt::Display for IngestError {
                 "--execute requires an explicit --max-cost-usd. A default \
                  spending cap is a number nobody chose"
             ),
+
+            IngestError::Journal(e) => write!(f, "job journal: {e}"),
+            IngestError::Delivery(e) => write!(f, "delivered file: {e}"),
+            IngestError::Io {
+                during,
+                path,
+                source,
+            } => write!(f, "while {during} at {}: {source}", path.display()),
+
+            IngestError::PullLockHeld { path } => write!(
+                f,
+                "another pull is running against this archive (lock: {}). \
+                 Two pulls that plan the same window would each find nothing \
+                 submitted and each submit it — wait for the other to finish",
+                path.display()
+            ),
+            IngestError::SubmitFailed {
+                target_file_path,
+                source,
+            } => write!(
+                f,
+                "submitting {target_file_path} failed: {source}. The intent is \
+                 journalled; re-run to reconcile it against the vendor's job \
+                 list before anything is submitted again"
+            ),
+            IngestError::AmbiguousReconciliation {
+                target_file_path,
+                job_ids,
+            } => write!(
+                f,
+                "cannot tell which vendor job covers {target_file_path}: {} \
+                 candidates ({}). Refusing — adopting the wrong one archives \
+                 the wrong bytes, and submitting buys a window twice. Inspect \
+                 them in the Databento portal and record the right one",
+                job_ids.len(),
+                job_ids.join(", ")
+            ),
+            IngestError::PollTimedOut {
+                job_id,
+                target_file_path,
+                last_state,
+                waited_secs,
+            } => write!(
+                f,
+                "job {job_id} for {target_file_path} was still {last_state} \
+                 after {waited_secs}s. It is paid for, recorded, and stays \
+                 downloadable for 30 days from submission — re-run the same \
+                 command to resume; nothing will be submitted again"
+            ),
+            IngestError::JobExpired {
+                job_id,
+                target_file_path,
+            } => write!(
+                f,
+                "job {job_id} for {target_file_path} has expired and can no \
+                 longer be downloaded. Re-buying it costs money, so it needs \
+                 --repurchase-expired to say so explicitly"
+            ),
+            IngestError::UnexpectedDelivery {
+                job_id,
+                target_file_path,
+                data_file_count,
+                detail,
+            } => write!(
+                f,
+                "job {job_id} delivered {data_file_count} payload file(s) for \
+                 {target_file_path}, expected exactly 1 ({detail}). The \
+                 archive stores one file per window; nothing was placed. The \
+                 job stays downloadable, so this is recoverable"
+            ),
+            IngestError::DeliverySizeMismatch {
+                job_id,
+                filename,
+                expected_bytes,
+                actual_bytes,
+            } => write!(
+                f,
+                "{filename} from job {job_id} is {actual_bytes} bytes; the \
+                 vendor said {expected_bytes}. A short read that reached the \
+                 archive would be hashed and then certified by the manifest \
+                 as the real thing — refusing"
+            ),
+            IngestError::DestinationOccupied { file_path } => write!(
+                f,
+                "{file_path} already exists in the archive. Raw is immutable \
+                 (D-0017): corrections are new acquisitions at new paths, \
+                 never overwrites"
+            ),
         }
     }
 }
@@ -144,10 +321,26 @@ impl std::error::Error for IngestError {
         match self {
             IngestError::Catalog(e) => Some(e),
             IngestError::Money(e) => Some(e),
+            IngestError::Journal(e) => Some(e),
+            IngestError::Delivery(e) => Some(e),
+            IngestError::Io { source, .. } => Some(source),
             IngestError::Provider { source, .. }
-            | IngestError::CostQuoteUnavailable { source, .. } => Some(source),
+            | IngestError::CostQuoteUnavailable { source, .. }
+            | IngestError::SubmitFailed { source, .. } => Some(source),
             _ => None,
         }
+    }
+}
+
+impl From<JournalError> for IngestError {
+    fn from(e: JournalError) -> IngestError {
+        IngestError::Journal(e)
+    }
+}
+
+impl From<DeliveryError> for IngestError {
+    fn from(e: DeliveryError) -> IngestError {
+        IngestError::Delivery(e)
     }
 }
 

@@ -184,3 +184,120 @@ propose a superseding entry — don't silently diverge.
   the recurring archival job run at `--max-cost-usd 0.00`: it proceeds while
   the subscription entitles the data at zero and refuses the month the
   entitlement lapses, instead of quietly billing for it.
+- **D-0028** (2026-07-26) — **One batch job = one window = one archive file =
+  one manifest row.** Submissions pin `split_duration=none`, `split_size=None`,
+  `split_symbols=false`; a delivery that is not exactly one `.dbn.zst` is a
+  hard error. `PullRequest.window_span` chooses how wide a window is:
+  `Month` (the recurring cron) or `Whole` (one window per contiguous coverage
+  gap — the bootstrap backfill). `BatchProvider::dataset_range` also gains a
+  `schema` argument, because availability is per schema, not per dataset.
+  Why: verified against the vendor docs the same day — batch jobs have **no
+  documented size limit**, are processed **one at a time in a FIFO queue** (so
+  sharding buys no parallelism whatsoever), are capped at **20 submissions per
+  minute per IP**, and have no idempotency key, no cancel, and no refund. At
+  month granularity the 16-year backfill is 7 parents × 4 schemas × 193 months
+  = 5,404 separate purchases; `Whole` makes it ~28. Fewer jobs is fewer chances
+  to buy something twice. Why the split parameters: the vendor default is
+  `split_duration=day`, which would deliver ~31 files for one month and ~5,800
+  for one 16-year job, and the archive's path template names one file per
+  window. Rejected alternative: one large job with `split_duration=month`,
+  mapping delivered filenames back to windows — a month containing no data
+  yields no file, leaving a coverage hole that is re-bought forever. Why
+  per-schema ranges: on `GLBX.MDP3` everything starts 2010-06-06 except `mbo`,
+  which starts 2017-05-21; a dataset-wide answer leaves a 16-year `mbo`
+  request unclipped and quotes seven years of data that does not exist.
+- **D-0029** (2026-07-26) — A **job journal** (`jobs.jsonl` at the data-dir
+  root, framed exactly like the manifest — LF-only, fsynced, locked,
+  `deny_unknown_fields`, `schema_version`) records an `Intended` entry
+  **before** any submission, and every run reconciles the plan against
+  `batch.list_jobs` before submitting anything, even on a first attempt.
+  Identity is `intent_id` = blake3 over (dataset, schema, key, stype_in,
+  start_ts, end_ts) — deterministic and clock-free, so re-running the same
+  command recognises its own previous attempt. Matching is on civil dates
+  rather than raw nanoseconds, and **anything ambiguous refuses**: two
+  candidate jobs, or one whose symbology cannot be confirmed, stops the run
+  rather than guessing. Why: a submission is the only irreversible act in the
+  crate, and the vendor offers no idempotency key, no cancel, and no refund —
+  so a resubmit is simply a second purchase. What it does offer is a 30-day
+  download window measured *from submission*, which makes a job whose id we
+  still know always recoverable for free. Reconciling even without a journal
+  entry is what protects a run whose journal was deleted or never fsynced.
+  Adopting the wrong job archives the wrong bytes; submitting anyway buys the
+  window twice; refusing costs a re-run.
+- **D-0030** (2026-07-26) — `execute` holds an exclusive OS lock on
+  `pull.lock` for its whole duration (a second `pull` exits 2), and the
+  "destination already exists" refusal is **skipped for a resuming intent**
+  whose journal shows `Downloaded`: there the destination is re-hashed against
+  the vendor digest and the run proceeds straight to the manifest append.
+  Why the lock: the fold→reconcile→intend→submit sequence spans network calls,
+  so two pulls started seconds apart would each read an identical journal, each
+  find nothing submitted vendor-side, and each submit — a race the journal's
+  own append lock cannot prevent, because the race is between the submissions.
+  Why the exception: the crash window between renaming a verified payload into
+  `raw/` and recording it in the manifest is real, and the blanket refusal —
+  correct for a fresh intent, where `fs::rename` would silently replace an
+  archived file on Windows — would otherwise strand a paid, correctly-placed
+  file behind an error written for a different situation.
+- **D-0031** (2026-07-26) — A delivered file must match `BatchFileDesc.size`
+  exactly **and** hash to the vendor's published SHA-256 before it is renamed
+  into `raw/`. `sha2` is blessed as an optional dependency enabled by the
+  `databento` feature; `time` likewise, because the vendor API spells its
+  timestamps `time::OffsetDateTime` and the adapter must name the type. DBN
+  decoding comes from the **`databento::dbn` re-export**, not a separately
+  pinned `dbn`. Why: `Catalog::append` hashes whatever is on disk (D-0017), so
+  an unverified truncated download would be blake3'd, recorded, and thereafter
+  certified by the manifest as the real January slice — the manifest would be
+  lying with full ceremony. Why the re-export: a standalone `dbn` version can
+  drift from the client that produced the file, which is a decoding bug with
+  no upside.
+- **D-0032** (2026-07-26) — The execute path reaches the outside world through
+  three injectable seams: `BatchProvider` (the vendor), `DeliveryInspector`
+  (checksum and DBN symbols), and `Clock` (time and sleeping). **No
+  `SystemClock` exists in `crucible-data`** — the only implementation that
+  touches the OS lives in the `crucible-cli` bin target. Why: D-0015 pinned
+  `acquired_ts` as caller-supplied so library code never reads a clock, and
+  §2.2 bans `SystemTime::now` from result-affecting code; keeping the impl in
+  the bin honours both. The practical payoff is larger than the principle: with
+  all three faked, the whole state machine — poll loops, timeouts, checksum
+  refusals, every crash-resume path — is tested offline in microseconds, in a
+  default build with no vendor dependencies at all.
+- **D-0033** (2026-07-26) — `ManifestRecord.symbols` is the requested key
+  **plus** every raw symbol observed in the delivered DBN metadata, sorted and
+  deduped with the key first. Symbols the catalog would reject are **dropped
+  and reported loudly**, not refused. Why: recording only the key makes
+  `coverage("ESH4")` report an owned range as missing and re-buy it forever.
+  Why dropping rather than refusing: omitting a symbol only ever makes coverage
+  *understate* what we own — the cost is a re-purchase, never a silent gap —
+  whereas refusing the append would strand a file that has already been paid
+  for and correctly placed. Expect fat manifest lines: a 16-year `ES.FUT` pull
+  resolves to every outright and calendar spread in the window, so a record may
+  carry thousands of symbols. That is correct; coverage truthfulness outranks
+  tidiness, and filtering to outrights would reintroduce the re-buy bug.
+- **D-0034** (2026-07-26) — `clap` (derive) lands in `crucible-cli`; `pull` is
+  a dry run by default with `--dry-run` as an explicit no-op alias; exit codes
+  are **0** done, **2** usage/config, **3** refused to spend, **4** provider or
+  filesystem failure, **5** in flight and resumable. The `databento` feature is
+  non-default in both `crucible-data` and `crucible-cli`, and CI gains an
+  `--all-features` clippy + test pass. Why the alias: D-0023 says
+  `pull --dry-run` while D-0024 makes dry run the default; accepting the flag
+  reconciles them without a superseding entry. Why 5 is not 0: a cron that
+  reads "still processing" as success never comes back for data it paid for.
+  Why opt-in: default builds and the default CI gates stay free of the async
+  client's dependency graph (D-0025), and `cargo check` stays instant — but a
+  feature nothing compiles is a feature that rots, hence the second CI pass.
+- **D-0035** (2026-07-26) — Idempotent vendor calls retry on transport
+  failure (bounded, with backoff); **`submit` never does**. A 429 is retried
+  everywhere, including on `submit`. Why: the first live pull failed on the
+  first `get_job_details` with "connection closed before message completed" —
+  a stale pooled connection, and a direct consequence of D-0025's
+  current-thread runtime, since between `block_on` calls nothing drives
+  reqwest's background tasks and the poll loop leaves 15-second gaps for the
+  server to close a socket the pool then hands out anyway. Reading a job's
+  state costs nothing to repeat. A dropped connection on a *submission* is
+  ambiguous — the server may have accepted the job — so retrying it is exactly
+  the double purchase this milestone is built to prevent; it surfaces instead,
+  and the next run's reconciliation (D-0029) resolves it for free. A 429 is
+  safe everywhere because throttling means the request was rejected outright.
+  Rejected alternative: disabling connection pooling via the SDK's
+  `http_client_builder`, which needs `reqwest` as a directly pinned dependency
+  — the version skew D-0031 avoids for `dbn`.

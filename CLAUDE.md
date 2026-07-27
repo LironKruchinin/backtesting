@@ -228,9 +228,11 @@ when the code that uses them lands**, never speculatively. Blessed set:
 | `duckdb` | funnel only | registry/results store |
 | `serde`, `toml`, `serde_json` | funnel, data, cli | configs, manifest |
 | `blake3` | funnel, data | config identity, archive checksums |
-| `dbn` | data only | DBN decoding (sync) |
+| `dbn` | data only | DBN decoding (sync). Consumed via the `databento::dbn` **re-export**, never pinned separately — a decoder that drifts from the client that wrote the file is a silent bug (D-0031) |
 | `databento` | data, `databento` feature, `ingest::databento` only | acquisition; async |
 | `tokio` | data, `databento` feature, `ingest::databento` only | current-thread runtime behind the sync `BatchProvider` seam (D-0025) |
+| `sha2` | data, `databento` feature | verifying a delivery against the vendor's published digest before it enters the immutable archive (D-0031) |
+| `time` | data, `databento` feature, `ingest::databento` only | not a choice — the vendor API spells its timestamps `time::OffsetDateTime` |
 | `polars` | data only | Parquet transcode/QA. NEVER in engine. |
 | `chrono` + `chrono-tz` | data::calendar only | the one timezone-aware module |
 | `rand_chacha` | where seeded randomness is needed | resampling/permutation |
@@ -328,6 +330,25 @@ reference; supersede the decision if you disagree — don't hotfix.
   fixture for tests/demo, chosen for simplicity, not merit.
 - **Synthetic feed clamps prices at a floor**: keeps long random walks
   positive; documented in `synthetic.rs` (D-0011).
+- **`pull` exits 5 rather than 0 when jobs are still processing**: the data is
+  bought, journalled, and downloadable for 30 days — but a cron that reads
+  "still processing" as success never comes back for it (D-0034). Re-running
+  the identical command resumes and submits nothing twice.
+- **`pull` refuses when two vendor jobs match one window**: adopting the wrong
+  one archives the wrong bytes and submitting anyway buys the window twice, so
+  ambiguity stops the run (D-0029). Refusing costs a re-run; guessing costs
+  money or correctness.
+- **`submit` is never retried on a dropped connection, while every other
+  vendor call is**: a transport failure on a submission is ambiguous — the job
+  may exist — and the next run's reconciliation resolves it for free (D-0035).
+  Do not "fix" the inconsistency by retrying everything.
+- **Manifest lines can be tens of KB**: a 16-year parent pull resolves to every
+  outright and calendar spread in the window, and all of them are recorded so
+  `coverage` tells the truth per contract (D-0033). Filtering to outrights
+  reintroduces the re-buy bug.
+- **The archive keeps `staging/`, `delivery/`, `jobs.jsonl`, and `pull.lock`
+  beside `raw/`**: none are acquisitions, so none appear in the manifest.
+  `raw/` stays exactly what D-0017 says it is.
 
 ---
 
@@ -340,7 +361,20 @@ cargo fmt --all                                 # format
 cargo run -p crucible-cli -- demo               # the vertical slice
 cargo run -p crucible-cli -- demo --hash-only   # determinism hash (CI gate)
 cargo run -p crucible-cli -- env                # what .env/env actually resolved to
+cargo run -p crucible-cli -- verify             # re-hash the archive vs the manifest
+
+# The acquisition path. `--features databento` is required (D-0025); without
+# it `pull` exits 2 saying so. A pull is a DRY RUN by default and spends
+# nothing — `--execute` needs `--max-cost-usd` alongside it (D-0024).
+cargo clippy --all-targets --workspace --all-features -- -D warnings
+cargo test --workspace --all-features
+cargo run -p crucible-cli --features databento -- \
+  pull --dataset GLBX.MDP3 --schema ohlcv-1m --symbols ES.FUT \
+       --start 2024-01-01 --end 2024-02-01
 ```
+
+Acquisition planning lives in `docs/DATA_PLAN.md`; the ordered, checklisted
+procedure for the subscription month is `docs/RUNBOOK_BLITZ.md`.
 
 ---
 

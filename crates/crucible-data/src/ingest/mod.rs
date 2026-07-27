@@ -1,12 +1,13 @@
 //! Databento acquisition.
 //!
-//! **Status: the quote path is implemented; the execute path is still spec.**
-//! [`plan()`] and [`quote()`] are real code with tests. Nothing in this module
-//! can spend money — there is no download, no batch submission, and
-//! [`BatchProvider::submit`] has no caller.
-//! The remaining spec (submit → poll → download → verify → append, and its
-//! crash-resumable job journal) is described below and in
-//! `docs/MILESTONES.md`.
+//! **Status: implemented, end to end.** [`plan()`] and [`quote()`] cost
+//! nothing and spend nothing; [`execute()`](execute::execute) is the only
+//! thing in the workspace that can spend money, and it runs only after
+//! [`quote::gate`] has authorised a total against a cap the operator typed.
+//!
+//! Read [`execute`] before changing anything here: it documents the four
+//! guards that stand between a dropped connection and a second purchase, and
+//! every one of them is load-bearing.
 //!
 //! ## Entitlement windows create DEADLINES
 //!
@@ -106,28 +107,50 @@
 //!   (measured 2026-07-24) — declined anyway, because a roll rule we did
 //!   not choose is a research assumption we cannot defend.
 //!
-//! ## Still spec: the execute path
+//! ## The execute path, as built
 //!
-//! - Submit → poll → download to a staging dir → verify → `rename` into
-//!   `raw/` → [`Catalog::append`](crate::catalog::Catalog::append) →
-//!   finalize. Never download straight into `raw/`; raw is immutable.
-//! - A crash-resumable per-job journal outside `raw/`, written immediately
-//!   after submission — a job whose id is lost has been paid for and cannot
-//!   be collected.
-//! - `ManifestRecord.symbols` must be the requested key **plus every raw
-//!   symbol observed in the delivered file's DBN metadata**. Recording only
+//! Submit → poll → download to a staging dir → verify size and SHA-256 →
+//! `rename` into `raw/` → [`Catalog::append`](crate::catalog::Catalog::append)
+//! → journal it. Nothing is ever downloaded straight into `raw/`; raw is
+//! immutable.
+//!
+//! - **One job = one window = one archive file = one manifest row** (D-0028).
+//!   Submissions pin `split_duration=none`, because the vendor's default of
+//!   `day` would deliver ~31 files for one month.
+//! - **The journal records the intent before the submission** and every run
+//!   reconciles against the vendor's own job list, so a lost journal or a
+//!   crash inside `submit` cannot cause a second purchase (D-0029). One pull
+//!   at a time, enforced by an OS lock (D-0030).
+//! - **`ManifestRecord.symbols` is the requested key plus every raw symbol
+//!   observed in the delivered file's DBN metadata** (D-0033). Recording only
 //!   the key would make `coverage("ESU6")` report the full range as missing
-//!   and re-buy it forever; that assumption is the one thing a cheap
-//!   validation slice exists to prove.
+//!   and re-buy it forever.
+//! - **A delivery is verified before it is placed** (D-0031): the catalog
+//!   hashes whatever is on disk, so an unchecked truncated download would be
+//!   recorded and thereafter certified by the manifest as the real thing.
+//!
+//! The whole state machine is tested offline against faked seams — including
+//! every crash-resume path and every refusal — because the vendor, the
+//! delivered bytes, and the clock all arrive through traits (D-0032).
 
+pub mod clock;
+#[cfg(feature = "databento")]
+pub mod databento;
+pub mod delivery;
 pub mod error;
+pub mod execute;
+pub mod journal;
 pub mod money;
 pub mod plan;
 pub mod provider;
 pub mod quote;
 pub mod window;
 
+pub use clock::Clock;
+pub use delivery::{DeliveryError, DeliveryInspector};
 pub use error::IngestError;
-pub use plan::{PlannedJob, PullPlan, PullRequest, plan, range_from_dates};
-pub use provider::{BatchProvider, ProviderError, QuoteQuery, StypeIn};
+pub use execute::{AcquiredWindow, Deps, ExecuteOptions, ExecuteReport, execute};
+pub use journal::{IntentState, Journal, JournalEntry, JournalEvent, intent_id};
+pub use plan::{PlannedJob, PullPlan, PullRequest, WindowSpan, plan, range_from_dates};
+pub use provider::{BatchProvider, JobState, ProviderError, QuoteQuery, StypeIn};
 pub use quote::{QuoteReport, gate, quote};

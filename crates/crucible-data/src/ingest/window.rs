@@ -56,6 +56,48 @@ impl core::fmt::Display for CivilDate {
     }
 }
 
+/// Days in `month` of `year`, proleptic Gregorian.
+#[must_use]
+pub fn days_in_month(year: i64, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+            if leap { 29 } else { 28 }
+        }
+        _ => 0,
+    }
+}
+
+/// Parses `YYYY-MM-DD` into a real calendar date, or `None`.
+///
+/// The validation is the point. [`days_from_civil`] is Hinnant's arithmetic
+/// and will happily convert month 13 or day 32 into *some* day number, so a
+/// fat-fingered `--start 2024-13-01` would silently become January 2025 and
+/// buy the wrong data. Rejecting it here is the last place that is free.
+#[must_use]
+pub fn parse_civil_date(text: &str) -> Option<CivilDate> {
+    let bytes = text.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return None;
+    }
+    if !bytes
+        .iter()
+        .enumerate()
+        .all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit())
+    {
+        return None;
+    }
+    let year: i64 = text.get(0..4)?.parse().ok()?;
+    let month: u32 = text.get(5..7)?.parse().ok()?;
+    let day: u32 = text.get(8..10)?.parse().ok()?;
+    if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month) {
+        return None;
+    }
+    Some(CivilDate { year, month, day })
+}
+
 /// Days since the Unix epoch for a civil date (Hinnant).
 #[must_use]
 pub fn days_from_civil(date: CivilDate) -> i64 {
@@ -210,6 +252,48 @@ mod tests {
             let date = CivilDate { year, month, day };
             assert_eq!(days_from_civil(date), days, "days_from_civil {date}");
             assert_eq!(civil_from_days(days), date, "civil_from_days {days}");
+        }
+    }
+
+    // A date parser that accepts month 13 turns a typo into a purchase of
+    // the wrong window, so every rejection here is a saved charge.
+    #[test]
+    fn date_parsing_accepts_real_dates_and_rejects_plausible_typos() {
+        assert_eq!(
+            parse_civil_date("2024-02-29"),
+            Some(CivilDate {
+                year: 2024,
+                month: 2,
+                day: 29
+            }),
+            "2024 is a leap year"
+        );
+        assert_eq!(
+            parse_civil_date("2010-06-06"),
+            Some(CivilDate {
+                year: 2010,
+                month: 6,
+                day: 6
+            })
+        );
+        for bad in [
+            "2023-02-29", // not a leap year
+            "2024-13-01", // month 13 -- Hinnant would map this to Jan 2025
+            "2024-00-01",
+            "2024-01-00",
+            "2024-01-32",
+            "2024-04-31", // April has 30 days
+            "2024-1-1",   // unpadded
+            "24-01-01",
+            "2024/01/01",
+            "2024-01-01T00:00:00Z",
+            "",
+            "notadate!!",
+        ] {
+            assert!(
+                parse_civil_date(bad).is_none(),
+                "{bad:?} must not parse as a date"
+            );
         }
     }
 

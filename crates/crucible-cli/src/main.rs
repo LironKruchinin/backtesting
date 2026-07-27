@@ -17,8 +17,11 @@
 //! matter are `DATABENTO_API_KEY` and `CRUCIBLE_DATA_DIR`; neither has a
 //! default, and the key is never printed, logged, or passed as an argument.
 
+mod pull;
+
 use std::path::{Path, PathBuf};
 
+use clap::{CommandFactory, Parser, Subcommand};
 use crucible_core::prelude::*;
 use crucible_data::SyntheticFeed;
 use crucible_engine::{BacktestParams, BacktestResult, FreeFills, SpreadCrossFills, run};
@@ -29,25 +32,81 @@ const BARS_PER_YEAR_1M: f64 = 347_760.0;
 const DEMO_SEED: u64 = 42;
 const DEMO_BARS: usize = 100_000;
 
+/// Environment and planned-command notes, appended to `--help`. Kept as prose
+/// because the two variables below have no defaults and no config file, and a
+/// misconfigured key should be discovered here rather than mid-download.
+const AFTER_HELP: &str = "\
+ENVIRONMENT:\n\
+\x20 DATABENTO_API_KEY    Databento API key (never passed as an argument)\n\
+\x20 CRUCIBLE_DATA_DIR    archive root; must live OUTSIDE the repo\n\
+\x20 Both may be set in a .env file at the repo root; real environment\n\
+\x20 variables take precedence over it. .env is gitignored — never commit it.\n\
+\n\
+NOTE: `pull` needs a build with the Databento client:\n\
+\x20 cargo run -p crucible-cli --features databento -- pull ...\n\
+\n\
+PLANNED (see docs/MILESTONES.md):\n\
+\x20 transcode   M1  DBN -> curated Parquet\n\
+\x20 screen      M3  stage 0-1 signal triage / coarse grid\n\
+\x20 funnel      M3  full staged evaluation of a config\n\
+\x20 report      M3  render verdict scorecards";
+
+#[derive(Parser)]
+#[command(
+    name = "crucible",
+    about = "a backtesting engine designed to reject strategies",
+    after_help = AFTER_HELP,
+    disable_version_flag = true
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Run the reference SMA-cross demo on synthetic data.
+    Demo {
+        /// Print only the determinism hash (the CI gate reads this).
+        #[arg(long)]
+        hash_only: bool,
+    },
+    /// Show which environment variables are configured.
+    Env,
+    /// Batch-download entitled Databento windows into the archive.
+    Pull(pull::PullArgs),
+    /// Re-hash the archive against the manifest.
+    Verify,
+}
+
 fn main() {
     // First statement in the process: every command below (and every crate it
     // calls) must see the same environment, and `set_var` is only sound while
     // we are still single-threaded.
     let env_file = load_env_file();
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.first().map(String::as_str) {
-        Some("demo") => {
-            let hash_only = args.iter().any(|a| a == "--hash-only");
+    let cli = Cli::parse();
+    let code = match cli.command {
+        Some(Command::Demo { hash_only }) => {
             demo(hash_only);
+            0
         }
-        Some("env") => env_report(env_file.as_deref()),
-        Some("help") | None => help(),
-        Some(other) => {
-            eprintln!("unknown command: {other}\n");
-            help();
-            std::process::exit(2);
+        Some(Command::Env) => {
+            env_report(env_file.as_deref());
+            0
         }
+        Some(Command::Pull(args)) => pull::run(&args),
+        Some(Command::Verify) => pull::verify(),
+        // Bare `crucible` stays a zero-exit help screen: it is what a new
+        // reader types first, and it has not failed at anything.
+        None => {
+            let _ = Cli::command().print_help();
+            println!();
+            0
+        }
+    };
+    if code != 0 {
+        std::process::exit(code);
     }
 }
 
@@ -117,28 +176,6 @@ fn env_report(env_file: Option<&Path>) {
              \x20                    outside the repo"
         ),
     }
-}
-
-fn help() {
-    println!(
-        "crucible — a backtesting engine designed to reject strategies\n\n\
-         USAGE:\n  crucible <command>\n\n\
-         COMMANDS:\n\
-         \x20 demo [--hash-only]   run the reference SMA-cross demo on synthetic data\n\
-         \x20 env                  show which environment variables are configured\n\
-         \x20 help                 show this message\n\n\
-         ENVIRONMENT:\n\
-         \x20 DATABENTO_API_KEY    Databento API key (never passed as an argument)\n\
-         \x20 CRUCIBLE_DATA_DIR    archive root; must live OUTSIDE the repo\n\
-         \x20 Both may be set in a .env file at the repo root; real environment\n\
-         \x20 variables take precedence over it. .env is gitignored — never commit it.\n\n\
-         PLANNED (see docs/MILESTONES.md):\n\
-         \x20 pull        M1  batch-download entitled Databento windows into the archive\n\
-         \x20 transcode   M1  DBN -> curated Parquet\n\
-         \x20 screen      M3  stage 0-1 signal triage / coarse grid\n\
-         \x20 funnel      M3  full staged evaluation of a config\n\
-         \x20 report      M3  render verdict scorecards"
-    );
 }
 
 fn es_like_spec() -> ContractSpec {

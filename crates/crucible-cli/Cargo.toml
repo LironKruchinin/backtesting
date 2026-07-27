@@ -18,9 +18,14 @@ crucible-strategies = { path = "../crucible-strategies" }
 # `.env` -> process environment, in BIN TARGETS ONLY (D-0022). Library code
 # never reads the environment, so this must not migrate into any lib crate.
 dotenvy = "0.15"
+# Real arg parsing: `pull` takes value-carrying flags whose misreading would
+# cost money, which is exactly the point at which §6 blesses clap.
+clap = { version = "4.6", features = ["derive"] }
 
-# M1+: clap (derive) for real arg parsing; anyhow for error context in main.
-# Hand-rolled matching is fine only while `demo` is the sole command.
+[features]
+# Forwards to crucible-data. Non-default, so `cargo check` and the default CI
+# gates stay free of tokio/reqwest; CI runs a second pass with --all-features.
+databento = ["crucible-data/databento"]
 
 [lints]
 workspace = true

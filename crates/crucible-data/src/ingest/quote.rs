@@ -332,6 +332,7 @@ mod tests {
             symbols: vec!["ES.FUT".to_string()],
             stype_in: StypeIn::Parent,
             range,
+            window_span: crate::ingest::plan::WindowSpan::Month,
         }
     }
 

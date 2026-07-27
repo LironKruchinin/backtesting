@@ -123,15 +123,15 @@ pub const MANIFEST_FILE_NAME: &str = "manifest.jsonl";
 
 /// Serde bridge for [`Ts`] (core is dependency-free; serde may not appear
 /// there). Wire format: plain JSON integer, UTC nanoseconds.
-mod ts_serde {
+pub(crate) mod ts_serde {
     use crucible_core::prelude::Ts;
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub(super) fn serialize<S: Serializer>(ts: &Ts, s: S) -> Result<S::Ok, S::Error> {
+    pub(crate) fn serialize<S: Serializer>(ts: &Ts, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_i64(ts.0)
     }
 
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Ts, D::Error> {
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Ts, D::Error> {
         i64::deserialize(d).map(Ts)
     }
 }
@@ -886,6 +886,44 @@ fn validate_symbols(symbols: &[String]) -> Result<(), CatalogError> {
         }
     }
     Ok(())
+}
+
+impl core::fmt::Display for VerifyFinding {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            VerifyFinding::MissingFile { file_path } => {
+                write!(f, "MISSING   {file_path}")
+            }
+            VerifyFinding::SizeMismatch {
+                file_path,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "SIZE      {file_path}: manifest says {expected} bytes, disk has {actual}"
+            ),
+            VerifyFinding::ChecksumMismatch {
+                file_path,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "CHECKSUM  {file_path}: manifest id {expected}, disk hashes to {actual}"
+            ),
+        }
+    }
+}
+
+/// Whether one symbol would be accepted by [`Catalog::append`].
+///
+/// Exposed so ingest can screen symbols it read out of vendor metadata
+/// *before* they reach an append that would refuse the whole acquisition —
+/// after the bytes were paid for and correctly placed. Sharing the predicate
+/// rather than restating it is the point: two copies of this rule would drift,
+/// and the copy that drifts looser is the one that strands a paid file.
+#[must_use]
+pub fn is_valid_symbol(symbol: &str) -> bool {
+    validate_symbols(&[symbol.to_owned()]).is_ok()
 }
 
 /// `file_path` rules: relative, ASCII, forward slashes, strictly under

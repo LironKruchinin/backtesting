@@ -41,6 +41,36 @@ use crate::ingest::provider::{BatchProvider, QuoteQuery, StypeIn};
 use crate::ingest::window;
 use crucible_core::types::Ts;
 
+/// How wide a single download window — and therefore a single batch job, a
+/// single archive file, and a single manifest row — is allowed to be.
+///
+/// This is a job-granularity choice, and the vendor's documented behaviour
+/// makes it a consequential one. Batch jobs have **no size limit**, are
+/// processed **one at a time in a FIFO queue** (so sharding buys no
+/// parallelism), are capped at **20 submissions per minute**, and have no
+/// idempotency key, no cancel, and no refund. Month windows over a 16-year
+/// backfill for seven parents across four schemas would be 5,404 separate
+/// purchases; [`WindowSpan::Whole`] makes the same backfill about 28.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindowSpan {
+    /// One window per calendar month. The recurring archival job's shape:
+    /// small, restartable, and naturally aligned to the monthly cron.
+    #[default]
+    Month,
+    /// One window per contiguous coverage gap, however long. The bootstrap
+    /// backfill's shape.
+    Whole,
+}
+
+impl core::fmt::Display for WindowSpan {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            WindowSpan::Month => "month",
+            WindowSpan::Whole => "whole",
+        })
+    }
+}
+
 /// What the operator asked for, before the archive has its say.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullRequest {
@@ -55,6 +85,8 @@ pub struct PullRequest {
     pub stype_in: StypeIn,
     /// Half-open range requested, UTC-midnight aligned on both ends.
     pub range: TsRange,
+    /// How finely the remaining gaps are cut into download windows.
+    pub window_span: WindowSpan,
 }
 
 /// One window that would actually be downloaded.
@@ -152,13 +184,12 @@ pub fn plan(
         });
     }
 
-    let available =
-        provider
-            .dataset_range(&request.dataset)
-            .map_err(|source| IngestError::Provider {
-                during: "fetching the dataset range",
-                source,
-            })?;
+    let available = provider
+        .dataset_range(&request.dataset, &request.schema)
+        .map_err(|source| IngestError::Provider {
+            during: "fetching the dataset range",
+            source,
+        })?;
 
     let effective = intersect(request.range, available).ok_or_else(|| {
         IngestError::WindowOutsideDatasetRange {
@@ -181,8 +212,15 @@ pub fn plan(
     for (key, key_gaps) in &gaps {
         let mut key_jobs = Vec::new();
         for gap in key_gaps {
-            for (start_ts, end_ts) in window::split_into_month_windows(gap.start_ts(), gap.end_ts())
-            {
+            let windows = match request.window_span {
+                WindowSpan::Month => window::split_into_month_windows(gap.start_ts(), gap.end_ts()),
+                // A gap is already contiguous and day-aligned, so it is its
+                // own window; `window_file_stem` names it with the
+                // `{yyyy-mm-dd}--{yyyy-mm-dd}` form unless it happens to be
+                // exactly one calendar month (D-0026).
+                WindowSpan::Whole => vec![(gap.start_ts(), gap.end_ts())],
+            };
+            for (start_ts, end_ts) in windows {
                 let stem = window::window_file_stem(start_ts, end_ts);
                 key_jobs.push(PlannedJob {
                     key: key.clone(),
@@ -341,6 +379,7 @@ mod tests {
             symbols: symbols.iter().map(|s| (*s).to_string()).collect(),
             stype_in: StypeIn::Parent,
             range,
+            window_span: WindowSpan::Month,
         }
     }
 
@@ -392,7 +431,7 @@ mod tests {
         // Planning prices nothing and buys nothing: the only provider call
         // it is allowed to make is the free dataset-range lookup.
         assert!(provider.spent_nothing());
-        assert_eq!(provider.calls, vec!["dataset_range:GLBX.MDP3"]);
+        assert_eq!(provider.calls, vec!["dataset_range:GLBX.MDP3/ohlcv-1m"]);
     }
 
     // The don't-pay-twice property, end to end: own February, plan the
@@ -634,6 +673,67 @@ mod tests {
         assert!(
             !paths.contains(&"raw/GLBX.MDP3/ohlcv-1m/ES.FUT/2024-01.dbn.zst"),
             "must not reuse the whole-month name over an already-owned day"
+        );
+    }
+
+    // The backfill shape: 5,404 month-sized purchases collapse to one job per
+    // contiguous gap. Sharding buys nothing -- the vendor processes jobs one
+    // at a time -- and every extra submission is another chance to buy twice.
+    #[test]
+    fn whole_span_emits_one_window_per_contiguous_gap() {
+        let dir = TempDir::new();
+        let mut catalog = empty_catalog(&dir);
+        own(
+            &mut catalog,
+            &dir,
+            "ES.FUT",
+            dates((2018, 3, 1), (2018, 4, 1)),
+            "2018-03",
+        );
+        let mut provider = FakeProvider::new(glbx_range());
+
+        let mut req = request(&["ES.FUT"], dates((2010, 6, 6), (2026, 7, 1)));
+        req.window_span = WindowSpan::Whole;
+        let whole_plan = plan(&catalog, &mut provider, &req).expect("plan succeeds");
+
+        // One owned month splits the 16 years into exactly two gaps, so
+        // exactly two jobs -- against 193 under `Month`.
+        assert_eq!(
+            whole_plan
+                .jobs
+                .iter()
+                .map(|j| j.target_file_path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "raw/GLBX.MDP3/ohlcv-1m/ES.FUT/2010-06-06--2018-03-01.dbn.zst",
+                "raw/GLBX.MDP3/ohlcv-1m/ES.FUT/2018-04-01--2026-07-01.dbn.zst",
+            ]
+        );
+
+        let mut month_req = request(&["ES.FUT"], dates((2010, 6, 6), (2026, 7, 1)));
+        month_req.window_span = WindowSpan::Month;
+        let month_plan = plan(&catalog, &mut provider, &month_req).expect("plan succeeds");
+        // 2010-06 .. 2026-06 inclusive is 193 months; one is owned.
+        assert_eq!(month_plan.jobs.len(), 192);
+    }
+
+    // A gap that happens to be exactly one calendar month gets the same name
+    // under either span -- coverage subtracts ranges, not paths, so the two
+    // modes must never disagree about what a window is called (D-0026).
+    #[test]
+    fn whole_span_still_names_a_single_month_as_a_month() {
+        let dir = TempDir::new();
+        let catalog = empty_catalog(&dir);
+        let mut provider = FakeProvider::new(glbx_range());
+
+        let mut req = request(&["ES.FUT"], dates((2024, 1, 1), (2024, 2, 1)));
+        req.window_span = WindowSpan::Whole;
+        let plan = plan(&catalog, &mut provider, &req).expect("plan succeeds");
+
+        assert_eq!(plan.jobs.len(), 1);
+        assert_eq!(
+            plan.jobs[0].target_file_path,
+            "raw/GLBX.MDP3/ohlcv-1m/ES.FUT/2024-01.dbn.zst"
         );
     }
 }
