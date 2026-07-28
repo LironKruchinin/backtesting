@@ -133,6 +133,34 @@ What to buy and what to refuse: [docs/DATA_PLAN.md](docs/DATA_PLAN.md). The
 ordered procedure for the subscription month:
 [docs/RUNBOOK_BLITZ.md](docs/RUNBOOK_BLITZ.md).
 
+## Backtesting archived data
+
+Raw DBN is what the vendor sold; **curated Parquet** is what the engine
+replays. `transcode` converts one into the other — one file per instrument per
+source window, six integer columns, and the source file's blake3 recorded in
+the file's own metadata, so any result can name the exact bytes behind it.
+Prices are `i64` nanopoints from Databento's wire format all the way to the
+engine: there is no `f64` anywhere on the path.
+
+```bash
+# Build curated bars from everything in the manifest. Idempotent; --force rebuilds.
+cargo run -p crucible-cli --features databento -- transcode
+
+# Replay them. No vendor feature needed — this reads local Parquet.
+cargo run -p crucible-cli -- backtest --instrument ESH4 --timeframe 1m   --start 2024-01-01 --end 2024-02-01 --fast 20 --slow 50
+```
+
+Curated data is disposable: it is rebuilt from `raw/`, which the manifest
+checksums, so deleting `curated/` is always safe. Every number `backtest`
+prints comes with the assumptions that produced it — fill model, half-spread,
+fee, bar count, date range, and the manifest id of the source.
+
+The first real run, for calibration of expectations: SMA(20/50) on ESH4 over
+January 2024, 30,167 one-minute bars, **−23.51 %** of capital under
+`spread_cross`. With costs switched off it still loses **−5.21 %** — so there
+was no edge to begin with, and paying the spread roughly quadrupled the
+damage. That is the control group working exactly as intended.
+
 ## Workspace layout
 
 | Crate | Role |
@@ -145,8 +173,10 @@ ordered procedure for the subscription month:
 | `crucible-cli` | `crucible` binary. |
 
 Status: **M0 (skeleton) complete**, **M1 (data foundation) in progress** —
-vertical slice runs end-to-end with golden and determinism tests, and
-`crucible pull` acquires real data into a checksummed, append-only archive.
+`crucible pull` acquires real data into a checksummed, append-only archive,
+`crucible transcode` turns it into curated Parquet, and `crucible backtest`
+replays it through the engine. Session calendars, continuous contracts, and
+the data-QA report are what remain of M1.
 Roadmap: [docs/MILESTONES.md](docs/MILESTONES.md).
 Working conventions and invariants: [CLAUDE.md](CLAUDE.md). Decision log:
 [docs/DECISIONS.md](docs/DECISIONS.md).

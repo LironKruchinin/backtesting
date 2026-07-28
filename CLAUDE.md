@@ -233,7 +233,8 @@ when the code that uses them lands**, never speculatively. Blessed set:
 | `tokio` | data, `databento` feature, `ingest::databento` only | current-thread runtime behind the sync `BatchProvider` seam (D-0025) |
 | `sha2` | data, `databento` feature | verifying a delivery against the vendor's published digest before it enters the immutable archive (D-0031) |
 | `time` | data, `databento` feature, `ingest::databento` only | not a choice — the vendor API spells its timestamps `time::OffsetDateTime` |
-| `polars` | data only | Parquet transcode/QA. NEVER in engine. |
+| `parquet` | data only | Curated Parquet, low-level typed columns, `default-features = false` + `zstd`. NEVER in engine (D-0037) |
+| `polars` | data only, **data-QA report only** | gap/spike/DST reporting. NOT the feed path — it depends on rayon, and only `funnel` spawns threads (D-0037) |
 | `chrono` + `chrono-tz` | data::calendar only | the one timezone-aware module |
 | `rand_chacha` | where seeded randomness is needed | resampling/permutation |
 | `clap` | cli | args (when >1 real command) |
@@ -349,6 +350,31 @@ reference; supersede the decision if you disagree — don't hotfix.
 - **The archive keeps `staging/`, `delivery/`, `jobs.jsonl`, and `pull.lock`
   beside `raw/`**: none are acquisitions, so none appear in the manifest.
   `raw/` stays exactly what D-0017 says it is.
+- **Curated files are named after the raw window, not the year**
+  (`curated/bars/ESH4/1m/2024-01.parquet`), and `curated/` is not in the
+  manifest: one raw file fans out to one curated file per instrument, each
+  naming exactly one source blake3 (D-0036). A year-named file would have to
+  be merged, and merging is where duplication hides.
+- **`ParquetBarFeed` loads bars into RAM rather than mmap'ing them**, and
+  `ParquetBarFeed::open` does all the failing: `Feed::next_event` returns
+  `Option`, not `Result`, so a feed must have no errors left to report by the
+  time it yields. MILESTONES said "mmap'd" before the format was chosen;
+  Parquet pages are encoded and compressed, so there is nothing to map.
+- **`transcode` refuses a whole file over one bad record** (unaligned
+  `ts_event`, `UNDEF_PRICE`, an unmapped `instrument_id`) instead of skipping
+  it. Curated data is derived and rebuildable, so a refusal costs one re-run —
+  the calculus that made D-0033 *drop* a symbol does not apply here, because
+  nothing has been paid for.
+- **`transcode` re-decodes a file to discover it has nothing to write**: which
+  contracts a window actually produced is only knowable after decoding it. A
+  parent key's symbology maps every contract it resolves to and most never
+  trade — January 2024 `ES.FUT` maps 41 and produces 16 — so treating the
+  mapped set as the expected set makes a finished transcode look permanently
+  unfinished.
+- **`backtest` measures `bars_per_year` from the sample** instead of using the
+  demo's 347,760 constant: real `ohlcv` data has no bar for an interval that
+  did not trade, and the constant would flatter Sharpe (D-0038). `calendar`
+  v1 takes this over.
 
 ---
 
@@ -362,6 +388,12 @@ cargo run -p crucible-cli -- demo               # the vertical slice
 cargo run -p crucible-cli -- demo --hash-only   # determinism hash (CI gate)
 cargo run -p crucible-cli -- env                # what .env/env actually resolved to
 cargo run -p crucible-cli -- verify             # re-hash the archive vs the manifest
+
+# The replay path. `transcode` needs the feature (it decodes DBN); `backtest`
+# does not. Curated data is disposable: `--force` rebuilds, deleting is safe.
+cargo run -p crucible-cli --features databento -- transcode
+cargo run -p crucible-cli -- backtest --instrument ESH4 --timeframe 1m \
+  --start 2024-01-01 --end 2024-02-01 --fast 20 --slow 50
 
 # The acquisition path. `--features databento` is required (D-0025); without
 # it `pull` exits 2 saying so. A pull is a DRY RUN by default and spends
@@ -388,12 +420,14 @@ copies of the same state means one is lying by next week, and §8 makes every
 session read a stale snapshot first. Tick the checkbox in the commit that
 does the work.
 
-Where to start reading in M1: the `crucible-data::catalog` module docs (the
-archive/manifest contract — implemented), then `crucible-data::ingest`
-(still spec-only). Note the rolling-window archival deadlines described in
-`ingest` — the monthly pull is time-sensitive by design. Unimplemented
-modules still carry their spec in `//!` docs; `docs/DECISIONS.md` is the
-source of truth for why anything looks the way it does.
+Where to start reading in M1: `crucible-data::catalog` (the archive/manifest
+contract), then `crucible-data::ingest` (acquisition, and the rolling-window
+deadlines that make the monthly pull time-sensitive by design), then
+`crucible-data::curated` (the file format the engine actually replays) and
+`crucible-data::transcode` (how raw becomes curated). All four are
+implemented; `calendar` and `continuous` still carry their specs in `//!`
+docs. `docs/DECISIONS.md` is the source of truth for why anything looks the
+way it does.
 
 Known open questions (decide when reached, log when decided): margin
 modeling (M2); multi-instrument portfolio accounting (post-M4); Welford vs

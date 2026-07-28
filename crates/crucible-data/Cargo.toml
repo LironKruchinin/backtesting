@@ -32,8 +32,15 @@ sha2 = { version = "0.11", optional = true }
 # appears nowhere outside `ingest::databento`.
 time = { version = "0.3", optional = true }
 
+# Curated Parquet: the low-level typed-column API only (D-0037). Default
+# features off drops arrow, async, object_store, and every codec but the one
+# we write — so this crate gains no threads and no runtime, which `polars`
+# could not offer (polars-core depends on rayon non-optionally, and CLAUDE.md
+# §3 reserves thread-spawning for crucible-funnel).
+parquet = { version = "59.1", default-features = false, features = ["zstd"] }
+
 # --- Milestone M1 additions (do not add before implementing; CLAUDE.md §6) ---
-# polars = "..."      # Parquet read/write + transcode (lazy, feature-gated)
+# polars = "..."      # data-QA report only (gaps/spikes/DST); NOT the feed path
 
 [dev-dependencies]
 # Property tests for the coverage interval algebra (CLAUDE.md §6). Default

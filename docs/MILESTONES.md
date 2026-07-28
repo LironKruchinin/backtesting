@@ -47,8 +47,17 @@ deadline-driven (see `crucible-data::ingest` module docs).
       `mbo`; `mbp-10` deliberately excluded (D-0023). Documented cron in
       `docs/RUNBOOK_BLITZ.md`, later automated; runs `--max-cost-usd 0.00` so
       it refuses rather than bills if the entitlement lapses
-- [ ] `crucible transcode`: DBN → curated Parquet, partitioned, versioned
-- [ ] `ParquetBarFeed` implementing `Feed` (mmap'd, availability-ordered)
+- [x] `crucible transcode` (2026-07-28): DBN → curated Parquet, one file per
+      (instrument, timeframe, source window), integer columns end to end,
+      schema + transcoder versions in the file's own metadata (D-0036, D-0037)
+- [x] `ParquetBarFeed` implementing `Feed` (2026-07-28): availability-ordered,
+      every failure resolved at `open` because `Feed` has no error channel.
+      Loaded into RAM rather than mmap'd — Parquet pages are encoded and
+      compressed, so there is nothing to map; the spec said "mmap'd" before
+      the format was chosen
+- [x] `crucible backtest` (2026-07-28): the exit artifact — SmaCross on
+      archived bars under `spread_cross`, printing its own assumptions
+      (D-0038)
 - [ ] Session calendar v1 (Globex sessions, holidays, `bars_per_year`)
 - [ ] Continuous contracts v1: volume-roll table + back-adjust at load;
       signals on adjusted, PnL on tradeable prices
@@ -56,6 +65,8 @@ deadline-driven (see `crucible-data::ingest` module docs).
 
 **Acceptance:** one command takes a fresh machine (with API key) to a
 validated local ES archive; the demo strategy runs on real ES 1m bars.
+*Second half met 2026-07-28:* `pull → verify → transcode → backtest` on real
+ESH4 January-2024 1m bars, 30,167 bars, −23.51% under `spread_cross`.
 
 ## M2 — Engine hardening + combos (~3–4 weeks)
 

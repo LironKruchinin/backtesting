@@ -301,3 +301,64 @@ propose a superseding entry — don't silently diverge.
   Rejected alternative: disabling connection pooling via the SDK's
   `http_client_builder`, which needs `reqwest` as a directly pinned dependency
   — the version skew D-0031 avoids for `dbn`.
+- **D-0036** (2026-07-28) — The curated store is
+  `curated/bars/{instrument}/{tf}/{source_window_stem}.parquet`, six `INT64`
+  columns (`ts_open`, `open`, `high`, `low`, `close`, `volume`), with
+  instrument, timeframe, provenance, row count, and both version numbers in
+  Parquet **file key-value metadata**. `avail_ts` is not stored; the
+  instrument is percent-encoded into its path component. *Supersedes the
+  `curated/bars/{symbol}/{tf}/{yyyy}.parquet` sketch in `catalog`'s layout
+  comment.* Why one file per **source window** rather than per year: a
+  year-named file forces a read-modify-write merge whenever two raw windows
+  land in the same year — the only place in the codebase curated data would
+  ever be merged, and merging is where silent duplication lives. One raw file
+  fans out to one curated file per instrument, each recording exactly one
+  `source_file_blake3` — the manifest id (D-0014) — so a result can name the
+  precise bytes it read (D-0013) with no second index to drift, and
+  `rm -rf curated/` stays safe. Why metadata rather than a sidecar or a
+  manifest row: a footer cannot be separated from the bytes it describes, and
+  `manifest.jsonl` records *acquisitions*, which curated files are not. Why
+  not store `avail_ts`: it is `ts_open + tf` computed by `Bar::avail_ts`
+  (§2.1), and a persisted ordering key is one that can come to disagree with
+  its source. Why percent-encoding: `SYN:RW` is a legal instrument and an
+  illegal Windows filename, and mapping `:` to `_` would file `SYN:RW` and
+  `SYN_RW` together. Why `volume` is signed with a `try_from` at each
+  boundary: an unsigned logical type buys nothing at futures volumes and
+  costs a reinterpreting cast. **Two versions, failing differently:**
+  `curated_schema_version` describes the file and a mismatch is a hard
+  refusal (this build cannot know what the bytes mean);
+  `transcoder_version` describes DBN→`Bar` semantics, and a mismatch warns and
+  is printed beside results rather than blocking them — a cosmetic bump must
+  not invalidate a 50 GB archive, but nor may it be silent.
+- **D-0037** (2026-07-28) — Curated Parquet uses the **`parquet` crate
+  (arrow-rs)** with `default-features = false, features = ["zstd"]` and its
+  low-level typed-column API, *not* the `polars` that §6 pre-blessed. §6 is
+  amended: `polars` stays listed, narrowed to the M1 data-QA report, and is
+  banned from the feed path. Why: `polars-core` depends on `rayon`
+  non-optionally, so adopting it would start a work-stealing threadpool inside
+  `crucible-data` — and §3 reserves thread-spawning for `crucible-funnel`
+  alone, a rule D-0025 restated when it chose a *current-thread* tokio runtime
+  for exactly this reason. The secondary reasons all point the same way: the
+  low-level API pins the physical column types by construction rather than by
+  inference, which is the entire point of an integer-only data path (§2.3);
+  key-value metadata is first-class in both directions; and the dependency is
+  ~12 transitive crates against polars' ~200, on a manifest whose stated value
+  is that `cargo check` stays instant. Cost of being wrong: the fallback is
+  adding the crate's `arrow` feature (+5 crates, still no rayon and no async),
+  a one-line change.
+- **D-0038** (2026-07-28) — `crucible backtest` is the M1 exit artifact and is
+  deliberately thin: one instrument, one strategy (`SmaCross`), one fill model
+  (`spread_cross`), no grid, no folds, no benchmark, no trial count. Contract
+  and cost arguments (`--tick-points`, `--point-value-usd`,
+  `--initial-cash-usd`, `--fee-per-contract-usd`) parse decimal **text to
+  integers without ever building an `f64`** — `Price::from_points_str` is
+  added to `crucible-core` for the price-scale half, on D-0027's argument: a
+  tick size one nanopoint off snaps every fill in a run onto the wrong grid,
+  quietly and only on some instruments. The cost flags exist because §2.4
+  requires execution assumptions to be named and visible, not because the
+  command is meant to be configurable; they default to today's hand-set values
+  and are echoed in the output header. `bars_per_year` defaults to a value
+  **measured from the loaded sample** rather than the demo's 347,760 constant:
+  real `ohlcv` data has no bar for an interval that did not trade, so the
+  constant overstates the bar count, which overstates the annualization
+  factor, which flatters Sharpe. `calendar` v1 takes ownership of it.

@@ -35,8 +35,8 @@ enter as static release-calendar CSVs); being a general-purpose OSS framework.
   acquisition that can never double-purchase and never certifies bytes it
   didn't verify. *(built)*
 - **Replay engine:** deterministic, single-threaded, availability-time-ordered
-  event loop; named fill models; integer money. *(built; has never consumed a
-  real bar — see §5)*
+  event loop; named fill models; integer money. *(built; first ran on real
+  archived ES bars 2026-07-28)*
 - **Strategy layer:** streaming indicators; hand-written strategies;
   config-assembled indicator combos; score-emitting signals (predictor track).
 - **Research funnel:** S0 signal triage → S1 free-fill coarse grid → S2
@@ -89,9 +89,9 @@ enter as static release-calendar CSVs); being a general-purpose OSS framework.
   ──── pull (journal,   │  raw/  *.dbn.zst   immutable, checksummed       │
         reconcile,      │  manifest.jsonl    what we own, what fed run X  │
         $-gates) ─────► │  jobs.jsonl        every intent/submit/append   │
-                        │  transcode ──► curated/ Parquet  (M1, next)     │
+                        │  transcode ──► curated/ Parquet  (built)        │
                         └───────────────┬─────────────────────────────────┘
-                                        │ ParquetBarFeed (M1, next)
+                                        │ ParquetBarFeed (built)
                                         ▼
                         ┌─────────────────────────────────────────────────┐
                         │  crucible-engine   (deterministic, sync)        │
@@ -115,7 +115,7 @@ knowable at `open + timeframe`; orders never fill against the event that
 triggered them; money never touches `f64`; the engine core contains no clocks,
 threads, or I/O; tokio exists only behind the `databento` feature's sync seam;
 parallelism exists only at run granularity in the funnel. Decision log:
-D-0001…D-0035 (`docs/DECISIONS.md`).
+D-0001…D-0038 (`docs/DECISIONS.md`).
 
 ---
 
@@ -128,16 +128,17 @@ D-0001…D-0035 (`docs/DECISIONS.md`).
 | M1 archive catalog | Manifest records, half-open coverage algebra (+ proptest), checksum gatekeeping, `verify` audit; independently reviewed; 45 catalog tests |
 | Cost/planning layer | Coverage-subtracted month/whole-gap planning, free-endpoint quoting, integer `--max-cost-usd` gate |
 | Pull execute path | Job journal (event-sourced, deterministic intent ids), always-reconcile before submit, single-instance lock, staged download → size+SHA-256 verify → symbols union from DBN metadata → append; clap CLI (`pull`, `verify`, `demo`); exit-code contract; feature-gated `databento` with `--all-features` CI |
-| Live proof | $0.14 validation pull submitted once across four invocations (one crashed mid-poll on a stale pooled connection — D-0035 retry policy born from it); no-double-purchase proven **in production, not just tests** |
-| Tests | 155 green; determinism hash unchanged across 3 platform/toolchain combos |
-| Docs | CLAUDE.md, DECISIONS (D-0001…D-0035), MILESTONES, DATA_PLAN, RUNBOOK_BLITZ |
+| Live proof | $0.14 validation pull submitted once across four invocations (one crashed mid-poll on a stale pooled connection — D-0035 retry policy born from it); no-double-purchase proven **in production, not just tests**. Closed 2026-07-27: `verify` clean, re-run buys nothing |
+| Curated store + feed | `transcode` (DBN → Parquet, one file per instrument × window, integer columns end to end) and `ParquetBarFeed`; provenance chains every bar to a manifest id; `backtest` runs the reference strategy on it (D-0036…D-0038) |
+| Tests | 206 green in a default build, 216 with `--all-features`; determinism hash unchanged across 3 platform/toolchain combos |
+| Docs | CLAUDE.md, DECISIONS (D-0001…D-0038), MILESTONES, DATA_PLAN, RUNBOOK_BLITZ |
 
-### Not built yet (why "there is no working backtester" is currently true)
-The engine has **never consumed a real market bar.** Missing, in dependency
-order: live-pull acceptance close-out → `transcode` (DBN → curated Parquet) →
-`ParquetBarFeed` → session calendar v1 → continuous contracts v1 → data-QA
-report. Everything research-facing (walk-forward, combos, funnel, forecast
-workbench, registry, scorecards) sits behind that.
+### Not built yet
+The working-backtester checkpoint is **passed** (2026-07-28): SMA-cross ran on
+real archived ESH4 January-2024 1-minute bars. Still missing in M1: session
+calendar v1, continuous contracts v1, and the data-QA report. Everything
+research-facing (walk-forward, combos, funnel, forecast workbench, registry,
+scorecards) sits behind M2.
 
 ---
 
@@ -147,9 +148,10 @@ The shortest path from today to *SMA-cross running on 16 years of real ES
 bars* — the moment the project stops being infrastructure and starts being a
 backtester:
 
-1. **Close the acceptance pull** (in flight; vendor queue is slow — the
-   design makes that boring). Assert: file at planned path, manifest row with
-   observed contract symbols, `verify` clean, re-run is a zero-cost no-op.
+1. ~~**Close the acceptance pull.**~~ **Done 2026-07-27.** File at the planned
+   path, one manifest row carrying `ES.FUT` plus 41 observed contracts and
+   spreads, `verify` clean, and a re-run of the identical command reports
+   "nothing to download — the archive already covers this" and exits 0.
 2. **Independent review** of `execute.rs`, journal fold, reconciliation
    matcher, retry classification (architect review, already committed to).
 3. **Subscribe + blitz** (RUNBOOK_BLITZ): start in the **first 2–3 days** of
@@ -157,14 +159,20 @@ backtester:
    order: `mbo`, `tbbo`, `trades` first (rolling windows decay daily), then
    bars/definitions/statistics. Expect days of wall-clock (FIFO vendor queue);
    `crucible verify` after each tranche; cancel before day 30.
-4. **`transcode` + `ParquetBarFeed`** — one session: DBN → partitioned
-   Parquet keyed by (instrument, tf); a `Feed` impl reading it in
-   availability order; golden test: synthetic bars round-trip through
-   Parquet bit-identically; then the demo strategy runs on real ES 1m.
-   **← "working backtester" checkpoint.**
-5. **First honest number:** SMA-cross on real ES under `spread_cross`, with
-   benchmark and %-of-capital in the output — expected verdict: unprofitable.
-   That's the control group working, and it closes M1.
+4. ~~**`transcode` + `ParquetBarFeed`.**~~ **Done 2026-07-28.** DBN →
+   `curated/bars/{instrument}/{tf}/{window}.parquet`, integer columns end to
+   end, a `Feed` reading it in availability order with every failure resolved
+   at construction. Two goldens: synthetic bars round-trip through Parquet
+   bit-identically, and synthetic bars round-trip through a real DBN encode →
+   transcode → Parquet read bit-identically. **← "working backtester"
+   checkpoint, passed.**
+5. ~~**First honest number.**~~ **Done 2026-07-28.** SMA(20/50) on ESH4,
+   January 2024, 30,167 1-minute bars, `spread_cross` at 1 tick + $1.25:
+   **−23.51 %** of capital, 665 round trips, 27.1 % win rate, naive Sharpe
+   −11.39. Costless upper bound is **−5.21 %**, so the strategy has no edge
+   *before* costs and costs roughly quadruple the loss (the half-spread sweep
+   is exactly linear at $16,637.50 per tick over 1,331 contracts). The control
+   group works.
 
 Estimated wall-clock: 1–2 weeks part-time, dominated by the subscription-month
 start date (choose it deliberately; the clock burns from day one).
@@ -175,11 +183,12 @@ start date (choose it deliberately; the clock burns from day one).
 
 Effort estimates are part-time. Each milestone's exit criterion is demoable.
 
-### M1 — Data foundation *(≈ 80% done; finish ≈ 1–2 weeks)*
-Remaining: §5 steps 1–5, plus session calendar v1 (Globex sessions, holidays,
-`bars_per_year`), continuous contracts v1 (volume-roll table; signals on
-back-adjusted, PnL on tradeable prices), and the data-QA report (gaps,
-zero-volume runs, spikes, DST boundaries — `condition.json` feeds it).
+### M1 — Data foundation *(≈ 90% done; finish ≈ 1 week + the blitz)*
+Remaining: §5 steps 2–3 (review, then the subscription blitz), plus session
+calendar v1 (Globex sessions, holidays, `bars_per_year`), continuous contracts
+v1 (volume-roll table; signals on back-adjusted, PnL on tradeable prices), and
+the data-QA report (gaps, zero-volume runs, spikes, DST boundaries —
+`condition.json` feeds it).
 **Exit:** a fresh machine with an API key reaches a validated local archive
 with one command sequence, and the demo strategy backtests on real ES bars.
 
@@ -327,12 +336,14 @@ still behaving (a profitable demo under costs is a red alert, not a win).
 
 ## 11. Immediate next actions
 
-1. Close the $0.14 acceptance pull when the vendor queue completes; push.
-2. Architect review of the execute path (committed; blocks subscription).
-3. Pick the subscription start date; run the blitz per RUNBOOK_BLITZ.
-4. `transcode` + `ParquetBarFeed` session → **working-backtester checkpoint** (§5.4–5.5).
-5. Start Andrew Ng's ML course in parallel (feeds M2.5/M3 combiner).
-6. At M2.5 exit: send the first predictor report to the external reviewer.
+1. Architect review of the execute path **and the curated/transcode path**
+   (committed; blocks the subscription).
+2. Pick the subscription start date; run the blitz per RUNBOOK_BLITZ, then
+   `crucible transcode` each tranche as it lands.
+3. Finish M1: session calendar v1 (which takes `bars_per_year` off `backtest`),
+   continuous contracts v1, data-QA report.
+4. Start Andrew Ng's ML course in parallel (feeds M2.5/M3 combiner).
+5. At M2.5 exit: send the first predictor report to the external reviewer.
 
 ---
 
@@ -342,7 +353,7 @@ still behaving (a profitable demo under costs is a red alert, not a win).
 |---|---|
 | `PROJECT_PLAN.md` | This file — strategic map; updated at milestone boundaries |
 | `CLAUDE.md` | Session contract: invariants, architecture rules, style, workflow |
-| `docs/DECISIONS.md` | Append-only decision log (D-0001…D-0035 and counting) |
+| `docs/DECISIONS.md` | Append-only decision log (D-0001…D-0038 and counting) |
 | `docs/MILESTONES.md` | Executable checklist — **source of truth for current scope** |
 | `docs/DATA_PLAN.md` | Buy list / do-not-buy list / data caveats |
 | `docs/RUNBOOK_BLITZ.md` | Subscription-month operating procedure |

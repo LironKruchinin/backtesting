@@ -8,10 +8,15 @@
 //! ## Layout (under `$CRUCIBLE_DATA_DIR`, which is NEVER inside the repo)
 //!
 //! ```text
-//! raw/{dataset}/{schema}/{symbol}/{yyyy-mm}.dbn.zst   # immutable, append-only
-//! curated/bars/{symbol}/{tf}/{yyyy}.parquet           # regenerable from raw
-//! manifest.jsonl                                      # one record per acquired slice
+//! raw/{dataset}/{schema}/{symbol}/{yyyy-mm}.dbn.zst    # immutable, append-only
+//! curated/bars/{instrument}/{tf}/{window}.parquet      # regenerable from raw
+//! manifest.jsonl                                       # one record per acquired slice
 //! ```
+//!
+//! Only `raw/` and the manifest are this module's business. The curated
+//! layout is [`crate::curated`]'s, and it is one file per *source window*
+//! rather than per year — see D-0036 for why a year-named file would have to
+//! be merged.
 //!
 //! The catalog takes an already-resolved data-dir [`PathBuf`]; reading
 //! `$CRUCIBLE_DATA_DIR` is the job of bin targets, never library code.
@@ -50,8 +55,12 @@
 //!   is the one query whose wrong answer costs money, so a malformed symbol
 //!   is an error, never a confident "you own nothing" (D-0020).
 //! - **Curated is disposable** and NOT tracked by this manifest. Curated
-//!   files are rebuilt from raw; recording the transcoder version that
-//!   produced them belongs to the transcode task (M1, later), not here.
+//!   files are rebuilt from raw, and each one records its own schema and
+//!   transcoder version — plus the `file_blake3` of the raw file it came
+//!   from, so the provenance chain back to a manifest id survives without a
+//!   second index (D-0036). `validate_file_path` refuses a `curated/` path
+//!   for exactly this reason: the manifest records acquisitions, and a
+//!   derived file is not one.
 //! - **The catalog is the checksum gatekeeper** (D-0017): [`Catalog::append`]
 //!   hashes the file on disk itself — callers cannot supply a checksum or
 //!   size, so the manifest can never disagree with the bytes we actually

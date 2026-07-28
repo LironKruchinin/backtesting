@@ -75,7 +75,85 @@ impl Price {
         let offset = if self.0 >= 0 { half } else { -half };
         Price((self.0 + offset) / tick.0 * tick.0)
     }
+
+    /// Parses a decimal price in points (`"0.25"`, `"5000"`, `"-1.5"`)
+    /// **without ever constructing an `f64`**.
+    ///
+    /// The lossy constructor above is sanctioned for tests and synthetic
+    /// data; a tick size or a contract price typed by an operator is neither.
+    /// `"0.25"` happens to be exact in binary, but `"0.1"` is not, and a tick
+    /// size one nanopoint off snaps every fill in a backtest to the wrong
+    /// grid — quietly, and only on some instruments (§2.3, and the same
+    /// argument D-0027 makes for money).
+    ///
+    /// Accepts an optional sign and `_` digit separators. Rejects exponents
+    /// and anything finer than a nanopoint, because both are typos rather
+    /// than prices.
+    ///
+    /// # Errors
+    /// [`ParsePriceError`] describing what was wrong with the text.
+    pub fn from_points_str(text: &str) -> Result<Price, ParsePriceError> {
+        let bad = |reason: &str| ParsePriceError(format!("invalid price {text:?}: {reason}"));
+
+        let trimmed = text.trim();
+        let (negative, body) = match trimmed.strip_prefix('-') {
+            Some(rest) => (true, rest),
+            None => (false, trimmed.strip_prefix('+').unwrap_or(trimmed)),
+        };
+        let body: String = body.chars().filter(|c| *c != '_').collect();
+        if body.is_empty() {
+            return Err(bad("no digits"));
+        }
+        if body.contains(['e', 'E']) {
+            return Err(bad("exponent notation is not accepted for a price"));
+        }
+
+        let mut parts = body.split('.');
+        let int_part = parts.next().unwrap_or("");
+        let frac_part = parts.next().unwrap_or("");
+        if parts.next().is_some() {
+            return Err(bad("more than one decimal point"));
+        }
+        if int_part.is_empty() && frac_part.is_empty() {
+            return Err(bad("no digits"));
+        }
+        if !int_part.chars().all(|c| c.is_ascii_digit())
+            || !frac_part.chars().all(|c| c.is_ascii_digit())
+        {
+            return Err(bad("contains a non-digit"));
+        }
+        // PRICE_SCALE is 1e-9, so nine fractional digits is the finest a
+        // price can express; more is a typo, not precision.
+        if frac_part.len() > 9 {
+            return Err(bad(
+                "more than nine fractional digits; one nanopoint is the finest price",
+            ));
+        }
+
+        let mut digits = String::with_capacity(int_part.len() + 9);
+        digits.push_str(if int_part.is_empty() { "0" } else { int_part });
+        digits.push_str(frac_part);
+        for _ in frac_part.len()..9 {
+            digits.push('0');
+        }
+        let magnitude: i64 = digits
+            .parse()
+            .map_err(|_| bad("does not fit in i64 nanopoints"))?;
+        Ok(Price(if negative { -magnitude } else { magnitude }))
+    }
 }
+
+/// Error returned when parsing a [`Price`] from decimal text fails.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParsePriceError(pub String);
+
+impl fmt::Display for ParsePriceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for ParsePriceError {}
 
 impl std::ops::Add for Price {
     type Output = Price;
@@ -320,5 +398,86 @@ mod tests {
         };
         let delta = Price::from_points_f64_lossy(1.25);
         assert_eq!(spec.pnl_nano_usd(delta, 2), 125_000_000_000);
+    }
+
+    // Hand-derived: PRICE_SCALE is 1e9, so 0.25 points is 250_000_000
+    // nanopoints and 5000 points is 5_000_000_000_000.
+    #[test]
+    fn prices_parse_from_text_exactly() {
+        assert_eq!(
+            Price::from_points_str("0.25"),
+            Ok(Price::from_nanos(250_000_000))
+        );
+        assert_eq!(
+            Price::from_points_str("5000"),
+            Ok(Price::from_nanos(5_000_000_000_000))
+        );
+        assert_eq!(Price::from_points_str("0"), Ok(Price::ZERO));
+        assert_eq!(
+            Price::from_points_str(".5"),
+            Ok(Price::from_nanos(500_000_000))
+        );
+        assert_eq!(
+            Price::from_points_str("-1.5"),
+            Ok(Price::from_nanos(-1_500_000_000))
+        );
+        assert_eq!(
+            Price::from_points_str("  0.25  "),
+            Ok(Price::from_nanos(250_000_000))
+        );
+        assert_eq!(
+            Price::from_points_str("1_000.5"),
+            Ok(Price::from_nanos(1_000_500_000_000))
+        );
+        assert_eq!(
+            Price::from_points_str("0.000000001"),
+            Ok(Price::from_nanos(1))
+        );
+    }
+
+    // The reason this exists rather than routing through the lossy
+    // constructor: 0.1 is not representable in binary, and a tick size one
+    // nanopoint off snaps every fill in a backtest onto the wrong grid.
+    #[test]
+    fn text_parsing_beats_the_lossy_constructor_where_binary_cannot_help() {
+        assert_eq!(
+            Price::from_points_str("0.1"),
+            Ok(Price::from_nanos(100_000_000))
+        );
+        assert_eq!(
+            Price::from_points_str("6.05"),
+            Ok(Price::from_nanos(6_050_000_000))
+        );
+    }
+
+    #[test]
+    fn malformed_prices_are_rejected() {
+        for bad in [
+            "",
+            "abc",
+            "1.2.3",
+            "1e3",
+            "1.2a",
+            " . ",
+            "--1",
+            "0.0000000001",
+        ] {
+            assert!(
+                Price::from_points_str(bad).is_err(),
+                "expected {bad:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn parsed_prices_round_trip_through_display() {
+        for text in ["0.25", "5000", "1234.5", "0.000000001"] {
+            let price = Price::from_points_str(text).expect("valid price");
+            assert_eq!(
+                Price::from_points_str(&price.to_string()),
+                Ok(price),
+                "{text} did not survive Display"
+            );
+        }
     }
 }

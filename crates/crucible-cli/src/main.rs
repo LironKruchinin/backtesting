@@ -1,11 +1,16 @@
 //! `crucible` — CLI entry point.
 //!
-//! v0 ships one real command, `demo`, which runs the reference strategy on a
-//! seeded random walk under two fill models. It exists to prove the vertical
-//! slice end-to-end, to show the cost-of-costs lesson in one screen, and to
-//! give CI a determinism hash (`demo --hash-only`). `env` reports what the
-//! process environment looks like, so a misconfigured key is found before a
-//! download is paid for rather than after.
+//! `demo` runs the reference strategy on a seeded random walk under two fill
+//! models: it proves the vertical slice end-to-end, shows the cost-of-costs
+//! lesson in one screen, and gives CI a determinism hash
+//! (`demo --hash-only`). `env` reports what the process environment looks
+//! like, so a misconfigured key is found before a download is paid for rather
+//! than after.
+//!
+//! The archive path is `pull` (buy and verify raw DBN) → `verify` (re-hash it)
+//! → `transcode` (raw into curated Parquet) → `backtest` (replay it). Only
+//! `pull` can spend money, and only `pull` and `transcode` need the
+//! `databento` feature.
 //!
 //! ## Environment (D-0022)
 //!
@@ -17,7 +22,9 @@
 //! matter are `DATABENTO_API_KEY` and `CRUCIBLE_DATA_DIR`; neither has a
 //! default, and the key is never printed, logged, or passed as an argument.
 
+mod backtest;
 mod pull;
+mod transcode;
 
 use std::path::{Path, PathBuf};
 
@@ -42,11 +49,13 @@ ENVIRONMENT:\n\
 \x20 Both may be set in a .env file at the repo root; real environment\n\
 \x20 variables take precedence over it. .env is gitignored — never commit it.\n\
 \n\
-NOTE: `pull` needs a build with the Databento client:\n\
+TYPICAL ORDER:\n\
+\x20 pull -> verify -> transcode -> backtest\n\
+\n\
+NOTE: `pull` and `transcode` need a build with the Databento client:\n\
 \x20 cargo run -p crucible-cli --features databento -- pull ...\n\
 \n\
 PLANNED (see docs/MILESTONES.md):\n\
-\x20 transcode   M1  DBN -> curated Parquet\n\
 \x20 screen      M3  stage 0-1 signal triage / coarse grid\n\
 \x20 funnel      M3  full staged evaluation of a config\n\
 \x20 report      M3  render verdict scorecards";
@@ -77,6 +86,10 @@ enum Command {
     Pull(pull::PullArgs),
     /// Re-hash the archive against the manifest.
     Verify,
+    /// Build curated Parquet bars from the raw DBN archive.
+    Transcode(transcode::TranscodeArgs),
+    /// Replay curated bars through the reference strategy.
+    Backtest(backtest::BacktestArgs),
 }
 
 fn main() {
@@ -97,6 +110,8 @@ fn main() {
         }
         Some(Command::Pull(args)) => pull::run(&args),
         Some(Command::Verify) => pull::verify(),
+        Some(Command::Transcode(args)) => transcode::run(&args),
+        Some(Command::Backtest(args)) => backtest::run(&args),
         // Bare `crucible` stays a zero-exit help screen: it is what a new
         // reader types first, and it has not failed at anything.
         None => {
