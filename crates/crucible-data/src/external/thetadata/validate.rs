@@ -187,6 +187,16 @@ pub struct ValidationReport {
     pub conflicting_pairs: u64,
     /// Rows dropped by the zero-sentinel condition (§4.3).
     pub sentinel_rows_dropped: u64,
+    /// Kept rows whose whole OHLC block is zero.
+    ///
+    /// On `eod` this is *ordinary*: it means the contract did not trade that
+    /// day, and most of a chain does not trade on most days (D-0055). It is
+    /// recorded rather than acted on, as a second era fingerprint beside the
+    /// dup rate — a VIX-shaped root runs high and that is fine, but the rate
+    /// moving sharply for a root that has always been liquid is a finding
+    /// about the vendor's pipeline, and the only way to notice is to have been
+    /// writing it down all along.
+    pub zero_ohlc_rows: u64,
 }
 
 impl ValidationReport {
@@ -202,6 +212,19 @@ impl ValidationReport {
         }
         // Both counts come from one response and are far below 2^53.
         self.raw_rows as f64 / self.distinct_rows as f64
+    }
+
+    /// Fraction of kept rows carrying an all-zero OHLC block.
+    ///
+    /// `None` when nothing was kept — unmeasured, not zero, for the same
+    /// reason every other rate here refuses to report a figure over an empty
+    /// sample (§0.4).
+    #[must_use]
+    pub fn zero_ohlc_rate(&self) -> Option<f64> {
+        let kept = self
+            .distinct_rows
+            .saturating_sub(self.sentinel_rows_dropped);
+        (kept > 0).then(|| self.zero_ohlc_rows as f64 / kept as f64)
     }
 }
 
@@ -317,6 +340,7 @@ pub fn validate(
         });
     }
 
+    report.zero_ohlc_rows = count_zero_ohlc(&index, &kept);
     report.distinct_rows = kept.len() as u64 + report.sentinel_rows_dropped;
     Ok(ValidatedResponse {
         endpoint,
@@ -517,6 +541,27 @@ fn drop_zero_sentinels(
     kept
 }
 
+/// How many rows carry an all-zero OHLC block.
+///
+/// Zero when the endpoint has no OHLC columns at all, which is a real answer
+/// rather than a missing one: `open_interest` and `quote` cannot have a
+/// zero-OHLC rate.
+fn count_zero_ohlc(index: &ColumnIndex, rows: &[RawRow]) -> u64 {
+    let ohlc = ["open", "high", "low", "close"];
+    if ohlc.iter().any(|c| index.position(c).is_none()) {
+        return 0;
+    }
+    rows.iter()
+        .filter(|row| {
+            ohlc.iter().all(|c| {
+                row.get(index, c)
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .is_some_and(|v| v == 0.0)
+            })
+        })
+        .count() as u64
+}
+
 /// Whether every row's OHLC block is zero — the SPY 2016-01-04 shape.
 fn all_zero_ohlc(index: &ColumnIndex, rows: &[RawRow]) -> bool {
     let ohlc = ["open", "high", "low", "close"];
@@ -624,6 +669,50 @@ pub fn reconcile(
     Ok(out)
 }
 
+/// Finds the first session in `sessions` for which `has_data` is true.
+///
+/// Pulled out of the CLI so the geometry that broke the first version has a
+/// test rather than an anecdote. `sessions` must be **sessions**, not calendar
+/// days: a weekend answers the vendor's 472 exactly like a date below a root's
+/// floor, so over calendar days the predicate is not monotone and bisection
+/// converges on whichever Monday it happens to straddle. The first
+/// implementation reported SPY's greeks floor as 2021-03-22 that way — a
+/// Monday whose preceding Sunday appeared to confirm it — when the true floor
+/// is 2017-01-03 (D-0057).
+///
+/// Returns the index of the first session with data, `Some(0)` when the whole
+/// range has it, and `None` when none does. `has_data` is called O(log n)
+/// times and may fail, which aborts the search rather than guessing.
+///
+/// # Errors
+/// Whatever `has_data` returns.
+pub fn first_session_with_data<E>(
+    sessions: usize,
+    mut has_data: impl FnMut(usize) -> Result<bool, E>,
+) -> Result<Option<usize>, E> {
+    if sessions == 0 {
+        return Ok(None);
+    }
+    let last = sessions - 1;
+    if !has_data(last)? {
+        return Ok(None);
+    }
+    if has_data(0)? {
+        return Ok(Some(0));
+    }
+    // Invariant: `lo` has no data, `hi` has it.
+    let (mut lo, mut hi) = (0usize, last);
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        if has_data(mid)? {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    Ok(Some(hi))
+}
+
 /// §4.4's third edge: the days a calendar expects against the days we hold.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CoverageVsCalendar {
@@ -672,10 +761,15 @@ impl CoverageVsCalendar {
 /// the NYSE was shut for Hurricane Sandy on 2012-10-29 and 30 while Globex
 /// traded — so borrowing it would have reported real closures as missing data.
 ///
+/// Takes a [`TradingDayCalendar`](crate::calendar::TradingDayCalendar) and not
+/// a `Calendar`, so the five index roots whose *hours* this project cannot
+/// state are still answerable about *dates* — and so nothing reachable from
+/// here can ask an index root what time it opened (D-0059).
+///
 /// `end` is exclusive, matching every other range in this crate.
 #[must_use]
 pub fn coverage_vs_calendar(
-    calendar: &crate::calendar::Calendar,
+    calendar: &crate::calendar::TradingDayCalendar,
     start: CivilDate,
     end: CivilDate,
     held: &BTreeSet<CivilDate>,

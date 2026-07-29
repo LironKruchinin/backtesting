@@ -561,8 +561,10 @@ fn day(year: i64, month: u32, day: u32) -> CivilDate {
     CivilDate { year, month, day }
 }
 
-fn us_calendar() -> crate::calendar::Calendar {
-    crate::calendar::Calendar::by_id("us_equity_options").expect("bundled")
+fn us_calendar() -> crate::calendar::TradingDayCalendar {
+    crate::calendar::Calendar::by_id("us_equity_options")
+        .expect("bundled")
+        .into_trading_days()
 }
 
 // One ordinary week: five sessions, all held, nothing missing.
@@ -627,4 +629,214 @@ fn an_empty_window_reports_unmeasured_coverage() {
     let out = coverage_vs_calendar(&us_calendar(), day(2024, 1, 6), day(2024, 1, 8), &held);
     assert_eq!(out.expected_sessions, 0, "a weekend");
     assert_eq!(out.coverage(), None, "not Some(1.0)");
+}
+
+// -------------------------------------------------------------------------
+// Floor bisection, and the planted control for the geometry that fooled v1.
+// -------------------------------------------------------------------------
+
+/// Days since the Unix epoch, so a fixture can talk in real dates.
+fn epoch_day(year: i64, month: u32, d: u32) -> i64 {
+    crate::ingest::window::days_from_civil(day(year, month, d))
+}
+
+/// The sessions a calendar lists over a range — what the search must index.
+fn sessions_between(start: CivilDate, end: CivilDate) -> Vec<i64> {
+    let cal = us_calendar();
+    (crate::ingest::window::days_from_civil(start)..crate::ingest::window::days_from_civil(end))
+        .filter(|d| cal.is_trading_day(crate::ingest::window::civil_from_days(*d)))
+        .collect()
+}
+
+#[test]
+fn bisection_finds_the_first_session_with_data() {
+    let found = first_session_with_data::<()>(100, |i| Ok(i >= 37)).expect("no failure");
+    assert_eq!(found, Some(37));
+}
+
+#[test]
+fn a_range_entirely_covered_reports_its_first_session() {
+    assert_eq!(
+        first_session_with_data::<()>(50, |_| Ok(true)).expect("ok"),
+        Some(0)
+    );
+}
+
+#[test]
+fn a_range_with_no_data_anywhere_reports_none() {
+    assert_eq!(
+        first_session_with_data::<()>(50, |_| Ok(false)).expect("ok"),
+        None
+    );
+    assert_eq!(
+        first_session_with_data::<()>(0, |_| Ok(true)).expect("ok"),
+        None
+    );
+}
+
+// THE PLANTED CONTROL (D-0057). A synthetic floor whose eve falls on a
+// weekend — the exact geometry that made the first implementation confidently
+// wrong. The planted floor is Monday 2021-03-22; the day before it is Sunday
+// 2021-03-21, which any vendor answers 472 for whatever the floor is.
+//
+// Searching over CALENDAR DAYS finds a boundary at that Monday no matter where
+// the real floor sits, because every weekend looks like the floor. Searching
+// over SESSIONS finds the true floor. Both are run here against the same
+// planted data, and the assertion is that they disagree — which is what makes
+// this a control rather than a restatement.
+#[test]
+fn planted_floor_whose_eve_is_a_weekend_is_found_only_by_session_bisection() {
+    let start = day(2016, 1, 1);
+    let end = day(2022, 1, 1);
+    // The truth we plant: data begins Tuesday 2017-01-03, exactly where SPY's
+    // really does. Everything from that session onward has data.
+    let true_floor = epoch_day(2017, 1, 3);
+
+    // --- the correct search: over sessions ---
+    let sessions = sessions_between(start, end);
+    let found = first_session_with_data::<()>(sessions.len(), |i| Ok(sessions[i] >= true_floor))
+        .expect("ok")
+        .expect("data exists");
+    assert_eq!(
+        sessions[found], true_floor,
+        "session bisection must land exactly on the planted floor"
+    );
+
+    // --- the broken search: over calendar days, weekends answering 472 ---
+    let cal = us_calendar();
+    let all_days: Vec<i64> = (crate::ingest::window::days_from_civil(start)
+        ..crate::ingest::window::days_from_civil(end))
+        .collect();
+    let found_by_day = first_session_with_data::<()>(all_days.len(), |i| {
+        let d = all_days[i];
+        // A non-session answers "no data" indistinguishably from below-floor.
+        Ok(d >= true_floor && cal.is_trading_day(crate::ingest::window::civil_from_days(d)))
+    })
+    .expect("ok")
+    .expect("data exists");
+
+    assert_ne!(
+        all_days[found_by_day], true_floor,
+        "if this ever matches, the weekend hazard is gone and this control is \
+         no longer testing anything — check why before deleting it"
+    );
+    // And it is wrong in the specific way observed: it lands on a session whose
+    // previous calendar day is a weekend, which is what made the bad answer
+    // look self-confirming.
+    let landed = crate::ingest::window::civil_from_days(all_days[found_by_day]);
+    let eve = crate::ingest::window::civil_from_days(all_days[found_by_day] - 1);
+    assert!(cal.is_trading_day(landed), "it lands on a real session");
+    assert!(
+        !cal.is_trading_day(eve),
+        "whose eve is not — the false confirmation"
+    );
+}
+
+// -------------------------------------------------------------------------
+// The zero-OHLC rate: a fingerprint, never a gate (D-0055).
+// -------------------------------------------------------------------------
+
+// The measured VIX shape. A high rate is ordinary — most of a chain does not
+// trade on most days — and recording it is the only way a *change* in the rate
+// ever becomes visible.
+#[test]
+fn the_zero_ohlc_rate_is_recorded_and_does_not_refuse() {
+    let traded = eod_row("470.000", "CALL", "2024-01-02T18:00:00.000", "4.20");
+    let untraded = "VIX,2024-09-18,95.000,CALL,2024-01-02T17:25:19.675,\
+         2024-01-02T00:00:00.000,0.00,0.00,0.00,0.00,0,0,2435,5,0.25,50,2563,5,1.34,50"
+        .to_owned();
+    let rows = vec![traded, untraded];
+    let out = validate(Endpoint::OptionEod, &body(EOD_HEADER, &rows), "/x")
+        .expect("an untraded contract is ordinary data");
+    assert_eq!(out.report.zero_ohlc_rows, 1);
+    assert_eq!(out.report.zero_ohlc_rate(), Some(0.5));
+}
+
+// Endpoints with no OHLC cannot have a rate, and reporting 0.0 would imply one
+// was measured.
+#[test]
+fn an_endpoint_without_ohlc_has_no_zero_ohlc_rate_to_report() {
+    let out = validate(
+        Endpoint::OptionOpenInterest,
+        &body(OI_HEADER, &[oi_row("470.000", "CALL", "12345")]),
+        "/x",
+    )
+    .expect("valid");
+    assert_eq!(out.report.zero_ohlc_rows, 0);
+    assert_eq!(out.report.zero_ohlc_rate(), Some(0.0));
+}
+
+#[test]
+fn an_empty_response_has_an_unmeasured_zero_ohlc_rate() {
+    let out = validate(Endpoint::OptionEod, &body(EOD_HEADER, &[]), "/x").expect("valid");
+    assert_eq!(out.report.zero_ohlc_rate(), None, "not Some(0.0)");
+}
+
+// -------------------------------------------------------------------------
+// Day-level coverage for the five index roots (D-0059).
+// -------------------------------------------------------------------------
+
+// The whole point of the day-level split: SPX has no hours this project can
+// state, and its dates are still answerable. Before this, edge 3 simply could
+// not be computed for five of the nine roots.
+#[test]
+fn every_thetadata_root_has_a_day_level_calendar() {
+    for root in [
+        "SPY", "QQQ", "IWM", "DIA", "SPX", "SPXW", "NDX", "VIX", "RUT",
+    ] {
+        let found = crate::calendar::Calendar::trading_days_for(
+            &crucible_core::types::InstrumentId::new(root),
+        )
+        .expect("parses")
+        .unwrap_or_else(|| panic!("{root} must have a day-level calendar"));
+        assert_eq!(found.id(), "us_equity_options", "{root}");
+    }
+}
+
+// And the barrier still holds: the five index roots get dates and nothing else.
+// `for_instrument` is the hour-level door and it stays shut for them, so
+// `is_open` and `bars_per_year` remain unreachable rather than wrong.
+#[test]
+fn index_roots_get_dates_but_never_hours() {
+    for root in ["SPX", "SPXW", "NDX", "VIX", "RUT"] {
+        assert!(
+            crate::calendar::Calendar::for_instrument(&crucible_core::types::InstrumentId::new(
+                root
+            ))
+            .expect("parses")
+            .is_none(),
+            "{root} must not get an hour-level calendar"
+        );
+        assert!(
+            crate::calendar::Calendar::trading_days_for(&crucible_core::types::InstrumentId::new(
+                root
+            ))
+            .expect("parses")
+            .is_some(),
+            "{root} must get a day-level one"
+        );
+    }
+}
+
+// A day-level root reconciles against the same session set as an ETF root,
+// which is the claim the Cboe citation supports and the reason edge 3 can be
+// authoritative rather than provisional.
+#[test]
+fn an_index_root_and_an_etf_root_expect_the_same_sessions() {
+    let spx = crate::calendar::Calendar::trading_days_for(
+        &crucible_core::types::InstrumentId::new("SPX"),
+    )
+    .expect("parses")
+    .expect("claimed");
+    let spy = crate::calendar::Calendar::trading_days_for(
+        &crucible_core::types::InstrumentId::new("SPY"),
+    )
+    .expect("parses")
+    .expect("claimed");
+
+    let held: BTreeSet<CivilDate> = (2..=5).map(|d| day(2024, 1, d)).collect();
+    let a = coverage_vs_calendar(&spx, day(2024, 1, 1), day(2024, 1, 7), &held);
+    let b = coverage_vs_calendar(&spy, day(2024, 1, 1), day(2024, 1, 7), &held);
+    assert_eq!(a, b);
+    assert!(a.is_clean());
 }

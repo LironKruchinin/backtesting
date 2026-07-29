@@ -69,6 +69,24 @@ pub(super) struct CalendarSpec {
     /// Dated exceptions that no rule generates.
     #[serde(default)]
     pub one_off: Vec<OneOffSpec>,
+    /// Roots whose **trading-day set** this calendar governs but whose
+    /// intraday hours it does not describe.
+    ///
+    /// The distinction is the whole point. A US index-option root keeps the
+    /// same holidays as cash equities and a different session (Cboe global
+    /// hours, 16:15 ET closes), so its *dates* are answerable here and its
+    /// *instants* are not. Listing it in `roots` would hand out a confident
+    /// wrong `is_open`; leaving it out entirely would make a coverage check
+    /// impossible. It goes here, and only [`TradingDayCalendar`] can reach it.
+    ///
+    /// [`TradingDayCalendar`]: super::TradingDayCalendar
+    #[serde(default)]
+    pub day_level_roots: Vec<String>,
+    /// Where the day-level claim came from. Required when
+    /// `day_level_roots` is non-empty — an unsourced claim about someone
+    /// else's exchange is exactly what this table format exists to prevent.
+    #[serde(default)]
+    pub day_level_source: Option<String>,
     /// Where the facts in this entry came from.
     pub sources: Vec<String>,
 }

@@ -161,6 +161,56 @@ pub enum DayEffect {
     },
 }
 
+/// A calendar narrowed to the questions it can answer about **dates**.
+///
+/// Exists because "which dates had a session" and "was the exchange open at
+/// this instant" have different answers for different roots off the same
+/// holiday set. US index options keep the cash-equity holidays and run
+/// different hours, so their dates are knowable here and their instants are
+/// not. Handing out a full [`Calendar`] for them would make `is_open`,
+/// `session_of` and `bars_per_year` reachable and wrong; this type simply does
+/// not have them (D-0042's device, applied to a second kind of value).
+#[derive(Debug, Clone)]
+pub struct TradingDayCalendar {
+    inner: Calendar,
+}
+
+impl TradingDayCalendar {
+    /// Stable identifier of the underlying calendar.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        self.inner.id()
+    }
+
+    /// True when `date` had a session.
+    #[must_use]
+    pub fn is_trading_day(&self, date: CivilDate) -> bool {
+        self.inner.is_trading_day(date)
+    }
+
+    /// What the calendar does to `date` — closure, early close, or normal.
+    ///
+    /// Early closes are reported for completeness; for a day-level root the
+    /// *time* is not this table's to state, only the fact that the day was
+    /// short.
+    #[must_use]
+    pub fn day_effect(&self, date: CivilDate) -> DayEffect {
+        self.inner.day_effect(date)
+    }
+
+    /// First date this calendar claims to describe.
+    #[must_use]
+    pub fn valid_from(&self) -> CivilDate {
+        self.inner.valid_from()
+    }
+
+    /// Every source the underlying calendar rests on.
+    #[must_use]
+    pub fn sources(&self) -> &[String] {
+        self.inner.sources()
+    }
+}
+
 /// One exchange's session calendar.
 ///
 /// Construct with [`Calendar::by_id`] or [`Calendar::for_instrument`]. Parsing
@@ -173,6 +223,7 @@ pub struct Calendar {
     description: String,
     tz: chrono_tz::Tz,
     roots: Vec<String>,
+    day_level_roots: Vec<String>,
     shape: SessionShape,
     open_local: LocalTime,
     close_local: LocalTime,
@@ -299,13 +350,60 @@ impl Calendar {
     /// would let `ESG` (a different product) inherit `ES`'s session.
     #[must_use]
     pub fn governs(&self, instrument: &str) -> bool {
+        Self::matches_any(&self.roots, instrument)
+    }
+
+    /// True when this calendar governs the instrument's **trading days**,
+    /// whether or not it describes its hours.
+    ///
+    /// A superset of [`Calendar::governs`]: every root whose hours are
+    /// described also has its dates described, but not the reverse.
+    #[must_use]
+    pub fn governs_days(&self, instrument: &str) -> bool {
+        self.governs(instrument) || Self::matches_any(&self.day_level_roots, instrument)
+    }
+
+    /// Whether any root in `roots` prefixes the instrument.
+    fn matches_any(roots: &[String], instrument: &str) -> bool {
         let candidate = strip_series_suffix(instrument);
-        self.roots.iter().any(|root| {
+        roots.iter().any(|root| {
             candidate == root
                 || candidate
                     .strip_prefix(root.as_str())
                     .is_some_and(is_contract_suffix)
         })
+    }
+
+    /// Narrows this calendar to the questions it can answer about **dates**.
+    ///
+    /// The returned view exposes no `is_open`, no `session_of` and no
+    /// `bars_per_year`, because for a day-level root those answers would be
+    /// confidently wrong. Same device as [`AdjustedPrice`] (D-0042): the way
+    /// to stop a value being used where it does not belong is to make the call
+    /// not exist, not to write a comment asking people not to make it.
+    ///
+    /// [`AdjustedPrice`]: crate::continuous::AdjustedPrice
+    #[must_use]
+    pub fn into_trading_days(self) -> TradingDayCalendar {
+        TradingDayCalendar { inner: self }
+    }
+
+    /// The day-level calendar governing an instrument, if one does.
+    ///
+    /// Answers for index-option roots that [`Calendar::for_instrument`]
+    /// declines, which is the point: a coverage check needs the trading-day
+    /// set for all nine ThetaData roots, and only four of them have hours this
+    /// project can state (D-0058).
+    ///
+    /// # Errors
+    /// [`CalendarError`] if a bundled table does not parse.
+    pub fn trading_days_for(
+        instrument: &InstrumentId,
+    ) -> Result<Option<TradingDayCalendar>, CalendarError> {
+        Ok(Self::all()?
+            .into_iter()
+            .find(|c| c.governs_days(instrument.as_str()))
+            .map(Calendar::into_trading_days))
     }
 
     /// The trading day the exchange attributes `ts` to.
@@ -616,6 +714,27 @@ impl Calendar {
             &spec.id,
             "session.rth_close_local",
         )?;
+        // A day-level claim is a claim about an exchange this table does not
+        // otherwise describe, so it must carry its own citation. Enforced at
+        // load rather than trusted, because the whole value of `day_level_roots`
+        // is that someone checked (D-0059).
+        if !spec.day_level_roots.is_empty() && spec.day_level_source.is_none() {
+            return Err(invalid(format!(
+                "declares day_level_roots {:?} but no day_level_source. A calendar that \
+                 claims another exchange's trading days must cite where that came from",
+                spec.day_level_roots
+            )));
+        }
+        // A root cannot be both: `roots` already implies its dates, and listing
+        // it twice would make `governs` and `governs_days` disagree about which
+        // answer is authoritative.
+        if let Some(both) = spec.day_level_roots.iter().find(|r| spec.roots.contains(r)) {
+            return Err(invalid(format!(
+                "root {both} appears in both roots and day_level_roots; hour-level \
+                 already implies day-level"
+            )));
+        }
+
         match spec.session.shape {
             SessionShape::Overnight if close_local >= open_local => {
                 return Err(invalid(format!(
@@ -766,6 +885,7 @@ impl Calendar {
             description: spec.description,
             tz,
             roots: spec.roots,
+            day_level_roots: spec.day_level_roots,
             shape: spec.session.shape,
             open_local,
             close_local,

@@ -48,15 +48,25 @@
 //! Quotes and `eod` reach back to the subscription floor of 2012-06-01. Greeks
 //! do not, and the gap is not uniform:
 //!
+//! Measured for all nine roots by `crucible theta-floors`, each verified
+//! against its previous session and three samples above it (D-0057):
+//!
 //! | Root | `eod` | `greeks/eod` |
 //! |---|---|---|
-//! | SPY | 2012-06-01 | **~2017** — no greeks on any 2012–2016 date tested |
-//! | QQQ | 2012-06-01 | at least 2013-07 |
-//! | NDX | 2012-06-01 | **~2026-06** — the vendor's NDX underlying feed starts 2026-05 |
+//! | SPY, IWM, SPX, SPXW, VIX, DIA | 2012-06-01 | **2017-01-03** |
+//! | RUT | 2012-06-01 | **2018-12-03** |
+//! | QQQ | 2012-06-01 | at or below **2012-06-01** |
+//! | NDX | 2012-06-01 | **2026-05-08** |
+//!
+//! **Six roots share one date**, which makes this a vendor pipeline switching
+//! on at the 2016→2017 turn rather than six independent data availabilities —
+//! the same kind of boundary as D-0054's 2021→2022 dedup change, and equally
+//! invisible to anything computed from the data rather than probed at the edge.
 //!
 //! A greeks request before a root's floor answers [`STATUS_NO_DATA`] with
 //! "No data found for your request". That is an ordinary outcome to record,
-//! not a failure to retry, and not a gap to re-attempt on the next run.
+//! not a failure to retry, and not a gap to re-attempt on the next run —
+//! [`plan`] does not even issue it.
 //!
 //! ## Module map
 //!
@@ -82,11 +92,11 @@
 //!   file cannot look complete.
 //! - [`error`] — failure modes, including the vendor's nonstandard 472.
 //!
-//! ### Still to implement
-//!
-//! - `plan` — expands a tranche (roots × dates × endpoints) into [`Request`]s,
-//!   subtracts what the inventory already holds, and refuses to start when
-//!   free disk would fall below the floor the run reserves.
+//! - [`plan`] — expands a tranche (roots × dates × endpoints) into
+//!   [`Request`]s, subtracts what the inventory already holds, and refuses to
+//!   start when free disk would fall below the floor the run reserves. Every
+//!   tranche fires through its dry run first: plan, then execute (D-0024's
+//!   pattern, which has now caught a mistake twice).
 //!
 //! [`Request`]: client::Request
 //! [`STATUS_NO_DATA`]: error::STATUS_NO_DATA
@@ -95,6 +105,7 @@ pub mod client;
 pub mod error;
 pub mod inventory;
 pub mod pacer;
+pub mod plan;
 pub mod schema;
 pub mod transcode;
 pub mod validate;
@@ -103,5 +114,6 @@ pub use client::{DEFAULT_BASE_URL, MAX_CONCURRENCY, Request, ThetaClient};
 pub use error::{STATUS_NO_DATA, ThetaError};
 pub use inventory::{INVENTORY_SCHEMA_VERSION, Inventory, InventoryRecord};
 pub use pacer::Pacer;
+pub use plan::{DryRunReport, PlannedRequest, TranchePlan, TrancheSpec};
 pub use schema::{ColumnIndex, ContractKey, Endpoint, is_zero_sentinel};
 pub use validate::{Reconciliation, ValidatedResponse, ValidationReport, reconcile, validate};

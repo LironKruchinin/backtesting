@@ -188,11 +188,22 @@ sampled above the boundary all carry data):
 | QQQ | 2012-06-01 | **≤ 2012-06-01** | at or below the subscription floor |
 | NDX | 2012-06-01 | **2026-05-08** | 2026-05-07 → 472 |
 
-**Six roots share one date to the day.** That is not six independent data
-availabilities; it is a vendor pipeline switching on at the 2016→2017 turn —
-structurally the same kind of boundary as D-0054's 2021→2022 dedup change, and
-it corroborates the earlier hand probe that put SPY at "200 on 2017-01-03".
-QQQ and RUT are the exceptions, so the switch-on was not uniform.
+**Six roots share one date to the day, and that is the finding.** It is not six
+independent data availabilities; it is a **vendor pipeline switch-on at the
+2016→2017 turn**, structurally the same kind of boundary as D-0054's 2021→2022
+dedup change. Both are build-pipeline events rather than market events, which
+means neither is a property of the instrument and neither will show up in
+anything computed *from* the data — the only way to know is to have probed the
+edge. It also corroborates the earlier hand probe that put SPY at "200 on
+2017-01-03". QQQ and RUT are the exceptions, so the switch-on was not uniform,
+and RUT's own 2018-12-03 is a second, smaller switch.
+
+**Measured beats documented, and the discrepancy is recorded rather than
+quietly overwritten.** This document and D-0053 both said NDX greeks began
+**~2026-06** (from "empty 2026-05-01, 1.5 MB 2026-07-01"). Bisection puts it at
+**2026-05-08**, verified — three weeks earlier, and inside the interval the
+older probe had bracketed but not resolved. The measurement wins; the earlier
+figure was an interpolation between two samples and never claimed otherwise.
 
 A request below a floor answers **HTTP 472** ("No data found for your
 request"), which is an ordinary outcome to record, not a failure to retry.
@@ -483,17 +494,14 @@ that drifts shows up as a cell mismatch rather than as a plausible file.
 | **Validator per §4 with planted controls** | `external/thetadata/validate.rs`; every detector paired with a planted bug that is asserted to fire — cross-parse both ways, header drift in four directions, `(contract, created)` repeat, repeated contract-minute, mid-day zero-underlying, `iv_error` at and beyond 100, all-zero series, inverted eod↔greeks, OI key absent from eod, DST gap and ambiguous hour |
 | **`inventory.jsonl` schema** | `external/thetadata/inventory.rs`; append-only, resume by request diff, torn-final-line control |
 | **Pacer constants** | §5, recorded and unit-tested (D-0056) |
+| **Greeks floors, all nine roots** | `crucible theta-floors`, 132 requests, each verified against its previous session and three samples above it (§3.4, D-0057) |
+| **Coverage vs calendar, edge 3** | `us_equity_options` (D-0058) + `TradingDayCalendar` (D-0059). **Authoritative** for SPY/QQQ/IWM/DIA, whose hours and dates are both sourced. **Sourced day-level** for SPX/SPXW/NDX/VIX/RUT: Cboe's published US-options holiday schedule enumerates the same closure and early-close set, verified against the 2026 schedule as published and inferred from the same rules for earlier years rather than re-verified page by page |
 
 ### OPEN
 
-**Before T0** — **a US equity/options session calendar.** §4.4's third
-reconciliation edge (coverage vs calendar) has nothing to compute against: the
-only bundled table is `cme_globex_equity_index`, which claims ES/MES/NQ/MNQ/RTY/
-M2K and models a 17:00→16:00 CT Globex day. It is not a usable proxy — the
-trading-day sets genuinely differ inside T0's span (NYSE closed 2012-10-29/30
-for Hurricane Sandy while Globex traded electronically), so substituting it
-would manufacture false "missing sessions". This gate was not in the plan and is
-the one thing standing between T0 and a closed validation gate.
+**Before T0** — the acquisition driver (`external::thetadata::plan`): tranche
+expansion, resume by inventory diff, the free-disk guard, and the dry run T0
+fires through. Nothing else.
 
 **Before T1** — measured SPX/QQQ/IWM per-day sizes · Databento blitz at terminal
 state (`statistics` still at `submitted`).

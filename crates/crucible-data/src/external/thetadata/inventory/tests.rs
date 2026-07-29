@@ -11,6 +11,10 @@ fn report() -> ValidationReport {
         identical_pairs: 2956,
         conflicting_pairs: 0,
         sentinel_rows_dropped: 0,
+        // The measured VIX-style shape: most of a chain does not trade on a
+        // given day, so a high rate is ordinary and only a *change* is a
+        // finding (D-0055).
+        zero_ohlc_rows: 1800,
     }
 }
 

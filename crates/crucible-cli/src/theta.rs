@@ -564,56 +564,37 @@ mod enabled {
             };
 
             let last = sessions.len() - 1;
-            // Does the root have greeks at all, anywhere in the window?
-            match probe(last, &mut requests) {
-                Some(true) => {}
-                Some(false) => {
+            // The search itself lives in `crucible-data` so it can be tested
+            // against the planted weekend-eve geometry that broke the first
+            // version (D-0057); this loop only supplies the predicate and the
+            // reporting. Logic in the CLI is a smell (CLAUDE.md §3).
+            let outcome = crucible_data::external::thetadata::validate::first_session_with_data(
+                sessions.len(),
+                |index| probe(index, &mut requests).ok_or(()),
+            );
+            let hi = match outcome {
+                Err(()) => {
+                    failed += 1;
+                    continue;
+                }
+                Ok(None) => {
                     println!(
                         "  {root:<6} {:<12} {requests:>9}  no greeks anywhere in the window",
                         "none"
                     );
                     continue;
                 }
-                None => {
-                    failed += 1;
-                    continue;
-                }
-            }
-
-            // Invariant: session `lo` has no greeks, session `hi` has them.
-            // If `lo` already has them the floor is at or below the window's
-            // start and bisection has nothing to find.
-            let (mut lo, mut hi) = (0usize, last);
-            match probe(lo, &mut requests) {
-                Some(true) => {
+                Ok(Some(0)) => {
                     println!(
                         "  {root:<6} {:<12} {requests:>9}  at or below the subscription floor",
                         render_day(sessions[0])
                     );
                     continue;
                 }
-                Some(false) => {}
-                None => {
-                    failed += 1;
-                    continue;
-                }
-            }
+                Ok(Some(index)) => index,
+            };
+            let lo = hi - 1;
             let mut broke = false;
-            while hi - lo > 1 {
-                let mid = lo + (hi - lo) / 2;
-                match probe(mid, &mut requests) {
-                    Some(true) => hi = mid,
-                    Some(false) => lo = mid,
-                    None => {
-                        broke = true;
-                        break;
-                    }
-                }
-            }
-            if broke {
-                failed += 1;
-                continue;
-            }
 
             // Verify rather than trust. The loop's invariant already proves
             // `hi` has data and `lo` does not, but it proves nothing about

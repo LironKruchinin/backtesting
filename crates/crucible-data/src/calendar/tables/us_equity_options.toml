@@ -52,6 +52,19 @@
 #   the day before Independence Day, the day after Thanksgiving, and Christmas
 #   Eve when it falls on a weekday. They matter for `bars_per_year` and not at
 #   all for the trading-day set, which is what this file is used for today.
+# - **The July early close fires on six dates it should not**, and the rule
+#   vocabulary cannot express the condition that would stop it. The NYSE closes
+#   early on 3 July only when 4 July falls Tuesday-Friday; when it lands on a
+#   weekend or a Monday there is no early close at all. `weekday_before` has no
+#   way to say that, so this table produces a spurious 13:00 close on
+#   **2015-07-02, 2016-07-01, 2020-07-02, 2021-07-02, 2022-07-01 and
+#   2026-07-02** — confirmed absent from Cboe's published 2026 schedule, which
+#   lists the 3 July closure and no 2 July early close. Effect: about 18 hours
+#   understated across ~3,539 sessions, roughly 0.08 % of `bars_per_year`, and
+#   **zero** effect on the trading-day set this file is actually used for. It
+#   is listed rather than silently carried, and there is a test naming all six
+#   dates so the day it starts to matter it is already written down. The CME
+#   table carries the identical gap for the identical reason.
 # - The 2001 and 2004 closures and every pre-2012 special closure are out of
 #   scope and out of `valid_from`.
 # - Half-day rules for Christmas Eve are the fiddliest thing here: the NYSE
@@ -71,11 +84,32 @@ timezone = "America/New_York"
 # worse than no answer. `for_instrument` returns None for them, and the
 # ThetaData coverage check uses the trading-day set explicitly.
 roots = ["SPY", "QQQ", "IWM", "DIA"]
+# Roots whose TRADING DAYS this calendar governs but whose HOURS it does not.
+# Reachable only through `TradingDayCalendar`, which has no `is_open`,
+# `session_of` or `bars_per_year` — so a coverage check can ask about SPX
+# dates without anything being able to ask about SPX instants.
+#
+# The claim is that these keep the same holiday set as cash equities, and it is
+# established by comparing enumerated lists rather than by anyone asserting
+# equivalence. Cboe's own US-options hours page publishes its 2026 holiday
+# schedule as: New Year's Day, MLK, Presidents' Day, Good Friday, Memorial Day,
+# Juneteenth, Independence Day (observed 3 July), Labor Day, Thanksgiving,
+# Christmas — plus early closes the day after Thanksgiving and on Christmas
+# Eve. That is exactly the rule set below, closure for closure and early close
+# for early close. SPX, SPXW, VIX and RUT are Cboe-listed; NDX options list on
+# Nasdaq and Cboe, both of which keep the same US market holidays.
+#
+# Verified against the 2026 schedule as published. Earlier years are inferred
+# from the same rules rather than re-verified page by page, which is why the
+# gate ledger records this edge as authoritative for the four `roots` and
+# sourced-but-not-year-by-year-verified for these five.
+day_level_roots = ["SPX", "SPXW", "NDX", "VIX", "RUT"]
+day_level_source = "https://www.cboe.com/about/hours/us-options/"
 valid_from = "2012-06-01"
 sources = [
   "https://www.nyse.com/markets/hours-calendars",
   "https://www.nasdaq.com/market-activity/stock-market-holiday-schedule",
-  "https://www.optionseducation.org/referencelibrary/expiration-calendar",
+  "https://www.cboe.com/about/hours/us-options/",
 ]
 
 [calendar.session]

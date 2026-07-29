@@ -93,6 +93,16 @@ pub struct InventoryRecord {
     pub conflicting_pairs: u64,
     /// Rows dropped by the zero-sentinel condition.
     pub sentinel_rows_dropped: u64,
+    /// Fraction of kept rows whose OHLC block was entirely zero, or `None`
+    /// where the endpoint has no OHLC or nothing was kept.
+    ///
+    /// The second era fingerprint. A high rate is ordinary on a thin chain —
+    /// most contracts do not trade on most days — so this is never a gate; it
+    /// is written down so that a *change* in the rate is visible. D-0055
+    /// scoped the all-zero refusal by exactly this distinction, and the number
+    /// that settled it (VIX 2024-01-02: 672 of 1,058) would have been
+    /// unavailable if nobody had been recording it.
+    pub zero_ohlc_rate: Option<f64>,
     /// Reconciliation outcome for this (root, day), when one was computed.
     pub reconciliation: Option<Reconciliation>,
     /// When the fetch completed, as UTC nanoseconds.
@@ -143,6 +153,7 @@ impl InventoryRecord {
             n_builds_distribution: report.n_builds_distribution.clone(),
             conflicting_pairs: report.conflicting_pairs,
             sentinel_rows_dropped: report.sentinel_rows_dropped,
+            zero_ohlc_rate: report.zero_ohlc_rate(),
             reconciliation,
             fetched_ts,
         }
@@ -185,8 +196,8 @@ impl InventoryRecord {
              \"start_date\":{},\"end_date\":{},\"request\":{},\"file_path\":{},\
              \"file_blake3\":{},\"size_bytes\":{},\"row_count\":{},\
              \"distinct_contracts\":{},\"dup_rate\":{},\"n_builds_distribution\":{{{}}},\
-             \"conflicting_pairs\":{},\"sentinel_rows_dropped\":{},\"reconciliation\":{},\
-             \"fetched_ts\":{}}}",
+             \"conflicting_pairs\":{},\"sentinel_rows_dropped\":{},\"zero_ohlc_rate\":{},\
+             \"reconciliation\":{},\"fetched_ts\":{}}}",
             self.schema_version,
             json_string(&self.endpoint),
             json_string(&self.root),
@@ -203,6 +214,8 @@ impl InventoryRecord {
             builds,
             self.conflicting_pairs,
             self.sentinel_rows_dropped,
+            self.zero_ohlc_rate
+                .map_or_else(|| "null".to_owned(), format_ratio),
             reconciliation,
             self.fetched_ts,
         )

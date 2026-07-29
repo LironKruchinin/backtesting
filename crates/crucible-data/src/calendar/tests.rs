@@ -751,3 +751,123 @@ rationale = "fixture"
         Err(CalendarError::Invalid { .. })
     ));
 }
+
+// A day-level claim is a claim about an exchange this table does not otherwise
+// describe. Unsourced, it is exactly the kind of plausible assertion the whole
+// table format exists to prevent, so it refuses at load (D-0059).
+#[test]
+fn planted_day_level_roots_without_a_source_is_refused() {
+    let unsourced = r#"
+schema_version = 1
+
+[[calendar]]
+id = "unsourced"
+description = "claims another exchange with no citation"
+timezone = "America/New_York"
+roots = ["AAA"]
+day_level_roots = ["BBB"]
+valid_from = "2020-01-01"
+sources = ["fixture"]
+
+[calendar.session]
+shape = "same_day"
+open_local = "09:30"
+close_local = "16:00"
+rth_open_local = "09:30"
+rth_close_local = "16:00"
+source = "fixture"
+
+[calendar.reference_span]
+start = "2020-01-01"
+end = "2021-01-01"
+rationale = "fixture"
+"#;
+    assert!(matches!(
+        Calendar::parse_table("fixture", unsourced),
+        Err(CalendarError::Invalid { .. })
+    ));
+
+    // The same table WITH a citation loads, so the refusal is about the
+    // missing source and not about the feature.
+    let sourced = unsourced.replace(
+        r#"day_level_roots = ["BBB"]"#,
+        "day_level_roots = [\"BBB\"]\nday_level_source = \"https://example.invalid/hours\"",
+    );
+    Calendar::parse_table("fixture", &sourced).expect("a sourced claim is fine");
+}
+
+// Listing a root in both would make `governs` and `governs_days` disagree about
+// which answer is authoritative for it.
+#[test]
+fn planted_root_in_both_lists_is_refused() {
+    let both = r#"
+schema_version = 1
+
+[[calendar]]
+id = "double"
+description = "same root twice"
+timezone = "America/New_York"
+roots = ["AAA"]
+day_level_roots = ["AAA"]
+day_level_source = "https://example.invalid/hours"
+valid_from = "2020-01-01"
+sources = ["fixture"]
+
+[calendar.session]
+shape = "same_day"
+open_local = "09:30"
+close_local = "16:00"
+rth_open_local = "09:30"
+rth_close_local = "16:00"
+source = "fixture"
+
+[calendar.reference_span]
+start = "2020-01-01"
+end = "2021-01-01"
+rationale = "fixture"
+"#;
+    assert!(matches!(
+        Calendar::parse_table("fixture", both),
+        Err(CalendarError::Invalid { .. })
+    ));
+}
+
+// The six dates the `weekday_before` vocabulary cannot exclude. Named so that
+// the gap is written down rather than discovered, and so that a future rule
+// vocabulary able to express "only when 4 July falls Tue-Fri" has a list to
+// verify against. Worth ~18h across ~3,539 sessions and zero effect on the
+// trading-day set (D-0059).
+#[test]
+fn the_known_spurious_july_early_closes_are_exactly_these_six() {
+    let cal = us();
+    let expected = [
+        (2015, 7, 2),
+        (2016, 7, 1),
+        (2020, 7, 2),
+        (2021, 7, 2),
+        (2022, 7, 1),
+        (2026, 7, 2),
+    ];
+    for (year, month, day) in expected {
+        let date = CivilDate { year, month, day };
+        assert!(
+            matches!(cal.day_effect(date), DayEffect::EarlyClose { .. }),
+            "{year}-{month:02}-{day:02} is a known spurious early close; if this \
+             stopped firing the rule vocabulary improved and the doc gap should go"
+        );
+        assert!(
+            cal.is_trading_day(date),
+            "it is still a trading day — only the close time is wrong"
+        );
+    }
+    // And the genuine case still fires: 4 July 2024 was a Thursday, so
+    // Wednesday 3 July really was a 13:00 close.
+    assert!(matches!(
+        cal.day_effect(CivilDate {
+            year: 2024,
+            month: 7,
+            day: 3
+        }),
+        DayEffect::EarlyClose { .. }
+    ));
+}

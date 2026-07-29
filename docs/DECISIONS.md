@@ -724,3 +724,39 @@ propose a superseding entry — don't silently diverge.
   block, never a `roots` line added here. The holiday set is validated by a
   hand-derived count: 2024 holds 262 weekdays minus ten weekday holidays =
   **252 sessions**, the figure the exchange publishes.
+- **D-0059** (2026-07-29) — **A calendar can govern a root's DATES without
+  governing its HOURS, and the split is a type rather than a convention.**
+  D-0058 left `us_equity_options` claiming four ETF roots, which left §4.4's
+  coverage edge uncomputable for the five index roots T0 also acquires — half
+  the tranche unmeasurable on completeness. The resolution is not to widen
+  `roots`: SPX, SPXW, NDX, VIX and RUT keep the cash-equity holiday set and run
+  different sessions, so widening would hand out a confidently wrong `is_open`
+  and `bars_per_year` for exactly the roots this project cares most about.
+  Instead the table gains `day_level_roots`, reachable only through
+  `TradingDayCalendar` — a view exposing `is_trading_day` and `day_effect` and
+  **not** `is_open`, `session_of` or `bars_per_year`. The same device as D-0042:
+  the way to stop a value being used where it does not belong is to make the
+  call not exist. `coverage_vs_calendar` takes the narrow type, so the barrier
+  binds at the use site rather than in a comment.
+  **The day-level claim is sourced, and by enumeration rather than by
+  assertion.** Cboe's published US-options hours page lists its 2026 holiday
+  schedule — New Year's Day, MLK, Presidents' Day, Good Friday, Memorial Day,
+  Juneteenth, Independence Day observed 3 July, Labor Day, Thanksgiving,
+  Christmas, plus early closes after Thanksgiving and on Christmas Eve — which
+  is exactly the rule set in the table, closure for closure. Nobody states
+  "Cboe follows NYSE"; the two enumerated lists agree, which is better evidence
+  than the claim would have been. `day_level_source` is required whenever
+  `day_level_roots` is non-empty, because an unsourced claim about someone
+  else's exchange is what this table format exists to prevent. Verified against
+  2026 as published; earlier years follow the same rules but were not
+  re-verified page by page, and the gate ledger says so rather than rounding it
+  up to "verified".
+  **A gap found while sourcing it, and recorded rather than carried silently:**
+  the NYSE closes early on 3 July only when 4 July falls Tuesday–Friday, and
+  `weekday_before` cannot express that condition, so the table produces a
+  spurious 13:00 close on six dates (2015-07-02, 2016-07-01, 2020-07-02,
+  2021-07-02, 2022-07-01, 2026-07-02) — confirmed absent from Cboe's 2026
+  schedule. Worth ~18 hours across ~3,539 sessions (~0.08 % of
+  `bars_per_year`) and **zero** effect on the trading-day set, which is the only
+  thing this calendar is used for today. `cme_globex.toml` carries the identical
+  gap for the identical reason.
