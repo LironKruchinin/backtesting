@@ -632,3 +632,66 @@ propose a superseding entry — don't silently diverge.
   column 5 is `created` (build-run time) in `eod` but `timestamp` (per-contract
   update time) in `greeks/eod`: parsing is validated against a pinned header by
   **name, never by position**, and the two land as separate `_ts` columns.
+- **D-0055** (2026-07-29) — **Row uniqueness is declared per endpoint, and the
+  all-zero-OHLC refusal applies only where OHLC is the whole payload.** D-0054
+  established that `eod` repeats a contract across build passes; it does not
+  follow that every endpoint's rows are keyed the same way. So each endpoint
+  declares a `RowIdentity`: contract-per-day with a build/update *discriminator*
+  for `eod`/`greeks/eod`/`open_interest`, `(contract, timestamp)` with **no**
+  discriminator for the interval endpoints, and timestamp alone for stocks.
+  Where there is a discriminator, repeats deduplicate by keeping the maximum;
+  where there is none, a repeat refuses the file. The interval case is why one
+  rule could not serve: a contract legitimately appears 391 times in a
+  1-minute day, and dedup-by-contract would silently discard the session — the
+  same shape of bug as counting raw rows, in the opposite direction.
+  **The all-zero gate was scoped by evidence that nearly went the other way.**
+  §4.3 of `docs/THETADATA_PLAN.md` reads as a file-level rule, and applying it
+  to `eod` would have been catastrophic: VIX `eod` for 2024-01-02 returns 1,058
+  contracts of which 672 carry `0.00,0.00,0.00,0.00` and zero volume, and 614
+  of *those* carry a real bid. On `eod` a zero OHLC block means "this contract
+  did not trade today" — most of a chain on most days — and the NBBO beside it
+  is the real data. The gate therefore applies only where OHLC is the entire
+  payload and no quote can carry information instead: `stock/history/ohlc`,
+  which is the measured case (SPY 2016-01-04), and `option/history/ohlc` by
+  structural analogy, which is recorded as analogy rather than measurement.
+- **D-0056** (2026-07-29) — **One global pacer, and its circuit breaker ends
+  the run instead of pausing.** The Terminal advertises `Max concurrent
+  requests: 8` and enforces a second, undocumented ceiling: a `JettyRateLimiter`
+  that drops connections under sustained load. Both are properties of one
+  process, so both belong to one shared object — a per-task limiter multiplies
+  rather than bounds, and eight tasks each politely holding one request per
+  interval still launch eight per interval between them, which is the pattern
+  that tripped the limiter during probing. Constants, all recorded in §5 of the
+  plan: concurrency 8 (the vendor's own figure), a **150 ms** global launch
+  floor chosen from the measured 0.3–2.7 s request band, 4 attempts, 500 ms
+  backoff doubling to a 30 s cap, `Retry-After` honoured up to 120 s, breaker at
+  5 consecutive drops. `Retry-After`'s HTTP-date form is deliberately
+  unsupported: parsing it means trusting this machine's clock against the
+  server's, and a skewed clock computes a negative delay and hammers the
+  endpoint that just asked for a pause. The breaker **fails the run** rather
+  than pausing and retrying, because resume is an inventory diff: stopping costs
+  a re-run of what had not completed and nothing for what had, while a client
+  that keeps hammering a Terminal that has stopped answering is how a soft limit
+  becomes a revoked subscription. Replacing `fetch_batch`'s fixed-size chunking
+  with a shared semaphore also removed a real cost: a chunk barrier made every
+  batch of eight pay for its slowest member, and with a 0.3–2.7 s spread that
+  idled seven requests behind one for hours.
+- **D-0057** (2026-07-29) — **The CSV→Parquet ratio is measured, not assumed,
+  and it is not one number.** §7.3 carried ~10× as an explicit assumption. The
+  golden-raw round trip (`crucible theta-golden`, VIX 2024-01-02, 6,221,352
+  cells compared individually against the source CSV) measures instead:
+  `quote` @1m **18.61×**, `greeks/first_order` @1m **11.88×**,
+  `open_interest` **5.79×**, `eod` **4.28×**, `greeks/eod` **2.46×**. The
+  spread is the point and it is not noise: quote rows are repetitive and
+  dictionary/delta-encode well, while `greeks/eod` is 44 high-entropy doubles
+  per contract with almost nothing to exploit. Using one blended figure would
+  be wrong in both directions at once. Consequences: T1's ~1.75 TB of CSV lands
+  near **~95 GB** rather than the assumed 175 GB, so it fits the cap with room
+  to spare — but **T0's "~3–5 GB parquet" estimate is too low** and is corrected
+  to a measured-ratio projection, because T0's endpoints are the ones that
+  compress *worst*. Also pinned here: v3 spells the sampling interval
+  `interval=1m`. Every v2-era example uses milliseconds, and `interval=60000`,
+  `60` and `1min` all answer `400 Invalid interval`. This had to be probed
+  rather than read, because §3.3's silent-parameter behaviour means only a bad
+  *value* announces itself — an unknown *parameter* returns 200 and is ignored.
+  `greeks/first_order` additionally refuses `expiration=*`.

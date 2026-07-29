@@ -62,35 +62,46 @@
 //!
 //! - [`client`] — the only async code; current-thread runtime behind a sync
 //!   API, bounded concurrency, retry policy (D-0025's seam).
+//! - [`pacer`] — the one global launch governor every request goes through:
+//!   the Terminal's concurrency ceiling, a measured launch floor, capped
+//!   backoff, `Retry-After`, and a circuit breaker that ends the run rather
+//!   than hammering a Terminal that has stopped answering.
+//! - [`schema`] — per-endpoint column pins, validated by name and in order,
+//!   plus [`ContractKey`] and the zero-sentinel condition.
+//! - [`validate`] — the merge-blocking clauses of `docs/THETADATA_PLAN.md` §4:
+//!   dedup by contract key (D-0054), the zero-sentinel drop, the all-zero
+//!   series gate, and the reconciliation edges. Every detector has a planted
+//!   negative control (CLAUDE.md §7).
+//! - [`transcode`] — the sync path from validated response bytes to
+//!   `external/thetadata/{options|stocks}/{root}/{type}/{grain}/` parquet,
+//!   reusing the curated writer's write-to-temp-then-rename placement.
+//! - [`inventory`] — `external/thetadata/inventory.jsonl`: append-only, LF
+//!   framed, one line per written file. Same lock-and-reload discipline as
+//!   [`Catalog`](crate::Catalog), and **never merged into `manifest.jsonl`**.
+//!   Resume is an inventory diff, never a directory listing, so a half-written
+//!   file cannot look complete.
 //! - [`error`] — failure modes, including the vendor's nonstandard 472.
 //!
 //! ### Still to implement
 //!
-//! - `schema` — per-endpoint column pins and CSV row decoding into typed
-//!   columns. Prices become `i64` nano-USD, sizes and open interest `i64`,
-//!   greeks and implied volatility `f64` (they are statistics, never
-//!   accounting, CLAUDE.md §2.3). The pinned header is compared byte-for-byte
-//!   before any row is read.
-//! - `inventory` — `external/thetadata/inventory.jsonl`: append-only, LF
-//!   framed, one line per written file, carrying the request that produced it,
-//!   the row count, the blake3 of the parquet, and the vendor floor observed.
-//!   Same lock-and-reload discipline as [`Catalog`](crate::Catalog), and
-//!   **never merged into `manifest.jsonl`**. Resume is an inventory diff:
-//!   never a directory listing, so a half-written file cannot look complete.
 //! - `plan` — expands a tranche (roots × dates × endpoints) into [`Request`]s,
 //!   subtracts what the inventory already holds, and refuses to start when
 //!   free disk would fall below the floor the run reserves.
-//! - `transcode` — the sync path from response bytes to
-//!   `external/thetadata/{options|stocks}/{root}/{type}/{grain}/` parquet,
-//!   reusing the curated writer's write-to-temp-then-rename placement.
 //!
 //! [`Request`]: client::Request
 //! [`STATUS_NO_DATA`]: error::STATUS_NO_DATA
 
 pub mod client;
 pub mod error;
+pub mod inventory;
+pub mod pacer;
 pub mod schema;
+pub mod transcode;
+pub mod validate;
 
 pub use client::{DEFAULT_BASE_URL, MAX_CONCURRENCY, Request, ThetaClient};
 pub use error::{STATUS_NO_DATA, ThetaError};
+pub use inventory::{INVENTORY_SCHEMA_VERSION, Inventory, InventoryRecord};
+pub use pacer::Pacer;
 pub use schema::{ColumnIndex, ContractKey, Endpoint, is_zero_sentinel};
+pub use validate::{Reconciliation, ValidatedResponse, ValidationReport, reconcile, validate};

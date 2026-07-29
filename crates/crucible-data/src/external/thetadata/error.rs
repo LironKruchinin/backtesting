@@ -41,6 +41,20 @@ pub enum ThetaError {
         /// What the transport said on the last attempt.
         detail: String,
     },
+    /// The pacer's circuit breaker tripped and the run was stopped.
+    ///
+    /// Not a retryable failure and deliberately not retried here: after
+    /// [`CIRCUIT_TRIP_CONSECUTIVE`](super::pacer::CIRCUIT_TRIP_CONSECUTIVE)
+    /// consecutive transport drops with no success between them, the Terminal
+    /// has stopped answering and more requests will not change that. Resume is
+    /// an inventory diff, so stopping costs a re-run of the requests that had
+    /// not completed and nothing at all for the ones that had.
+    CircuitOpen {
+        /// The request that was refused a launch.
+        path: String,
+        /// Consecutive failures observed when the breaker tripped.
+        consecutive_failures: u32,
+    },
     /// The subscription does not cover this request (HTTP 403).
     ///
     /// Carries the vendor's own wording, which names the tier required — the
@@ -103,6 +117,53 @@ pub enum ThetaError {
         /// Columns the vendor sent, in order.
         found: Vec<String>,
     },
+    /// One row identity repeated in a way no vendor mechanism explains.
+    ///
+    /// D-0054 explains repeats of a *contract* across build passes, and those
+    /// are deduplicated. This is the other case: the same contract with the
+    /// same build stamp, or a repeat on an endpoint that has no build stamp at
+    /// all (the same `(contract, minute)` twice). Nothing accounts for it, so
+    /// the file is refused rather than half-understood — a ThetaData response
+    /// costs one request to fetch again.
+    DuplicateRow {
+        /// The request path.
+        path: String,
+        /// The identity that repeated, rendered for diagnosis.
+        identity: String,
+        /// How many rows carried it.
+        occurrences: u64,
+        /// The discriminator column and the value that repeated, when the
+        /// endpoint has one.
+        discriminator: Option<(&'static str, String)>,
+    },
+    /// Every row in the response was the vendor's "absent" spelling.
+    ///
+    /// Zero is this vendor's absent, never null: `stock/history/ohlc` for SPY
+    /// on 2016-01-04 answers HTTP 200 with 390 rows of `0.0,0.0,0.0,0.0,0,0`
+    /// while QQQ on the same date returns real prices. Archiving that as a
+    /// quiet day would put a day of zeros into a research series; refusing
+    /// surfaces it while the subscription is still live.
+    AllZeroSeries {
+        /// The request path.
+        path: String,
+        /// How many rows the vendor sent.
+        rows: u64,
+    },
+    /// A reconciliation edge pointed the wrong way (§4.4).
+    ///
+    /// Not a discrepancy to record: each inverted direction contradicts the
+    /// mechanism that explains the data at all, so anything computed from the
+    /// day would inherit an assumption now known to be false.
+    ReconciliationInverted {
+        /// Which (root, day) was being reconciled.
+        context: String,
+        /// The edge, written in the direction it is supposed to hold.
+        edge: &'static str,
+        /// How many contracts violated it.
+        orphans: u64,
+        /// One of them, for diagnosis.
+        example: String,
+    },
     /// A row could not be parsed into the expected types.
     MalformedRow {
         /// The request path.
@@ -155,6 +216,17 @@ impl fmt::Display for ThetaError {
                 attempts,
                 detail,
             } => write!(f, "GET {path} failed after {attempts} attempts: {detail}"),
+            ThetaError::CircuitOpen {
+                path,
+                consecutive_failures,
+            } => write!(
+                f,
+                "GET {path} was not attempted: {consecutive_failures} consecutive transport \
+                 failures with no success between them tripped the circuit breaker. The \
+                 Terminal has stopped answering; more requests will not change that. Check \
+                 that the JAR is still running, then re-run — resume is an inventory diff, \
+                 so nothing already written is fetched twice"
+            ),
             ThetaError::NotEntitled { path, message } => write!(
                 f,
                 "GET {path} is not covered by this subscription: {message}"
@@ -189,6 +261,44 @@ impl fmt::Display for ThetaError {
                  storing mislabelled columns",
                 expected.join(","),
                 found.join(",")
+            ),
+            ThetaError::DuplicateRow {
+                path,
+                identity,
+                occurrences,
+                discriminator,
+            } => match discriminator {
+                Some((column, value)) => write!(
+                    f,
+                    "GET {path}: {identity} appears {occurrences} times sharing {column}={value}. \
+                     D-0054 explains a contract repeating across build passes, and those are \
+                     deduplicated — the same contract with the same {column} is a different bug \
+                     and nothing explains it. Refusing the file; re-fetch costs one request"
+                ),
+                None => write!(
+                    f,
+                    "GET {path}: {identity} appears {occurrences} times on an endpoint where no \
+                     column may legitimately repeat it. Collapsing these would silently discard \
+                     data; refusing the file"
+                ),
+            },
+            ThetaError::AllZeroSeries { path, rows } => write!(
+                f,
+                "GET {path} answered with {rows} rows that are entirely zero. Zero is this \
+                 vendor's \"absent\", never null (SPY 2016-01-04 answers 200 with 390 zero rows \
+                 while QQQ returns real prices), so this is refused rather than archived as a \
+                 quiet day"
+            ),
+            ThetaError::ReconciliationInverted {
+                context,
+                edge,
+                orphans,
+                example,
+            } => write!(
+                f,
+                "{context}: {orphans} contracts violate `{edge}` (e.g. {example}). That direction \
+                 contradicts the vendor mechanism the whole model rests on, so the day is refused \
+                 rather than recorded with a discrepancy"
             ),
             ThetaError::MalformedRow { path, row, detail } => {
                 write!(f, "GET {path} row {row}: {detail}")

@@ -1,0 +1,397 @@
+//! `external/thetadata/inventory.jsonl` — what we fetched, from where, and
+//! what it looked like when it arrived.
+//!
+//! ## Why this is not `manifest.jsonl`
+//!
+//! The manifest makes one narrow promise: *this tool fetched these bytes from
+//! Databento and hashed them at the moment of placement* (D-0017). An inventory
+//! makes a weaker one: *a vendor served this request on this date and we wrote
+//! the result here*. Merging the two would silently downgrade the first to the
+//! second for everything already in it, which is why D-0049 keeps them apart
+//! and why nothing in this module ever writes to the manifest.
+//!
+//! ## Resume is a diff, never a directory listing
+//!
+//! A tranche resumes by asking "which of the requests I am about to make does
+//! the inventory already record?" — never "which files exist?". The difference
+//! is the failure that matters: a file half-written when a run died is present
+//! on disk and absent from the inventory, so a listing-based resume would skip
+//! it and a diff-based one re-fetches it. Records are appended **after** the
+//! file is durably in place, so a record is a statement about a complete file.
+//!
+//! ## Append-only, LF-framed, one JSON object per line
+//!
+//! The same discipline as [`Catalog`](crate::Catalog): open for append, write
+//! one line, flush, and never rewrite an earlier line. A line is only ever
+//! added, so a reader that gets a truncated final line has hit a crashed write
+//! and can discard exactly that line without losing anything before it.
+//!
+//! ## What a line carries, and why each field earns its place
+//!
+//! The obvious half is provenance: the rendered request, the file path, its
+//! blake3, its size. The rest is the *era fingerprint* — dup rate, build
+//! distribution, conflicting pairs, sentinel drops, reconciliation results —
+//! recorded at fetch time because it cannot be recovered afterwards. Once a
+//! file is deduplicated on the way to disk, nothing on disk remembers that it
+//! arrived 2.000× duplicated, and "was this era duplicated?" stops being
+//! answerable from the archive. D-0054 makes that question load-bearing.
+
+use std::collections::BTreeMap;
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
+
+use super::error::ThetaError;
+use super::validate::{Reconciliation, ValidationReport};
+
+/// Schema version of an inventory line.
+///
+/// Bumped whenever the meaning of an existing field changes. A reader refuses
+/// a version it does not know rather than guessing, because a silently
+/// misread `dup_rate` is exactly the kind of number this file exists to keep
+/// honest.
+pub const INVENTORY_SCHEMA_VERSION: u32 = 1;
+
+/// File name of the per-vendor inventory, under `external/thetadata/`.
+pub const INVENTORY_FILE: &str = "inventory.jsonl";
+
+/// One completed fetch-and-write.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InventoryRecord {
+    /// Version of this line's schema.
+    pub schema_version: u32,
+    /// Endpoint path, e.g. `/option/history/greeks/eod`.
+    pub endpoint: String,
+    /// Root symbol, e.g. `SPY`.
+    pub root: String,
+    /// Granularity, e.g. `eod` or `1m`.
+    pub grain: String,
+    /// First date covered, `YYYY-MM-DD`.
+    pub start_date: String,
+    /// Last date covered, `YYYY-MM-DD`.
+    pub end_date: String,
+    /// The rendered path and query that produced this file.
+    ///
+    /// Verbatim, because the Terminal ignores unknown query parameters
+    /// silently: what was *asked* is not recoverable from what came back, and
+    /// this string is the only record of it.
+    pub request: String,
+    /// Path of the written file, relative to the data dir.
+    pub file_path: String,
+    /// blake3 of the written file.
+    pub file_blake3: String,
+    /// Size of the written file in bytes.
+    pub size_bytes: u64,
+    /// Rows the vendor sent, before dedup.
+    pub row_count: u64,
+    /// Distinct identities — the completeness unit (D-0054).
+    pub distinct_contracts: u64,
+    /// `row_count / distinct_contracts`; the era fingerprint.
+    pub dup_rate: f64,
+    /// How many identities carried how many build stamps.
+    pub n_builds_distribution: BTreeMap<usize, u64>,
+    /// Repeats whose market fields differed across builds.
+    pub conflicting_pairs: u64,
+    /// Rows dropped by the zero-sentinel condition.
+    pub sentinel_rows_dropped: u64,
+    /// Reconciliation outcome for this (root, day), when one was computed.
+    pub reconciliation: Option<Reconciliation>,
+    /// When the fetch completed, as UTC nanoseconds.
+    ///
+    /// Passed in by the caller, never read from a clock here: `crucible-data`
+    /// does not read the wall clock (§2.2, D-0032), and the one implementation
+    /// that does lives in a bin target.
+    pub fetched_ts: i64,
+}
+
+impl InventoryRecord {
+    /// Builds a record from a validation report, filling the derived fields.
+    #[must_use]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "an inventory line IS this many independent facts; bundling them \
+                  into a struct just to pass them would be the same arguments with \
+                  a longer path"
+    )]
+    pub fn new(
+        endpoint: &str,
+        root: &str,
+        grain: &str,
+        start_date: &str,
+        end_date: &str,
+        request: &str,
+        file_path: &str,
+        file_blake3: &str,
+        size_bytes: u64,
+        report: &ValidationReport,
+        reconciliation: Option<Reconciliation>,
+        fetched_ts: i64,
+    ) -> InventoryRecord {
+        InventoryRecord {
+            schema_version: INVENTORY_SCHEMA_VERSION,
+            endpoint: endpoint.to_owned(),
+            root: root.to_owned(),
+            grain: grain.to_owned(),
+            start_date: start_date.to_owned(),
+            end_date: end_date.to_owned(),
+            request: request.to_owned(),
+            file_path: file_path.to_owned(),
+            file_blake3: file_blake3.to_owned(),
+            size_bytes,
+            row_count: report.raw_rows,
+            distinct_contracts: report.distinct_rows,
+            dup_rate: report.dup_rate(),
+            n_builds_distribution: report.n_builds_distribution.clone(),
+            conflicting_pairs: report.conflicting_pairs,
+            sentinel_rows_dropped: report.sentinel_rows_dropped,
+            reconciliation,
+            fetched_ts,
+        }
+    }
+
+    /// The key a resume diff matches on.
+    ///
+    /// Deliberately the *request*, not the file path: two different requests
+    /// must never be considered the same work because they happened to write
+    /// to paths that collide, and the same request re-issued must always be
+    /// recognised no matter where its output landed.
+    #[must_use]
+    pub fn resume_key(&self) -> &str {
+        &self.request
+    }
+
+    /// Renders the record as one JSON object.
+    ///
+    /// Hand-rolled rather than `serde`-derived so that field order is fixed and
+    /// a line diffs cleanly against the one before it. Every string is escaped;
+    /// none of the values here can contain a control character, but escaping
+    /// them anyway keeps that a property of the writer rather than of the data.
+    #[must_use]
+    pub fn to_json_line(&self) -> String {
+        let builds = self
+            .n_builds_distribution
+            .iter()
+            .map(|(k, v)| format!("\"{k}\":{v}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let reconciliation = match &self.reconciliation {
+            None => "null".to_owned(),
+            Some(r) => format!(
+                "{{\"eod_and_greeks\":{},\"eod_without_greeks\":{},\"oi_in_eod\":{},\"eod_without_oi\":{}}}",
+                r.eod_and_greeks, r.eod_without_greeks, r.oi_in_eod, r.eod_without_oi
+            ),
+        };
+        format!(
+            "{{\"schema_version\":{},\"endpoint\":{},\"root\":{},\"grain\":{},\
+             \"start_date\":{},\"end_date\":{},\"request\":{},\"file_path\":{},\
+             \"file_blake3\":{},\"size_bytes\":{},\"row_count\":{},\
+             \"distinct_contracts\":{},\"dup_rate\":{},\"n_builds_distribution\":{{{}}},\
+             \"conflicting_pairs\":{},\"sentinel_rows_dropped\":{},\"reconciliation\":{},\
+             \"fetched_ts\":{}}}",
+            self.schema_version,
+            json_string(&self.endpoint),
+            json_string(&self.root),
+            json_string(&self.grain),
+            json_string(&self.start_date),
+            json_string(&self.end_date),
+            json_string(&self.request),
+            json_string(&self.file_path),
+            json_string(&self.file_blake3),
+            self.size_bytes,
+            self.row_count,
+            self.distinct_contracts,
+            format_ratio(self.dup_rate),
+            builds,
+            self.conflicting_pairs,
+            self.sentinel_rows_dropped,
+            reconciliation,
+            self.fetched_ts,
+        )
+    }
+}
+
+/// Escapes a string into a JSON literal.
+fn json_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Renders a ratio with fixed precision.
+///
+/// Three decimals is the precision the era fingerprint is stated in (§3.1's
+/// 2.000 and 1.000), and fixing it means a line's bytes do not change with the
+/// platform's shortest-round-trip formatting. A non-finite value writes `null`
+/// rather than the JSON-invalid `NaN`.
+fn format_ratio(value: f64) -> String {
+    if value.is_finite() {
+        format!("{value:.3}")
+    } else {
+        "null".to_owned()
+    }
+}
+
+/// Append-only reader/writer over `external/thetadata/inventory.jsonl`.
+#[derive(Debug)]
+pub struct Inventory {
+    path: PathBuf,
+}
+
+impl Inventory {
+    /// Opens (without creating) the inventory under `data_dir`.
+    #[must_use]
+    pub fn open(data_dir: &Path) -> Inventory {
+        Inventory {
+            path: data_dir
+                .join("external")
+                .join("thetadata")
+                .join(INVENTORY_FILE),
+        }
+    }
+
+    /// Where this inventory lives.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Appends one record, creating the file and its parents if needed.
+    ///
+    /// Flushed before returning: a record that is only in the OS cache is a
+    /// record that a power cut turns into a file the next run will not know it
+    /// already has.
+    ///
+    /// # Errors
+    /// [`ThetaError::Io`] if the directory, the file, or the write fails.
+    pub fn append(&self, record: &InventoryRecord) -> Result<(), ThetaError> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| ThetaError::Io {
+                path: parent.to_path_buf(),
+                during: "creating the inventory directory",
+                source,
+            })?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .map_err(|source| ThetaError::Io {
+                path: self.path.clone(),
+                during: "opening the inventory for append",
+                source,
+            })?;
+        let mut line = record.to_json_line();
+        line.push('\n');
+        file.write_all(line.as_bytes())
+            .map_err(|source| ThetaError::Io {
+                path: self.path.clone(),
+                during: "appending to the inventory",
+                source,
+            })?;
+        file.flush().map_err(|source| ThetaError::Io {
+            path: self.path.clone(),
+            during: "flushing the inventory",
+            source,
+        })
+    }
+
+    /// The `request` string of every complete record, for a resume diff.
+    ///
+    /// A truncated final line — the signature of a run that died mid-write — is
+    /// **skipped, not repaired**: the file it describes may or may not be
+    /// complete, so the honest move is to leave the request looking un-done and
+    /// let the next run redo it. Redoing one request costs a request; trusting
+    /// a half-written line costs a gap nobody sees.
+    ///
+    /// # Errors
+    /// [`ThetaError::Io`] if the file exists but cannot be read.
+    pub fn completed_requests(&self) -> Result<Vec<String>, ThetaError> {
+        if !self.path.exists() {
+            return Ok(Vec::new());
+        }
+        let file = std::fs::File::open(&self.path).map_err(|source| ThetaError::Io {
+            path: self.path.clone(),
+            during: "opening the inventory",
+            source,
+        })?;
+        let mut out = Vec::new();
+        for line in BufReader::new(file).lines() {
+            let line = line.map_err(|source| ThetaError::Io {
+                path: self.path.clone(),
+                during: "reading the inventory",
+                source,
+            })?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            // A complete line is a complete JSON object. Anything else is the
+            // tail of an interrupted write.
+            if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
+                continue;
+            }
+            if let Some(request) = extract_string_field(trimmed, "request") {
+                out.push(request);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Which of `requests` the inventory does **not** already record.
+    ///
+    /// This is resume. Order is preserved so a resumed tranche runs in the same
+    /// sequence as a fresh one.
+    ///
+    /// # Errors
+    /// [`ThetaError::Io`] if the inventory cannot be read.
+    pub fn outstanding(&self, requests: &[String]) -> Result<Vec<String>, ThetaError> {
+        let done: std::collections::BTreeSet<String> =
+            self.completed_requests()?.into_iter().collect();
+        Ok(requests
+            .iter()
+            .filter(|r| !done.contains(*r))
+            .cloned()
+            .collect())
+    }
+}
+
+/// Pulls one string field out of a JSON line without a full parser.
+///
+/// The writer above is the only producer of these lines and it escapes exactly
+/// five characters, so this reader handles exactly those. It is deliberately
+/// not a general JSON parser: an inventory line this cannot read is a line this
+/// crate did not write, and treating it as unknown is the correct outcome.
+fn extract_string_field(line: &str, field: &str) -> Option<String> {
+    let needle = format!("\"{field}\":\"");
+    let start = line.find(&needle)? + needle.len();
+    let mut out = String::new();
+    let mut chars = line[start..].chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return Some(out),
+            '\\' => match chars.next()? {
+                'n' => out.push('\n'),
+                'r' => out.push('\r'),
+                't' => out.push('\t'),
+                other => out.push(other),
+            },
+            c => out.push(c),
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+#[path = "inventory/tests.rs"]
+mod tests;

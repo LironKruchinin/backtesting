@@ -27,6 +27,7 @@ mod layout_check;
 mod pull;
 mod qa;
 mod rolls;
+mod theta;
 mod transcode;
 
 use std::path::{Path, PathBuf};
@@ -99,6 +100,9 @@ enum Command {
     Qa(qa::QaArgs),
     /// Build a continuous-contract roll table from curated bars.
     Rolls(rolls::RollsArgs),
+    /// Round-trip one ThetaData response per endpoint and measure the
+    /// CSV-to-Parquet ratio.
+    ThetaGolden(theta::ThetaGoldenArgs),
 }
 
 fn main() {
@@ -124,6 +128,7 @@ fn main() {
         Some(Command::Backtest(args)) => backtest::run(&args),
         Some(Command::Qa(args)) => qa::run(&args),
         Some(Command::Rolls(args)) => rolls::run(&args),
+        Some(Command::ThetaGolden(args)) => theta::run(&args),
         // Bare `crucible` stays a zero-exit help screen: it is what a new
         // reader types first, and it has not failed at anything.
         None => {

@@ -160,6 +160,16 @@ The vendor ran multiple post-close build passes and serves **all** of them, so
 byte-identical columns. The response header is the only evidence of what was
 actually requested — hence pinned schemas (§4.1).
 
+Corollary, and it cost a probe to learn: an unknown *parameter* is silent, but a
+bad *value* is loud. **v3 spells the sampling interval `interval=1m`.** Every
+v2-era example uses milliseconds, and `interval=60000`, `interval=60` and
+`interval=1min` all answer `400 Invalid interval`. Because only the value
+announces itself, the only safe way to establish a parameter's spelling here is
+to send a deliberately wrong value and see whether the vendor objects — a 200
+proves nothing. `greeks/first_order` additionally refuses `expiration=*`
+("Cannot specify '*' for the date") and must be asked for one expiration at a
+time (D-0057).
+
 ### 3.4 History floors are per root **and** per endpoint
 
 | Root | `eod` | `greeks/eod` |
@@ -269,9 +279,33 @@ a 429 carries one; circuit-breaker after N consecutive drops → pause, resume b
 inventory diff. Acquisition-side timing is not result-affecting, so none of this
 touches determinism (§2.2).
 
-Min-interval to be chosen from measured per-request timings — **0.3–2.7 s** for
-whole-chain `eod`/OI days — so T0 lands near ~3 h. **Constants to be recorded
-here once chosen.**
+**Constants, chosen and recorded** (D-0056, `external::thetadata::pacer`):
+
+| Constant | Value | Why this value |
+|---|---|---|
+| `MAX_CONCURRENCY` | **8** | the Terminal's own startup figure, global across asset classes |
+| `MIN_LAUNCH_INTERVAL` | **150 ms** | from the measured 0.3–2.7 s band: eight in flight sustain ~3–13 req/s on completion alone, and a 150 ms floor caps launches at 6.7/s — inside the band, so it never throttles the slow end and takes the peak off the fast end |
+| `MAX_ATTEMPTS` | **4** | |
+| `BACKOFF_BASE` / `BACKOFF_CAP` | **500 ms** doubling to **30 s** | |
+| `MAX_RETRY_AFTER` | **120 s** | beyond this a `Retry-After` is a refusal to serve, not a nap: a pull parked for an hour is indistinguishable from a hung one |
+| `CIRCUIT_TRIP_CONSECUTIVE` | **5** | consecutive, never cumulative — an hours-long pull will see scattered failures, and a cumulative count would eventually trip on bad luck alone |
+
+Two behaviours worth stating because their opposites are the tempting default.
+The breaker **fails the run** rather than pausing and retrying: resume is an
+inventory diff, so stopping costs a re-run of what had not completed and nothing
+for what had. And `Retry-After`'s HTTP-date form is **not** supported — parsing
+it means trusting this machine's clock against the server's, and a skewed clock
+computes a negative delay and hammers the endpoint that just asked for a pause.
+
+`fetch_batch` no longer processes fixed-size chunks with a barrier between them.
+That shape made every batch of eight pay for its slowest member, and against a
+0.3–2.7 s spread it idled seven requests behind one for hours at a time.
+
+**Revised T0 wall-clock.** T0 is ~2.5 requests per root-day over ~31,950
+root-days ≈ **80,000 requests**. At eight in flight and a ~1.5 s mean that is
+~5.3 req/s ≈ **4.2 h**, not the 2–3 h §2 estimates. The estimate stands
+corrected rather than the pacer loosened: 150 ms is not the binding constraint
+at that rate, the Terminal's response time is.
 
 ---
 
@@ -363,14 +397,46 @@ A flat 460 MB/day × 3,554 d gives ~1.6 TB — close, because the dense years
 dominate. An earlier 985 GB figure was **under-derived** (flat 0.6 factor on a
 midpoint instead of integration) and is superseded.
 
-### 7.3 Compression ratio — **UNMEASURED**
+### 7.3 Compression ratio — **MEASURED** (D-0057)
 
-Parquet+zstd is *assumed* at ~10× (dictionary-encoded `symbol`/`expiration`/
-`right`, delta-encoded timestamps, many all-zero quote rows; ~82 bytes of CSV
-carrying ~8 bytes of information). **This is an assumption, not a measurement**,
-and it is measured by the golden-raw round-trip gate before T1 finalizes. Even a
-pessimistic 5× (~350 GB) fits the cap, so the measurement feeds the plan, not a
-scope decision.
+The ~10× assumption is retired. `crucible theta-golden` fetched one response per
+endpoint (VIX, 2024-01-02), kept the vendor's bytes, transcoded to Parquet+zstd,
+read the Parquet back and compared **6,221,352 cells individually** against the
+source CSV. Every endpoint round-tripped.
+
+| Endpoint | CSV | Parquet | **Ratio** | rows | cells verified |
+|---|---|---|---|---|---|
+| `option/history/quote` @1m | 34.41 MB | 1.85 MB | **18.61×** | 413,678 | 5,377,814 |
+| `option/history/greeks/first_order` @1m | 6.72 MB | 579.4 kB | **11.88×** | 45,356 | 771,052 |
+| `option/history/open_interest` | 62.5 kB | 10.8 kB | **5.79×** | 1,058 | 6,348 |
+| `option/history/eod` | 139.3 kB | 32.5 kB | **4.28×** | 1,058 | 21,160 |
+| `option/history/greeks/eod` | 312.8 kB | 127.1 kB | **2.46×** | 1,058 | 44,978 |
+
+**There is no single ratio, and averaging them would be wrong in both
+directions.** Quote rows are repetitive — long runs of unchanged NBBO,
+dictionary-encoded `symbol`/`expiration`/`right`, delta-encoded timestamps — so
+they compress about as hoped. `greeks/eod` is 44 high-entropy doubles per
+contract with almost nothing to exploit, and compresses barely more than twice.
+The endpoints T0 fetches are precisely the ones that compress **worst**.
+
+Consequences, and they point opposite ways:
+
+- **T1 gets cheaper.** ~1.75 TB CSV at 18.61× ≈ **~95 GB** parquet, against the
+  175 GB the assumption implied. T1 fits the 1.2 TB cap with room to spare, and
+  the compression measurement is no longer a scope risk.
+- **T0 was under-estimated.** The "~3–5 GB parquet" figure below assumed the
+  ~10× that does not hold here. Re-derived from §7.1's per-day CSV totals
+  (`greeks/eod` 14.50 MB + `eod` 7.09 MB + OI 3.27 MB ≈ **24.9 MB/day** across
+  the nine roots, at 2024 chain sizes) over ~3,554 trading days ≈ 88 GB CSV, at
+  the measured ~3× blend for these three endpoints ≈ **~29 GB parquet**.
+  That is an upper bound rather than a forecast: 2024 is the dense end of the
+  sample, pre-2016 chains are far smaller, and below each root's greeks floor
+  only `eod`+OI are fetched. Call it **10–30 GB**, an order of magnitude above
+  the original estimate and still comfortably inside the cap.
+
+Re-run the gate after any Terminal upgrade: the golden-raw responses are kept
+permanently (§6) so the comparison is against the same bytes, and a transcode
+that drifts shows up as a cell mismatch rather than as a plausible file.
 
 ---
 
@@ -390,13 +456,24 @@ scope decision.
 | **Off-host block proof** | Rule enabled at test time (ActiveStore, Block, Inbound, Any, TCP 25503+25520). Phone Wi-Fi IP **10.100.102.96** (DHCP, no proxy) — in-subnet with 10.100.102.7, so on-link by routing table regardless of cellular state. Chrome: **`ERR_TIMED_OUT`**, both frames 15:07 local. Watch loop 15:02:49–15:07:50: **zero foreign connections**, self-address baseline recorded. Reading: `TIMED_OUT` not `CONNECTION_REFUSED` — the Terminal listens on `0.0.0.0`, so unfiltered would serve data and a closed port would RST into "refused"; a silent drop is the Block rule's signature. Absence became conclusive because the request is proven in-window. |
 | Databento blitz reconciled *(to the attempted set)* | 26 intents complete `intended→submitted→downloaded→appended`; plan cross-check found `statistics` missing entirely (§9) |
 
+| **Golden-raw round-trip + measured ratio** | `crucible theta-golden`, VIX 2024-01-02, five endpoints, **6,221,352 cells** compared individually against the source CSV; ratios in §7.3 (D-0057) |
+| **Validator per §4 with planted controls** | `external/thetadata/validate.rs`; every detector paired with a planted bug that is asserted to fire — cross-parse both ways, header drift in four directions, `(contract, created)` repeat, repeated contract-minute, mid-day zero-underlying, `iv_error` at and beyond 100, all-zero series, inverted eod↔greeks, OI key absent from eod, DST gap and ambiguous hour |
+| **`inventory.jsonl` schema** | `external/thetadata/inventory.rs`; append-only, resume by request diff, torn-final-line control |
+| **Pacer constants** | §5, recorded and unit-tested (D-0056) |
+
 ### OPEN
 
-**Before T0** — golden-raw round-trip (yields the measured ratio) · validator per
-§4 with planted controls · `inventory.jsonl` schema · pacer constants (§5).
+**Before T0** — **a US equity/options session calendar.** §4.4's third
+reconciliation edge (coverage vs calendar) has nothing to compute against: the
+only bundled table is `cme_globex_equity_index`, which claims ES/MES/NQ/MNQ/RTY/
+M2K and models a 17:00→16:00 CT Globex day. It is not a usable proxy — the
+trading-day sets genuinely differ inside T0's span (NYSE closed 2012-10-29/30
+for Hurricane Sandy while Globex traded electronically), so substituting it
+would manufacture false "missing sessions". This gate was not in the plan and is
+the one thing standing between T0 and a closed validation gate.
 
-**Before T1** — measured SPX/QQQ/IWM per-day sizes · measured compression ratio ·
-Databento blitz at terminal state (`statistics` still at `submitted`).
+**Before T1** — measured SPX/QQQ/IWM per-day sizes · Databento blitz at terminal
+state (`statistics` still at `submitted`).
 
 ---
 

@@ -47,7 +47,15 @@ toml = "0.9"
 # DBN decoding comes from this crate's `databento::dbn` re-export rather than a
 # separately pinned `dbn`, so the client and the decoder cannot drift apart.
 databento = { version = "0.55", optional = true }
-tokio = { version = "1.53", features = ["rt", "time", "net"], optional = true }
+# `sync` carries `Semaphore`/`Mutex`, which `external::thetadata::pacer` uses
+# for the one global launch governor. Not threads: these are async primitives
+# multiplexed onto the same current-thread runtime (D-0025, D-0051).
+tokio = { version = "1.53", features = [
+    "rt",
+    "time",
+    "net",
+    "sync",
+], optional = true }
 # ThetaData acquisition. `default-features = false` drops every TLS backend,
 # blocking client, and codec we do not use: the Theta Terminal serves plain
 # HTTP/1.1 on 127.0.0.1, so a TLS stack here would be dead weight that still

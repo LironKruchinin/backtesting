@@ -39,6 +39,7 @@ use std::time::Duration;
 use reqwest::StatusCode;
 
 use super::error::{STATUS_NO_DATA, ThetaError};
+use super::pacer::{self, Pacer};
 
 /// Default address of the v3 Theta Terminal REST server.
 ///
@@ -48,13 +49,10 @@ use super::error::{STATUS_NO_DATA, ThetaError};
 pub const DEFAULT_BASE_URL: &str = "http://127.0.0.1:25503/v3";
 
 /// Concurrent requests the Terminal will actually serve in parallel.
-pub const MAX_CONCURRENCY: usize = 8;
-
-/// Attempts made before a retryable failure is surfaced.
-const MAX_ATTEMPTS: u32 = 4;
-
-/// Base delay for exponential backoff between retries.
-const BACKOFF_BASE: Duration = Duration::from_millis(500);
+///
+/// Re-exported from [`pacer`], which owns every acquisition-side constant so
+/// that there is one place to read them and one place to change them.
+pub const MAX_CONCURRENCY: usize = pacer::MAX_CONCURRENCY;
 
 /// One GET against the Terminal: an endpoint path plus its query.
 ///
@@ -112,6 +110,7 @@ pub struct ThetaClient {
     client: reqwest::Client,
     base_url: String,
     concurrency: usize,
+    pacer: Pacer,
 }
 
 impl std::fmt::Debug for ThetaClient {
@@ -119,6 +118,7 @@ impl std::fmt::Debug for ThetaClient {
         f.debug_struct("ThetaClient")
             .field("base_url", &self.base_url)
             .field("concurrency", &self.concurrency)
+            .field("pacer", &self.pacer)
             .finish_non_exhaustive()
     }
 }
@@ -155,12 +155,20 @@ impl ThetaClient {
                 base_url: base_url.clone(),
                 detail: format!("could not build the HTTP client: {e}"),
             })?;
+        let concurrency = concurrency.clamp(1, MAX_CONCURRENCY);
         Ok(ThetaClient {
             runtime,
             client,
             base_url,
-            concurrency: concurrency.clamp(1, MAX_CONCURRENCY),
+            concurrency,
+            pacer: Pacer::new(concurrency, pacer::MIN_LAUNCH_INTERVAL),
         })
+    }
+
+    /// The launch governor this client shares across every request it makes.
+    #[must_use]
+    pub fn pacer(&self) -> &Pacer {
+        &self.pacer
     }
 
     /// The base URL this client talks to.
@@ -184,49 +192,59 @@ impl ThetaClient {
         let url = self.url_of(request);
         let client = self.client.clone();
         let rendered = request.render();
+        let pacer = self.pacer.clone();
         self.runtime
-            .block_on(async move { fetch_one(&client, &url, &rendered).await })
+            .block_on(async move { fetch_one(&client, &pacer, &url, &rendered).await })
     }
 
     /// Fetches many requests with at most [`Self::concurrency`] in flight,
     /// returning results **in request order**.
     ///
+    /// Every request is spawned at once and the [`Pacer`] — not this loop —
+    /// decides when each may launch. The previous shape processed a fixed-size
+    /// chunk at a time and waited for all of it before starting the next, which
+    /// made every chunk cost the *slowest* request in it: with a measured
+    /// 0.3–2.7 s spread (§7.1 of `docs/THETADATA_PLAN.md`), seven fast requests
+    /// idled behind one slow one, roughly halving throughput on a tranche that
+    /// runs for hours. A shared semaphore keeps eight in flight continuously
+    /// instead, and a permit freed by a fast request is taken immediately.
+    ///
     /// The whole batch is driven by one `block_on`; nothing here outlives the
-    /// call.
+    /// call. Results are collected by request index and never by completion
+    /// order (§2.2) — an archive whose contents depended on network weather
+    /// would rebuild differently than it was built, and the inventory's whole
+    /// purpose is that the two agree.
     pub fn fetch_batch(&self, requests: &[Request]) -> Vec<Result<Vec<u8>, ThetaError>> {
         let mut out: Vec<Option<Result<Vec<u8>, ThetaError>>> =
             (0..requests.len()).map(|_| None).collect();
 
-        for chunk_start in (0..requests.len()).step_by(self.concurrency) {
-            let chunk_end = (chunk_start + self.concurrency).min(requests.len());
-            let mut set = tokio::task::JoinSet::new();
-            for (offset, request) in requests[chunk_start..chunk_end].iter().enumerate() {
-                let index = chunk_start + offset;
-                let url = self.url_of(request);
-                let rendered = request.render();
-                let client = self.client.clone();
-                set.spawn(async move {
-                    let result = fetch_one(&client, &url, &rendered).await;
-                    (index, result)
-                });
-            }
-            self.runtime.block_on(async {
-                while let Some(joined) = set.join_next().await {
-                    match joined {
-                        Ok((index, result)) => {
-                            if let Some(slot) = out.get_mut(index) {
-                                *slot = Some(result);
-                            }
-                        }
-                        Err(e) => {
-                            // A task cannot panic here without a bug in this
-                            // module; surface it rather than losing a slot.
-                            debug_assert!(false, "thetadata fetch task failed: {e}");
-                        }
-                    }
-                }
+        let mut set = tokio::task::JoinSet::new();
+        for (index, request) in requests.iter().enumerate() {
+            let url = self.url_of(request);
+            let rendered = request.render();
+            let client = self.client.clone();
+            let pacer = self.pacer.clone();
+            set.spawn(async move {
+                let result = fetch_one(&client, &pacer, &url, &rendered).await;
+                (index, result)
             });
         }
+        self.runtime.block_on(async {
+            while let Some(joined) = set.join_next().await {
+                match joined {
+                    Ok((index, result)) => {
+                        if let Some(slot) = out.get_mut(index) {
+                            *slot = Some(result);
+                        }
+                    }
+                    Err(e) => {
+                        // A task cannot panic here without a bug in this
+                        // module; surface it rather than losing a slot.
+                        debug_assert!(false, "thetadata fetch task failed: {e}");
+                    }
+                }
+            }
+        });
 
         out.into_iter()
             .enumerate()
@@ -255,35 +273,60 @@ fn is_retryable(status: StatusCode) -> bool {
     status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
 }
 
-/// One request with retries. Split out so both `fetch` and `fetch_batch` use
-/// exactly the same status handling.
+/// One request with retries, launched through the shared [`Pacer`].
+///
+/// Split out so both `fetch` and `fetch_batch` use exactly the same status
+/// handling, and so that every retry re-acquires from the pacer rather than
+/// bypassing it — a retry storm that skipped the launch floor would be the one
+/// burst most likely to be happening while the Terminal is already unhappy.
 async fn fetch_one(
     client: &reqwest::Client,
+    pacer: &Pacer,
     url: &str,
     rendered: &str,
 ) -> Result<Vec<u8>, ThetaError> {
     let mut attempt = 0u32;
     loop {
         attempt += 1;
+        let Some(_permit) = pacer.acquire().await else {
+            return Err(ThetaError::CircuitOpen {
+                path: rendered.to_owned(),
+                consecutive_failures: pacer.consecutive_failures(),
+            });
+        };
+
         let sent = client.get(url).send().await;
         let response = match sent {
             Ok(response) => response,
             Err(e) => {
-                if attempt >= MAX_ATTEMPTS {
+                pacer.record_failure();
+                if attempt >= pacer::MAX_ATTEMPTS {
                     return Err(ThetaError::Transport {
                         path: rendered.to_owned(),
                         attempts: attempt,
                         detail: e.to_string(),
                     });
                 }
-                tokio::time::sleep(BACKOFF_BASE * 2u32.pow(attempt - 1)).await;
+                drop(_permit);
+                tokio::time::sleep(Pacer::backoff_for(attempt)).await;
                 continue;
             }
         };
 
         let status = response.status();
-        if is_retryable(status) && attempt < MAX_ATTEMPTS {
-            tokio::time::sleep(BACKOFF_BASE * 2u32.pow(attempt - 1)).await;
+        if is_retryable(status) && attempt < pacer::MAX_ATTEMPTS {
+            // A 429 that names its own delay is obeyed literally: the server
+            // has stated a number, and guessing a smaller one is how a soft
+            // limit becomes a hard one. Anything else backs off exponentially.
+            let stated = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(pacer::parse_retry_after);
+            let delay = stated.unwrap_or_else(|| Pacer::backoff_for(attempt));
+            pacer.record_failure();
+            drop(_permit);
+            tokio::time::sleep(delay).await;
             continue;
         }
 
@@ -293,6 +336,11 @@ async fn fetch_one(
             detail: format!("reading the body: {e}"),
         })?;
 
+        // The breaker counts *transport* health, not vendor semantics: a 472
+        // "no data" is a complete, correct answer and must not look like a
+        // failing Terminal. Below a root's greeks floor every request answers
+        // 472, and a breaker that counted those would trip on working data.
+        pacer.record_success();
         return classify(status, &body, rendered);
     }
 }
