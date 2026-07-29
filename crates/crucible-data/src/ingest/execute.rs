@@ -155,6 +155,12 @@ pub struct ExecuteReport {
     /// swallowed: omitting a symbol only ever makes coverage *understate*
     /// what we own, so the cost is re-buying it, never silently skipping it.
     pub dropped_symbols: Vec<String>,
+    /// Support files (`condition.json`, `symbology.json`, …) that could not be
+    /// filed under `delivery/`, one line each. Never fatal — the payload is
+    /// already archived by the time these move — but never silent either:
+    /// `condition.json` is the data-QA report's input, and an operator who is
+    /// not told it went missing finds out a milestone later.
+    pub support_file_warnings: Vec<String>,
 }
 
 impl ExecuteReport {
@@ -197,6 +203,9 @@ impl core::fmt::Display for ExecuteReport {
                 "           coverage for those symbols will read as missing, \
                  so they would be bought again"
             )?;
+        }
+        for warning in &self.support_file_warnings {
+            writeln!(f, "  WARNING: {warning}")?;
         }
         Ok(())
     }
@@ -586,7 +595,12 @@ fn collect_window(
         },
     ))?;
 
-    keep_support_files(&data_dir, &staging, job_id, &data_file.filename);
+    report.support_file_warnings.extend(keep_support_files(
+        &data_dir,
+        &staging,
+        job_id,
+        &data_file.filename,
+    ));
 
     Ok(Some(AcquiredWindow {
         file_path: record.file_path,
@@ -802,25 +816,68 @@ fn download_and_verify(
 /// Moves the job's support files out of staging and drops the staging dir.
 ///
 /// Best-effort by design: the payload is already archived and recorded, and
-/// failing the whole acquisition because a 200-byte `condition.json` could
-/// not be filed would be the tail wagging the dog.
-fn keep_support_files(data_dir: &Path, staging: &Path, job_id: &str, payload_name: &str) {
+/// failing the whole acquisition because a 200-byte `condition.json` could not
+/// be filed would be the tail wagging the dog. Best-effort is not the same as
+/// silent, though — `condition.json` is what the data-QA report reads to tell
+/// a genuine exchange holiday from a hole in the data — so every failure comes
+/// back as a line for [`ExecuteReport::support_file_warnings`]. This crate
+/// never prints (CLAUDE.md §3); the CLI does.
+///
+/// Staging is only removed when every file made it out. A rename that failed
+/// (an antivirus scanner holding the handle, a full disk) leaves the file in
+/// staging, and deleting the directory afterwards would destroy the very thing
+/// the warning is about.
+fn keep_support_files(
+    data_dir: &Path,
+    staging: &Path,
+    job_id: &str,
+    payload_name: &str,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
     if !staging.is_dir() {
-        return;
+        return warnings;
     }
     let kept = data_dir.join(DELIVERY_DIR).join(job_id);
-    if std::fs::create_dir_all(&kept).is_ok()
-        && let Ok(entries) = std::fs::read_dir(staging)
-    {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            if name == std::ffi::OsStr::new(payload_name) {
-                continue;
+    match std::fs::create_dir_all(&kept) {
+        Err(source) => warnings.push(format!(
+            "job {job_id}: could not create {} to keep its support files: {source}",
+            kept.display()
+        )),
+        Ok(()) => match std::fs::read_dir(staging) {
+            Err(source) => warnings.push(format!(
+                "job {job_id}: could not read staging {} to keep its support files: {source}",
+                staging.display()
+            )),
+            Ok(entries) => {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    if name == std::ffi::OsStr::new(payload_name) {
+                        continue;
+                    }
+                    if let Err(source) = std::fs::rename(entry.path(), kept.join(&name)) {
+                        warnings.push(format!(
+                            "job {job_id}: could not keep {}: {source}",
+                            name.to_string_lossy()
+                        ));
+                    }
+                }
             }
-            let _ = std::fs::rename(entry.path(), kept.join(&name));
-        }
+        },
     }
-    let _ = std::fs::remove_dir_all(staging);
+    if warnings.is_empty() {
+        if let Err(source) = std::fs::remove_dir_all(staging) {
+            warnings.push(format!(
+                "job {job_id}: support files were kept but staging {} could not be removed: {source}",
+                staging.display()
+            ));
+        }
+    } else {
+        warnings.push(format!(
+            "job {job_id}: staging {} left in place so nothing above is lost",
+            staging.display()
+        ));
+    }
+    warnings
 }
 
 /// Builds the manifest's symbol list: the requested key first, then every
