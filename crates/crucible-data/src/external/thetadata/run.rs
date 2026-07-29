@@ -75,16 +75,27 @@ pub const REFUSAL_MIN_SAMPLE: u64 = 200;
 
 /// Requests handed to one `fetch_batch` call.
 ///
-/// The pacer already caps in-flight requests at 8 and paces their launches, so
-/// this is not a concurrency knob — it is how much work is queued before the
-/// results are processed. 64 keeps the eight permits saturated across a spread
-/// of response times without holding more than a few hundred MB of buffered
-/// bodies (§7.1's largest T0 response is ~4 MB).
+/// **A chunk is a barrier, so it is sized to the permit count and not larger.**
+/// `fetch_batch` returns only when every request in the chunk has finished, so
+/// a chunk costs its *slowest* member. Measured against the live Terminal,
+/// three consecutive SPY `eod` days of similar size answered in **22.7 s, 4.8 s
+/// and 1.7 s** — a 13× spread — so a 64-request chunk waits on the worst of 64
+/// draws from that distribution and stalls the 63 writes behind it. An early
+/// run sat for five minutes with the CPU flat at 7.6 s and sixteen connections
+/// parked, which is what that looks like from outside.
 ///
-/// It also bounds the blast radius of a kill: a chunk's bodies are fetched
-/// before any of them is written, so an interrupted run loses at most one
-/// chunk's fetches — which resume re-does from the inventory diff for free.
-pub const FETCH_BATCH: usize = 64;
+/// At 8 the barrier spans exactly one set of permits: the next chunk launches
+/// as soon as the current one drains, and tail amplification is bounded by the
+/// slowest of 8 rather than the slowest of 64. Concurrency itself is worth
+/// having — measured 1.16 / 1.87 / 2.30 / 3.04 req/s at concurrency 1 / 2 / 4 /
+/// 8 on identical requests — so the answer is a smaller barrier, not less
+/// concurrency.
+///
+/// The real fix is to process completions as they arrive instead of by chunk;
+/// resume keys on the request string, not on position, so nothing requires
+/// results to be handled in order. That is a `fetch_batch` restructuring and is
+/// deliberately not bundled with this one.
+pub const FETCH_BATCH: usize = 8;
 
 /// One request that did not produce a file, and why.
 #[derive(Debug, Clone, PartialEq, Eq)]

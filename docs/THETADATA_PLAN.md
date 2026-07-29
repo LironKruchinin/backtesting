@@ -335,11 +335,41 @@ computes a negative delay and hammers the endpoint that just asked for a pause.
 That shape made every batch of eight pay for its slowest member, and against a
 0.3–2.7 s spread it idled seven requests behind one for hours at a time.
 
+### 5.1 Measured concurrency and tail latency (2026-07-29)
+
+Against the live Terminal, eight identical whole-chain `eod` requests:
+
+| concurrency | wall | throughput |
+|---|---|---|
+| 1 | 6.90 s | 1.16 req/s |
+| 2 | 4.27 s | 1.87 req/s |
+| 4 | 3.48 s | 2.30 req/s |
+| 8 | 2.63 s | **3.04 req/s** |
+
+Concurrency helps and is **sub-linear**: 8× the requests in flight buys 2.6×
+the throughput. Eight is still the right ceiling — it is the Terminal's own
+figure and the best measured — but it is not a multiplier.
+
+**Response time is highly variable, and that governs the driver's shape.**
+Three consecutive SPY `eod` days of comparable size answered in **22.7 s, 4.8 s
+and 1.7 s**. Any design that waits for a *batch* therefore pays for the worst
+draw in it: a 64-request chunk stalled for five minutes with the CPU flat and
+sixteen connections parked. `FETCH_BATCH` is consequently sized to the permit
+count (8), and the standing fix is to process completions as they arrive rather
+than by chunk — resume keys on the request string, not on position, so nothing
+requires ordered handling.
+
+**Serial acquisition measures 0.84–0.96 req/s**, so the first driver — which
+called `fetch` per request and never `fetch_batch` — was leaving roughly 3× on
+the table while projecting 5.3.
+
 **Revised T0 wall-clock.** T0 is ~2.5 requests per root-day over ~31,950
 root-days ≈ **80,000 requests**. At eight in flight and a ~1.5 s mean that is
-~5.3 req/s ≈ **4.2 h**, not the 2–3 h §2 estimates. The estimate stands
-corrected rather than the pacer loosened: 150 ms is not the binding constraint
-at that rate, the Terminal's response time is.
+~5.3 req/s ≈ 4.2 h. **That figure is superseded by measurement**: the best
+observed throughput is 3.04 req/s on small responses and less on large ones, so
+82,981 outstanding requests is **8–20 h** depending on the size mix, not 4.2 h.
+The 150 ms launch floor is nowhere near binding; the Terminal's per-request cost
+is, and it is not reduced by asking for more concurrency than 8.
 
 ---
 
