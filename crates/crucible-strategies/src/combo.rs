@@ -28,10 +28,10 @@
 //! | Concern | Home | Why |
 //! |---|---|---|
 //! | spec types, axes, rule AST, expansion, factory | here | pure data + pure functions; no I/O, no deps |
-//! | TOML text → `ComboSpec` | `crucible-cli::config` (later `funnel`) | serde lives where §6 put it |
+//! | TOML text → [`ComboSpec`] | `crucible-cli::config` (later `funnel`) | serde lives where §6 put it |
 //! | `blake3(canonical_form)` → config hash | the caller | blake3 is not a `strategies` dependency |
 //!
-//! `ComboSpec::canonical_form` is this crate's half of D-0012: a
+//! [`ComboSpec::canonical_form`] is this crate's half of D-0012: a
 //! deterministic, dependency-free rendering of the *parsed and normalized*
 //! spec. Whoever owns blake3 hashes that string. `strategies` never computes
 //! an identity, exactly as `crucible-data` never reads a clock (D-0015) —
@@ -81,7 +81,7 @@
 //!
 //! ## The rule language
 //!
-//! Rules are boolean expressions parsed once into an `rules::Expr` AST at
+//! Rules are boolean expressions parsed once into an [`Expr`](rules::Expr) AST at
 //! config-load time and evaluated per bar with no allocation and no string
 //! handling in the loop.
 //!
@@ -136,14 +136,14 @@
 //! discoverable at runtime, and a strategy has no error channel — so picking
 //! one arbitrarily would be a silently-wrong result, the failure mode this
 //! project exists to prevent. Instead the bar is skipped and
-//! `ComboStrategy::conflicting_signals` counts it, so the caller can print
+//! [`ComboStrategy::conflicting_signals`] counts it, so the caller can print
 //! a number that is never supposed to be nonzero.
 //!
 //! # Fair comparison (§2.6)
 //!
 //! Warmup is a property of the **grid**, not of a combo:
-//! `Grid::max_warmup_bars` is the max across every combo, and
-//! `align::Aligned` wraps any strategy so it consumes bars — warming
+//! [`Grid::max_warmup_bars`] is the max across every combo, and
+//! [`Aligned`](crate::align::Aligned) wraps any strategy so it consumes bars — warming
 //! its indicators — while its orders are discarded until that bar count is
 //! reached. Every combo in a grid therefore places its first order on the
 //! same bar index, and a combo with a shorter warmup gains no extra bars to
@@ -157,7 +157,7 @@
 //! - Slots are sorted by name; axes keep the order they were declared in.
 //! - Expansion is mixed-radix over that fixed axis order, last axis varying
 //!   fastest, so `combo_index` is a pure function of the canonical form.
-//! - A combo's identity is `crucible_core::identity::ComboId` = (config
+//! - A combo's identity is [`ComboId`] = (config
 //!   hash, combo index) — stable enough to sort parallel results on (§2.2
 //!   forbids merging by completion order) and to dedupe a registry.
 //! - Nothing here reads a clock, a map iterator, or an address.
@@ -171,8 +171,17 @@
 //! worst-case ordering convention and a path-sensitivity flag on the
 //! scorecard, not to a rule that only ever sees completed bars.
 
-/// Placeholder marker for the combo implementation. Exists so the module
-/// compiles and the spec above ships with the crate docs; it is deleted by
-/// the commit that lands `spec`, `rules`, `grid` and `build`.
-#[derive(Debug, Clone, Copy)]
-pub struct ComboStrategyPlan;
+pub mod build;
+pub mod error;
+pub mod grid;
+pub mod rules;
+pub mod spec;
+
+pub use build::ComboStrategy;
+pub use error::ComboError;
+pub use grid::{Combo, ComboId, ConfigHash, Grid, SlotParams};
+pub use rules::{RuleSet, RuleSource};
+pub use spec::{
+    CANONICAL_FORM_VERSION, ComboSpec, FloatAxis, IndicatorKind, IndicatorParams, IndicatorSpec,
+    IntAxis, Slot,
+};

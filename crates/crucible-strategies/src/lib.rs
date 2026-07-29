@@ -15,9 +15,12 @@
 //!   semantics, testability against hand-computed values, and control over
 //!   numerical behavior are the point (docs/DECISIONS.md D-0007).
 
+pub mod align;
 pub mod combo;
 pub mod indicators;
 pub mod sma_cross;
 
+pub use align::Aligned;
+pub use combo::{ComboSpec, ComboStrategy, Grid};
 pub use indicators::{Bollinger, BollingerBands, Ema, Sma};
 pub use sma_cross::SmaCross;
