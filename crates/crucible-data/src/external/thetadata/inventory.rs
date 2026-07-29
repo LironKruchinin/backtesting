@@ -361,6 +361,42 @@ impl Inventory {
         Ok(out)
     }
 
+    /// Every complete record, in file order.
+    ///
+    /// Torn final lines are skipped for the same reason
+    /// [`Inventory::completed_requests`] skips them: a half-written line
+    /// describes a file whose state is unknown, and the honest move is to leave
+    /// it looking un-done.
+    ///
+    /// # Errors
+    /// [`ThetaError::Io`] if the file exists but cannot be read.
+    pub fn read_all(&self) -> Result<Vec<InventoryRecord>, ThetaError> {
+        if !self.path.exists() {
+            return Ok(Vec::new());
+        }
+        let file = std::fs::File::open(&self.path).map_err(|source| ThetaError::Io {
+            path: self.path.clone(),
+            during: "opening the inventory",
+            source,
+        })?;
+        let mut out = Vec::new();
+        for line in BufReader::new(file).lines() {
+            let line = line.map_err(|source| ThetaError::Io {
+                path: self.path.clone(),
+                during: "reading the inventory",
+                source,
+            })?;
+            let trimmed = line.trim();
+            if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
+                continue;
+            }
+            if let Some(record) = parse_line(trimmed) {
+                out.push(record);
+            }
+        }
+        Ok(out)
+    }
+
     /// Which of `requests` the inventory does **not** already record.
     ///
     /// This is resume. Order is preserved so a resumed tranche runs in the same
@@ -377,6 +413,55 @@ impl Inventory {
             .cloned()
             .collect())
     }
+}
+
+/// Pulls one bare (unquoted) field out of a JSON line: numbers and `null`.
+///
+/// Returns `None` for a missing field and for `null`, which are the same thing
+/// to every caller here — the field was not measured.
+fn extract_bare_field<'a>(line: &'a str, field: &str) -> Option<&'a str> {
+    let needle = format!("\"{field}\":");
+    let start = line.find(&needle)? + needle.len();
+    let rest = &line[start..];
+    let end = rest.find([',', '}']).unwrap_or(rest.len());
+    let value = rest[..end].trim();
+    (!value.is_empty() && value != "null").then_some(value)
+}
+
+/// Reads one line back into a record, as far as the gate report needs it.
+///
+/// Deliberately partial and deliberately not `serde`: the fields reconstructed
+/// here are the ones the validation gate reads, and a line this cannot parse is
+/// a line this crate did not write. `n_builds_distribution` and the
+/// reconciliation block are not reconstructed — the gate recomputes those from
+/// the per-file counts rather than trusting a round-tripped copy.
+fn parse_line(line: &str) -> Option<InventoryRecord> {
+    let string = |f: &str| extract_string_field(line, f);
+    let number = |f: &str| extract_bare_field(line, f).and_then(|v| v.parse::<u64>().ok());
+    let float = |f: &str| extract_bare_field(line, f).and_then(|v| v.parse::<f64>().ok());
+    Some(InventoryRecord {
+        schema_version: u32::try_from(number("schema_version")?).ok()?,
+        endpoint: string("endpoint")?,
+        root: string("root")?,
+        grain: string("grain").unwrap_or_default(),
+        start_date: string("start_date")?,
+        end_date: string("end_date").unwrap_or_default(),
+        request: string("request")?,
+        file_path: string("file_path").unwrap_or_default(),
+        file_blake3: string("file_blake3").unwrap_or_default(),
+        size_bytes: number("size_bytes").unwrap_or(0),
+        row_count: number("row_count").unwrap_or(0),
+        distinct_contracts: number("distinct_contracts").unwrap_or(0),
+        dup_rate: float("dup_rate").unwrap_or(0.0),
+        n_builds_distribution: BTreeMap::new(),
+        conflicting_pairs: number("conflicting_pairs").unwrap_or(0),
+        sentinel_rows_dropped: number("sentinel_rows_dropped").unwrap_or(0),
+        zero_ohlc_rate: float("zero_ohlc_rate"),
+        reconciliation: None,
+        fetched_ts: extract_bare_field(line, "fetched_ts")
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0),
+    })
 }
 
 /// Pulls one string field out of a JSON line without a full parser.

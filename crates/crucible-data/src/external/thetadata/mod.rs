@@ -103,6 +103,7 @@
 
 pub mod client;
 pub mod error;
+pub mod gate;
 pub mod inventory;
 pub mod pacer;
 pub mod plan;
@@ -113,6 +114,7 @@ pub mod validate;
 
 pub use client::{DEFAULT_BASE_URL, MAX_CONCURRENCY, Request, ThetaClient};
 pub use error::{STATUS_NO_DATA, ThetaError};
+pub use gate::GateReport;
 pub use inventory::{INVENTORY_SCHEMA_VERSION, Inventory, InventoryRecord};
 pub use pacer::Pacer;
 pub use plan::{DryRunReport, PlannedRequest, TranchePlan, TrancheSpec};

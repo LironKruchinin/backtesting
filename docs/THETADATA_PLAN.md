@@ -489,12 +489,12 @@ that drifts shows up as a cell mismatch rather than as a plausible file.
 | Loopback binding (gate 4, on-machine) | ActiveStore rule capture; `mpssvc` Running; `AllowLocalFirewallRules` NotConfigured (= local rules honoured); all three profiles Enabled |
 | **Off-host block proof** | Rule enabled at test time (ActiveStore, Block, Inbound, Any, TCP 25503+25520). Phone Wi-Fi IP **10.100.102.96** (DHCP, no proxy) — in-subnet with 10.100.102.7, so on-link by routing table regardless of cellular state. Chrome: **`ERR_TIMED_OUT`**, both frames 15:07 local. Watch loop 15:02:49–15:07:50: **zero foreign connections**, self-address baseline recorded. Reading: `TIMED_OUT` not `CONNECTION_REFUSED` — the Terminal listens on `0.0.0.0`, so unfiltered would serve data and a closed port would RST into "refused"; a silent drop is the Block rule's signature. Absence became conclusive because the request is proven in-window. |
 | Databento blitz reconciled *(to the attempted set)* | 26 intents complete `intended→submitted→downloaded→appended`; plan cross-check found `statistics` missing entirely (§9) |
-
 | **Golden-raw round-trip + measured ratio** | `crucible theta-golden`, VIX 2024-01-02, five endpoints, **6,221,352 cells** compared individually against the source CSV; ratios in §7.3 (D-0057) |
 | **Validator per §4 with planted controls** | `external/thetadata/validate.rs`; every detector paired with a planted bug that is asserted to fire — cross-parse both ways, header drift in four directions, `(contract, created)` repeat, repeated contract-minute, mid-day zero-underlying, `iv_error` at and beyond 100, all-zero series, inverted eod↔greeks, OI key absent from eod, DST gap and ambiguous hour |
 | **`inventory.jsonl` schema** | `external/thetadata/inventory.rs`; append-only, resume by request diff, torn-final-line control |
 | **Pacer constants** | §5, recorded and unit-tested (D-0056) |
 | **Greeks floors, all nine roots** | `crucible theta-floors`, 132 requests, each verified against its previous session and three samples above it (§3.4, D-0057) |
+| **Acquisition driver + dry run** | `external::thetadata::{plan,run}` + `crucible theta-pull`. Deterministic idempotent expansion, resume strictly by inventory diff (orphan-file control), free-disk guard refusing below 400 GB / at 1.0 TB / on an unmeasurable volume, per-file refusals with a 2 %-over-200-attempts systemic breaker, golden-raw sampling in the driver. T0's dry run reconciled to the expansion arithmetic exactly: 9×3,539 = 31,851 `eod` and OI, 6×2,385 + 3,539 + 1,902 + 36 = 19,787 greeks, 83,489 total, 20.91 GiB projected |
 | **Coverage vs calendar, edge 3** | `us_equity_options` (D-0058) + `TradingDayCalendar` (D-0059). **Authoritative** for SPY/QQQ/IWM/DIA, whose hours and dates are both sourced. **Sourced day-level** for SPX/SPXW/NDX/VIX/RUT: Cboe's published US-options holiday schedule enumerates the same closure and early-close set, verified against the 2026 schedule as published and inferred from the same rules for earlier years rather than re-verified page by page |
 
 ### OPEN
@@ -509,10 +509,6 @@ behaviour so a fix must consciously flip it. **Consequence: equity
 `bars_per_year` and T1's intraday minute grids do not run over this table until
 it is fixed.** `is_trading_day` is untouched, so day-level coverage and every
 T0 reconciliation edge are unaffected (D-0059).
-
-**Before T0** — the acquisition driver (`external::thetadata::plan`): tranche
-expansion, resume by inventory diff, the free-disk guard, and the dry run T0
-fires through. Nothing else.
 
 **Before T1** — measured SPX/QQQ/IWM per-day sizes · Databento blitz at terminal
 state (`statistics` still at `submitted`).

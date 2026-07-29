@@ -1,8 +1,17 @@
-//! The acquisition loop: one request at a time, through every guard.
+//! The acquisition loop: fetch a chunk concurrently, then take each response
+//! the rest of the way in request order.
 //!
 //! ```text
 //! pacer ─► fetch ─► validate ─► transcode ─► staging ─► rename ─► inventory
+//!   (8 in flight)   └────────── serial, in request order ──────────┘
 //! ```
+//!
+//! The fetch half is concurrent and the processing half is not, which is the
+//! right split: the first is IO-bound and the pacer already governs it, while
+//! the second appends to one inventory file and must stay ordered. The first
+//! version of this loop fetched serially and measured **0.84-0.96 req/s**
+//! against a projection of ~5.3 — a serial caller simply cannot use concurrency
+//! the pacer is willing to grant, and throughput collapses to 1/latency.
 //!
 //! **The inventory line is appended last, after the file is durably in place.**
 //! That ordering is the whole contract, and it is the same one D-0017 gives the
@@ -63,6 +72,19 @@ pub const REFUSAL_RATE_LIMIT: f64 = 0.02;
 /// 2 % limit — the small-sample trap, and exactly the shape of §0.4's "a test
 /// whose failure mode produces the desired answer".
 pub const REFUSAL_MIN_SAMPLE: u64 = 200;
+
+/// Requests handed to one `fetch_batch` call.
+///
+/// The pacer already caps in-flight requests at 8 and paces their launches, so
+/// this is not a concurrency knob — it is how much work is queued before the
+/// results are processed. 64 keeps the eight permits saturated across a spread
+/// of response times without holding more than a few hundred MB of buffered
+/// bodies (§7.1's largest T0 response is ~4 MB).
+///
+/// It also bounds the blast radius of a kill: a chunk's bodies are fetched
+/// before any of them is written, so an interrupted run loses at most one
+/// chunk's fetches — which resume re-does from the inventory diff for free.
+pub const FETCH_BATCH: usize = 64;
 
 /// One request that did not produce a file, and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -246,83 +268,94 @@ pub fn run_tranche(
     let mut report = RunReport::default();
     let total = outstanding.len() as u64;
 
-    for request in outstanding {
-        report.attempted += 1;
-        progress(request, report.attempted, total);
+    for chunk in outstanding.chunks(FETCH_BATCH) {
+        // Fetch the chunk CONCURRENTLY, then process the results in request
+        // order. The first version called `fetch` per request and measured
+        // 0.84-0.96 req/s against a projection of ~5.3 — because a serial
+        // caller cannot use concurrency the pacer is willing to grant, and
+        // throughput collapses to 1/latency. Results come back in request
+        // order, so ordering, resume and the refusal ledger are unchanged.
+        let bodies =
+            client.fetch_batch(&chunk.iter().map(|r| r.request.clone()).collect::<Vec<_>>());
 
-        let rendered = request.request.render();
-        let outcome = acquire_one(client, request, data_dir, &golden, &rendered, &mut report);
+        for (request, body) in chunk.iter().zip(bodies) {
+            report.attempted += 1;
+            progress(request, report.attempted, total);
 
-        match outcome {
-            Err(e) => return Err(e),
-            Ok(Outcome::Refused(reason)) => {
-                report.refusals.push(Refusal {
-                    request: rendered,
-                    reason,
-                });
-                // A systemic refusal rate is a finding about this build, not a
-                // reason to keep going and archive the result.
-                if report.refusal_rate_is_systemic() {
-                    report.halted = Some(format!(
-                        "refusal rate {:.1}% over {} attempts exceeds the {:.1}% limit — \
-                         that is this build misreading the feed, not a vendor hiccup. \
-                         Nothing refused was inventoried, so a fixed build resumes cleanly",
-                        report.refusal_rate() * 100.0,
-                        report.attempted,
-                        REFUSAL_RATE_LIMIT * 100.0
-                    ));
-                    return Ok(report);
+            let rendered = request.request.render();
+            let outcome = process_one(body, request, data_dir, &golden, &rendered, &mut report);
+
+            match outcome {
+                Err(e) => return Err(e),
+                Ok(Outcome::Refused(reason)) => {
+                    report.refusals.push(Refusal {
+                        request: rendered,
+                        reason,
+                    });
+                    // A systemic refusal rate is a finding about this build,
+                    // not a reason to keep going and archive the result.
+                    if report.refusal_rate_is_systemic() {
+                        report.halted = Some(format!(
+                            "refusal rate {:.1}% over {} attempts exceeds the {:.1}% limit — \
+                             that is this build misreading the feed, not a vendor hiccup. \
+                             Nothing refused was inventoried, so a fixed build resumes cleanly",
+                            report.refusal_rate() * 100.0,
+                            report.attempted,
+                            REFUSAL_RATE_LIMIT * 100.0
+                        ));
+                        return Ok(report);
+                    }
                 }
-            }
-            Ok(Outcome::Empty) => {
-                report.empty += 1;
-                inventory.append(&empty_record(request, &rendered, now_ts))?;
-            }
-            Ok(Outcome::Written {
-                bytes,
-                report: validation,
-            }) => {
-                report.written += 1;
-                report.bytes_written += bytes;
-                let path = output_path(data_dir, request);
-                let relative = path
-                    .strip_prefix(data_dir)
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                // The file is on disk under its real name by now. Only here is
-                // an inventory line honest.
-                inventory.append(&InventoryRecord::new(
-                    request.endpoint.path(),
-                    &request.root,
-                    "daily",
-                    &render_date(request.date),
-                    &render_date(request.date),
-                    &rendered,
-                    &relative,
-                    &file_blake3(&path).unwrap_or_default(),
+                Ok(Outcome::Empty) => {
+                    report.empty += 1;
+                    inventory.append(&empty_record(request, &rendered, now_ts))?;
+                }
+                Ok(Outcome::Written {
                     bytes,
-                    &validation,
-                    None,
-                    now_ts,
-                ))?;
+                    report: validation,
+                }) => {
+                    report.written += 1;
+                    report.bytes_written += bytes;
+                    let path = output_path(data_dir, request);
+                    let relative = path
+                        .strip_prefix(data_dir)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    // The file is on disk under its real name by now. Only
+                    // here is an inventory line honest.
+                    inventory.append(&InventoryRecord::new(
+                        request.endpoint.path(),
+                        &request.root,
+                        "daily",
+                        &render_date(request.date),
+                        &render_date(request.date),
+                        &rendered,
+                        &relative,
+                        &file_blake3(&path).unwrap_or_default(),
+                        bytes,
+                        &validation,
+                        None,
+                        now_ts,
+                    ))?;
+                }
             }
         }
     }
     Ok(report)
 }
 
-/// One request, end to end. Errors that end the run propagate; everything else
-/// becomes an [`Outcome`].
-fn acquire_one(
-    client: &ThetaClient,
+/// One fetched body, taken the rest of the way. Errors that end the run
+/// propagate; everything else becomes an [`Outcome`].
+fn process_one(
+    body: Result<Vec<u8>, ThetaError>,
     request: &PlannedRequest,
     data_dir: &Path,
     golden: &BTreeSet<String>,
     rendered: &str,
     report: &mut RunReport,
 ) -> Result<Outcome, ThetaError> {
-    let body = match client.fetch(&request.request) {
+    let body = match body {
         Ok(body) => body,
         Err(e) if e.is_no_data() => return Ok(Outcome::Empty),
         // A tripped breaker means the Terminal has stopped answering; more
