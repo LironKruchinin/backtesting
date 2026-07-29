@@ -218,18 +218,22 @@ impl ThetaClient {
         let mut out: Vec<Option<Result<Vec<u8>, ThetaError>>> =
             (0..requests.len()).map(|_| None).collect();
 
-        let mut set = tokio::task::JoinSet::new();
-        for (index, request) in requests.iter().enumerate() {
-            let url = self.url_of(request);
-            let rendered = request.render();
-            let client = self.client.clone();
-            let pacer = self.pacer.clone();
-            set.spawn(async move {
-                let result = fetch_one(&client, &pacer, &url, &rendered).await;
-                (index, result)
-            });
-        }
+        // Spawning happens INSIDE `block_on`. `JoinSet::spawn` needs an active
+        // runtime context and panics without one — "there is no reactor
+        // running" — and the panic is only reachable when a caller actually
+        // batches, which is why it survived until the first real tranche.
         self.runtime.block_on(async {
+            let mut set = tokio::task::JoinSet::new();
+            for (index, request) in requests.iter().enumerate() {
+                let url = self.url_of(request);
+                let rendered = request.render();
+                let client = self.client.clone();
+                let pacer = self.pacer.clone();
+                set.spawn(async move {
+                    let result = fetch_one(&client, &pacer, &url, &rendered).await;
+                    (index, result)
+                });
+            }
             while let Some(joined) = set.join_next().await {
                 match joined {
                     Ok((index, result)) => {
@@ -480,6 +484,52 @@ mod tests {
             DEFAULT_BASE_URL.starts_with("http://127.0.0.1:"),
             "the client must never reach the Terminal over a routable address"
         );
+    }
+
+    // REGRESSION. `fetch_batch` spawned its tasks outside `block_on`, so
+    // `JoinSet::spawn` found no runtime and panicked with "there is no reactor
+    // running". It survived review, unit tests and a whole tranche's worth of
+    // design because *nothing called it* — the driver fetched one at a time —
+    // and the first batched request took the process down.
+    //
+    // No live Terminal needed: an unreachable port exercises the spawn, the
+    // pacer, the retry ladder and the result-ordering path, and asserts the
+    // failure arrives as N ordered `Err`s rather than as a panic. A batch that
+    // cannot connect must still answer once per request, in request order.
+    #[test]
+    fn fetch_batch_spawns_inside_a_runtime_and_answers_once_per_request() {
+        // Port 1 is reserved and nothing listens there; the client fails fast.
+        let client = ThetaClient::open("http://127.0.0.1:1/v3", 4).expect("open");
+        let requests: Vec<Request> = (0..3)
+            .map(|n| Request::new("/option/history/eod").with("symbol", format!("R{n}")))
+            .collect();
+
+        let results = client.fetch_batch(&requests);
+
+        assert_eq!(results.len(), 3, "one answer per request, always");
+        for (index, result) in results.iter().enumerate() {
+            // Either failure is correct here and which one arrives is a race:
+            // three requests times four attempts is twelve drops, so the
+            // breaker's five-consecutive threshold trips partway through. That
+            // it trips at all against a genuinely dead endpoint is D-0056
+            // working end to end rather than only in its unit tests.
+            let path = match result {
+                Err(ThetaError::Transport { path, .. } | ThetaError::CircuitOpen { path, .. }) => {
+                    path
+                }
+                other => panic!("expected a connection failure at {index}, got {other:?}"),
+            };
+            // Results come back by request index, never by completion order
+            // (§2.2) — the property that keeps a rebuild identical to the
+            // original build.
+            assert!(path.contains(&format!("R{index}")), "{path} at {index}");
+        }
+    }
+
+    #[test]
+    fn an_empty_batch_is_not_a_special_case() {
+        let client = ThetaClient::open("http://127.0.0.1:1/v3", 4).expect("open");
+        assert!(client.fetch_batch(&[]).is_empty());
     }
 
     #[test]
