@@ -22,13 +22,14 @@
 //! | 4 | curated data exists but could not be trusted |
 
 use crucible_core::prelude::*;
+use crucible_data::calendar::Calendar;
 use crucible_data::catalog::TsRange;
 use crucible_data::curated::{
     CURATED_SCHEMA_VERSION, CuratedError, ParquetBarFeed, TRANSCODER_VERSION,
 };
 use crucible_data::ingest::money::parse_usd_to_nano;
 use crucible_data::ingest::range_from_dates;
-use crucible_data::ingest::window::{date_of, parse_civil_date, start_of};
+use crucible_data::ingest::window::{date_of, days_from_civil, parse_civil_date, start_of};
 use crucible_engine::{BacktestParams, BacktestResult, SpreadCrossFills, run as run_backtest};
 use crucible_strategies::SmaCross;
 
@@ -77,10 +78,49 @@ pub struct BacktestArgs {
     /// Commission per contract per side, in dollars.
     #[arg(long, default_value = "1.25")]
     pub fee_per_contract_usd: String,
-    /// Override the annualization factor instead of deriving it from the
-    /// sample. `calendar` v1 will take this over.
+    /// Override the annualization factor outright. Beats both the calendar
+    /// and the sample measurement.
     #[arg(long)]
     pub bars_per_year: Option<f64>,
+    /// Which session calendar supplies the annualization factor: `auto` to
+    /// match the instrument's root symbol, `none` to measure the sample
+    /// instead, or an explicit calendar id.
+    #[arg(long, default_value = "auto")]
+    pub calendar: String,
+}
+
+/// Where the annualization factor came from. Printed with the result, because
+/// an annualization factor is an assumption and CLAUDE.md §2.4 does not allow
+/// silent ones.
+enum Annualization {
+    /// The operator said so.
+    Given(f64),
+    /// A session calendar counted the intervals in a year of sessions.
+    Calendar {
+        /// Which calendar answered.
+        id: String,
+        /// Its answer.
+        value: f64,
+        /// What measuring the loaded sample would have said, for comparison.
+        sample: f64,
+    },
+    /// Measured from the loaded bars (D-0038), because no calendar applies.
+    Sample {
+        /// The measurement.
+        value: f64,
+        /// Why the calendar did not answer.
+        why: String,
+    },
+}
+
+impl Annualization {
+    fn value(&self) -> f64 {
+        match self {
+            Annualization::Given(v)
+            | Annualization::Calendar { value: v, .. }
+            | Annualization::Sample { value: v, .. } => *v,
+        }
+    }
 }
 
 /// Everything parsed out of the arguments, so validation happens once and
@@ -151,17 +191,21 @@ pub fn run(args: &BacktestArgs) -> i32 {
         );
     }
 
-    let bars_per_year = args
-        .bars_per_year
-        .unwrap_or_else(|| derive_bars_per_year(&feed, settings.tf));
+    let annualization = match resolve_annualization(args, &feed, settings.tf, &instrument) {
+        Ok(a) => a,
+        Err(msg) => {
+            eprintln!("error: {msg}");
+            return EXIT_USAGE;
+        }
+    };
     let params = BacktestParams {
         initial_cash_nano_usd: settings.initial_cash_nano_usd,
-        bars_per_year,
+        bars_per_year: annualization.value(),
     };
     let mut strategy = SmaCross::new(args.fast, args.slow, Qty(args.qty));
     let mut fills = settings.fills;
 
-    print_header(args, &settings, &feed, bars_per_year);
+    print_header(args, &settings, &feed, &annualization);
 
     match run_backtest(
         &mut feed,
@@ -256,13 +300,80 @@ fn parse(args: &BacktestArgs) -> Result<Settings, String> {
     })
 }
 
+/// Decides where the annualization factor comes from.
+///
+/// Precedence: an explicit `--bars-per-year` beats everything; otherwise a
+/// session calendar answers if one governs the instrument; otherwise the
+/// sample is measured, as D-0038 did before calendars existed.
+///
+/// The two disagree on purpose and neither is wrong. The calendar counts the
+/// intervals a year of sessions *contains*; the sample counts the intervals
+/// that actually *traded*, which is fewer, because `ohlcv` data has no bar for
+/// an interval with no trade. Both numbers are printed whenever they differ by
+/// more than a rounding error, so a reader can see which side of that the
+/// Sharpe below sits on (D-0039).
+fn resolve_annualization(
+    args: &BacktestArgs,
+    feed: &ParquetBarFeed,
+    tf: TimeFrame,
+    instrument: &InstrumentId,
+) -> Result<Annualization, String> {
+    let sample = derive_bars_per_year(feed, tf);
+    if let Some(given) = args.bars_per_year {
+        if !(given.is_finite() && given > 0.0) {
+            return Err("--bars-per-year must be a positive number".to_owned());
+        }
+        return Ok(Annualization::Given(given));
+    }
+
+    let calendar = match args.calendar.as_str() {
+        "none" => None,
+        "auto" => Calendar::for_instrument(instrument)
+            .map_err(|e| format!("bundled calendar tables are broken: {e}"))?,
+        id => Some(Calendar::by_id(id).map_err(|e| format!("--calendar: {e}"))?),
+    };
+
+    match calendar {
+        Some(cal) => {
+            // A session template describes one era of an exchange. Annualizing
+            // a 2013 replay with 2015-onward hours is this era's answer to a
+            // different era's question, and silently wrong (D-0039).
+            if let Some(first) = feed.first_ts_open() {
+                let first_date = date_of(first);
+                if days_from_civil(first_date) < days_from_civil(cal.valid_from()) {
+                    eprintln!(
+                        "warning: these bars start {first_date}, before calendar {} describes
+                                  the exchange ({}). Session hours changed, so the
+                                  annualization factor below is measured against the wrong
+                                  template. Use --calendar none to measure the sample instead.",
+                        cal.id(),
+                        cal.valid_from()
+                    );
+                }
+            }
+            Ok(Annualization::Calendar {
+                id: cal.id().to_owned(),
+                value: cal.bars_per_year(tf),
+                sample,
+            })
+        }
+        None => Ok(Annualization::Sample {
+            value: sample,
+            why: match args.calendar.as_str() {
+                "none" => "--calendar none".to_owned(),
+                _ => format!("no bundled calendar claims {instrument}"),
+            },
+        }),
+    }
+}
+
 /// Bars per year measured from the sample itself.
 ///
 /// The demo's 347,760 assumes a 23-hour session every one of 252 days. Real
 /// `ohlcv` data has no bar for an interval that did not trade, so that
 /// constant overstates the bar count, which overstates the annualization
 /// factor, which flatters Sharpe. Measuring the sample is the conservative
-/// choice until `calendar` v1 can answer properly.
+/// choice wherever no calendar applies.
 fn derive_bars_per_year(feed: &ParquetBarFeed, tf: TimeFrame) -> f64 {
     let (Some(first), Some(last)) = (feed.first_ts_open(), feed.last_ts_open()) else {
         return 0.0;
@@ -308,7 +419,7 @@ fn print_header(
     args: &BacktestArgs,
     settings: &Settings,
     feed: &ParquetBarFeed,
-    bars_per_year: f64,
+    annualization: &Annualization,
 ) {
     println!(
         "Crucible backtest — {} {}, SMA({}/{}) cross, {} contract(s)\n",
@@ -332,14 +443,27 @@ fn print_header(
         "  capital        {} initial",
         usd(settings.initial_cash_nano_usd)
     );
-    println!(
-        "  annualization  {bars_per_year:.0} bars/yr{}",
-        if args.bars_per_year.is_some() {
-            " (given)"
-        } else {
-            " (measured from this sample; calendar v1 will own it)"
+    match annualization {
+        Annualization::Given(value) => {
+            println!("  annualization  {value:.0} bars/yr  (given on the command line)");
         }
-    );
+        Annualization::Sample { value, why } => {
+            println!("  annualization  {value:.0} bars/yr  (measured from this sample — {why})");
+        }
+        Annualization::Calendar { id, value, sample } => {
+            println!("  annualization  {value:.0} bars/yr  (calendar {id})");
+            // A large gap means the sample is missing intervals the session
+            // contains — a thin contract, or a hole in the data. Either way the
+            // reader should see it rather than trust one number.
+            if (value - sample).abs() > value * 0.01 {
+                println!(
+                    "                 {sample:.0} bars/yr would be measured from this sample \
+                     ({:+.1}%)",
+                    (sample - value) / value * 100.0
+                );
+            }
+        }
+    }
     println!("  curated        schema v{CURATED_SCHEMA_VERSION}, transcoder v{TRANSCODER_VERSION}");
     for source in feed.sources() {
         println!(
