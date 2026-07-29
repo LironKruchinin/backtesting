@@ -25,6 +25,7 @@
 mod backtest;
 mod layout_check;
 mod pull;
+mod qa;
 mod rolls;
 mod transcode;
 
@@ -52,7 +53,7 @@ ENVIRONMENT:\n\
 \x20 variables take precedence over it. .env is gitignored — never commit it.\n\
 \n\
 TYPICAL ORDER:\n\
-\x20 pull -> verify -> transcode -> backtest\n\
+\x20 pull -> verify -> transcode -> qa -> backtest\n\
 \n\
 NOTE: `pull` and `transcode` need a build with the Databento client:\n\
 \x20 cargo run -p crucible-cli --features databento -- pull ...\n\
@@ -94,6 +95,8 @@ enum Command {
     Transcode(transcode::TranscodeArgs),
     /// Replay curated bars through the reference strategy.
     Backtest(backtest::BacktestArgs),
+    /// Inspect curated bars for gaps, spikes, and vendor-reported problems.
+    Qa(qa::QaArgs),
     /// Build a continuous-contract roll table from curated bars.
     Rolls(rolls::RollsArgs),
 }
@@ -119,6 +122,7 @@ fn main() {
         Some(Command::LayoutCheck) => layout_check::run(),
         Some(Command::Transcode(args)) => transcode::run(&args),
         Some(Command::Backtest(args)) => backtest::run(&args),
+        Some(Command::Qa(args)) => qa::run(&args),
         Some(Command::Rolls(args)) => rolls::run(&args),
         // Bare `crucible` stays a zero-exit help screen: it is what a new
         // reader types first, and it has not failed at anything.

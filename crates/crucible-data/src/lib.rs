@@ -5,11 +5,11 @@
 //! DBN→Parquet transcoding, session calendars, continuous contracts, and
 //! synthetic data for tests/permutation harnesses.
 //!
-//! `synthetic`, `catalog`, `ingest`, `curated`, and `transcode` are
-//! implemented. `calendar` and `continuous` are still **specs encoded as
-//! module docs** — read them before implementing them; they carry decisions
-//! made at design time that are easy to get subtly wrong (roll conventions,
-//! timestamp rules).
+//! Every module is implemented as of M1. `calendar` says when the exchange was
+//! open, `continuous` stitches expiring contracts into one series, and `qa`
+//! reads the others back and asks whether the archive is any good — start there
+//! if you want to know what the data actually looks like rather than how it got
+//! here.
 //!
 //! The path a bar takes, and where to read about each leg:
 //!
@@ -20,8 +20,13 @@
 //!                                       ▼
 //!                     curated/bars/{instrument}/{tf}/{window}.parquet
 //!                                       │
-//!                                 ParquetBarFeed
-//!                                       ▼
+//!                        ┌──────────────┼──────────────┐
+//!                  ParquetBarFeed       │         continuous
+//!                        │              │              │
+//!                        │             qa   curated/rolls/{root}/{tf}/*.json
+//!                        │        (+ calendar)         │
+//!                        │                       ContinuousFeed
+//!                        ▼                             ▼
 //!                              crucible-engine::run
 //! ```
 //!
@@ -48,6 +53,7 @@ pub mod curated;
 pub mod external;
 pub mod ingest;
 pub mod layout;
+pub mod qa;
 pub mod synthetic;
 pub mod transcode;
 
