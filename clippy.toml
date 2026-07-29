@@ -1,0 +1,27 @@
+# Workspace clippy configuration.
+#
+# CLAUDE.md §2.2 bans reading the wall clock from result-affecting code. That
+# used to be a review rule; this makes it a merge gate.
+#
+# The gap this closes: `crucible-data` asks for `chrono` without its `clock`
+# feature, which documents the intent — but Cargo unifies features across the
+# dependency graph, and `parquet` enables `chrono/clock`, so `Utc::now()`
+# compiles anyway. A comment claiming otherwise is worse than no comment.
+#
+# Legitimate uses exist and are expected to carry
+# `#[expect(clippy::disallowed_methods, reason = "…")]`, which keeps every one
+# of them visible and greppable — and, because `expect` warns when it stops
+# firing, deletes itself when the need goes away.
+#
+# Known sanctioned sites:
+#   - crucible-cli's `SystemClock` (D-0032): the ONE implementation that reads
+#     the OS clock, deliberately living in a bin target rather than in
+#     `crucible-data`.
+#   - benchmarks and logging may use `Instant` (§2.2 says so explicitly).
+
+disallowed-methods = [
+    { path = "std::time::SystemTime::now", reason = "reading the wall clock makes a result unreproducible (CLAUDE.md §2.2). Take the instant as an argument; the one OS-reading impl lives in the CLI (D-0032)" },
+    { path = "std::time::Instant::now", reason = "banned in result-affecting code (CLAUDE.md §2.2); benchmarks and logging may opt out with #[expect(clippy::disallowed_methods, reason = ...)]" },
+    { path = "chrono::Utc::now", reason = "the calendar must never read the clock (D-0039). `chrono` is requested without its `clock` feature, but `parquet` enables it through feature unification, so this lint is the actual guarantee" },
+    { path = "chrono::Local::now", reason = "as chrono::Utc::now, and worse: it also depends on the machine's timezone" },
+]

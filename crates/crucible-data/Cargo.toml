@@ -18,6 +18,22 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 blake3 = "1.8"
 
+# `calendar` only, and the only timezone-aware code in the workspace
+# (CLAUDE.md §4, §6). We ask for chrono without its `clock` feature, but that
+# is a statement of intent and NOT a guarantee: Cargo unifies features across
+# the graph and `parquet` enables `chrono/clock`, so `Utc::now()` compiles here
+# regardless. The actual guarantee is the `disallowed-methods` entry in
+# `clippy.toml`, which is a merge gate (D-0048). chrono-tz carries the IANA
+# database, which is the whole reason to take the dependency — US
+# daylight-saving law has been amended before and hand-rolling the rule is how
+# a calendar goes quietly wrong.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono-tz = { version = "0.10", default-features = false, features = ["std"] }
+# Calendar tables are TOML data files, compiled in with `include_str!` rather
+# than read at runtime so the same config cannot mean two things on two
+# machines. Already blessed for `data` in CLAUDE.md §6.
+toml = "0.9"
+
 # Acquisition. Async; reached only through the sync `ingest::BatchProvider`
 # seam in `ingest::databento`, which owns a private current-thread runtime.
 # DBN decoding comes from this crate's `databento::dbn` re-export rather than a

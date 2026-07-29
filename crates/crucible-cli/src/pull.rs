@@ -138,6 +138,12 @@ pub struct SystemClock;
 
 #[cfg(feature = "databento")]
 impl crucible_data::ingest::clock::Clock for SystemClock {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "D-0032: THE one implementation in the workspace that reads the \
+                  OS clock, in a bin target for exactly that reason. Everything \
+                  downstream takes the instant as an argument (D-0015)."
+    )]
     fn now_ts(&self) -> crucible_core::types::Ts {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
