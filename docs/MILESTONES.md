@@ -93,11 +93,25 @@ ESH4 January-2024 1m bars, 30,167 bars, −23.51% under `spread_cross`.
 
 ## M2 — Engine hardening + combos (~3–4 weeks)
 
-- [ ] Warmup alignment: funnel-controlled eval windows so every grid combo
-      scores on identical bars (CLAUDE.md §2.6)
-- [ ] Walk-forward runner: anchored + rolling folds over a `Feed`
-- [ ] Config-driven combo strategies (`crucible-strategies::combo` spec):
-      TOML → indicator graph + rule AST; deny-unknown-fields
+- [x] Warmup alignment (2026-07-29): `Grid::max_warmup_bars` is the max across
+      the grid and `strategies::align::Aligned` enforces it, so every combo
+      places its first order on the same bar index and a short-warmup combo
+      gains nothing (CLAUDE.md §2.6). *Not* funnel-controlled as this line
+      originally said — it is a `Strategy` decorator, so hand-written
+      strategies get it too and the engine loop keeps its single job
+      (D-0061). The proof is `a_short_warmup_combo_gains_nothing_from_being_short`,
+      which asserts the head start exists unaligned and is gone aligned
+- [ ] Walk-forward runner: anchored + rolling folds over a `Feed`. Takes over
+      slicing the eval window out of the *metrics* — today every combo's
+      equity carries an identical flat warmup prefix (D-0061)
+- [x] Config-driven combo strategies (2026-07-29): tagged indicator slots with
+      parameter axes, a rule grammar parsed to an AST at load time, mixed-radix
+      grid expansion, and a factory — all plain data in
+      `crucible-strategies::combo`, with `serde`/`toml` in `crucible-cli::config`
+      and blake3 config identity computed by the caller (D-0060). `crucible
+      combo` expands a config and replays every point on one shared bar series.
+      `SmaCross` written as four lines of TOML emits an identical order stream,
+      which is the test that makes the layer credible
 - [ ] Stops/targets with worst-case intrabar ordering; flag path-sensitive
       results in outputs
 - [ ] Golden tests vs an external reference (NautilusTrader or hand-audited
@@ -113,7 +127,12 @@ with reproducible, externally-cross-checked results.
 
 The quant-research payload. Specs live in `crucible-funnel` module docs.
 
-- [ ] Grid expansion + blake3 config identity; combo-count guardrails
+- [ ] Grid expansion + blake3 config identity; combo-count guardrails.
+      *Expansion and identity landed early with M2's combo layer* (D-0060):
+      `ComboSpec::canonical_form` + blake3 in the caller, `ComboId` =
+      (config hash, combo index). What is left here is the funnel's half —
+      guardrails that **refuse** rather than warn once a run costs hours, and
+      dedupe on (config_hash, combo_index, fold)
 - [ ] DuckDB registry: runs, metrics, hypotheses, trials, verdicts;
       insert-before-run; dedup/resume
 - [ ] Rayon scheduler: run-level parallelism, dataset semaphore,

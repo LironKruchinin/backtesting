@@ -12,6 +12,11 @@
 //! `pull` can spend money, and only `pull` and `transcode` need the
 //! `databento` feature.
 //!
+//! `combo` is the same replay path driven by a config rather than by flags:
+//! it expands a TOML parameter grid and runs every point on one shared bar
+//! series. The config parser lives in [`config`] because
+//! `crucible-strategies` must stay dependency-free (D-0060).
+//!
 //! ## Environment (D-0022)
 //!
 //! This is a **bin target**, so it owns environment resolution: [`main`]
@@ -23,6 +28,8 @@
 //! default, and the key is never printed, logged, or passed as an argument.
 
 mod backtest;
+mod combo;
+mod config;
 mod layout_check;
 mod pull;
 mod qa;
@@ -96,6 +103,8 @@ enum Command {
     Transcode(transcode::TranscodeArgs),
     /// Replay curated bars through the reference strategy.
     Backtest(backtest::BacktestArgs),
+    /// Expand a TOML combo config into a grid, and optionally replay it.
+    Combo(combo::ComboArgs),
     /// Inspect curated bars for gaps, spikes, and vendor-reported problems.
     Qa(qa::QaArgs),
     /// Build a continuous-contract roll table from curated bars.
@@ -130,6 +139,7 @@ fn main() {
         Some(Command::LayoutCheck) => layout_check::run(),
         Some(Command::Transcode(args)) => transcode::run(&args),
         Some(Command::Backtest(args)) => backtest::run(&args),
+        Some(Command::Combo(args)) => combo::run_cmd(&args),
         Some(Command::Qa(args)) => qa::run(&args),
         Some(Command::Rolls(args)) => rolls::run(&args),
         Some(Command::ThetaGolden(args)) => theta::run(&args),
@@ -310,23 +320,26 @@ fn usd(n: NanoUsd) -> String {
 
 /// FNV-1a 64-bit, hand-rolled: stable across Rust versions (unlike
 /// `DefaultHasher`), which is exactly what a CI determinism hash needs.
-struct Fnv64 {
+///
+/// Shared with `combo`'s grid hash rather than reimplemented there — two
+/// determinism gates that could drift from each other are one gate.
+pub(crate) struct Fnv64 {
     state: u64,
 }
 
 impl Fnv64 {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Fnv64 {
             state: 0xcbf2_9ce4_8422_2325,
         }
     }
-    fn write_i64(&mut self, v: i64) {
+    pub(crate) fn write_i64(&mut self, v: i64) {
         for b in v.to_le_bytes() {
             self.state ^= u64::from(b);
             self.state = self.state.wrapping_mul(0x0000_0100_0000_01b3);
         }
     }
-    const fn finish(&self) -> u64 {
+    pub(crate) const fn finish(&self) -> u64 {
         self.state
     }
 }

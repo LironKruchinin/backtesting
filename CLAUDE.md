@@ -411,6 +411,30 @@ reference; supersede the decision if you disagree — don't hotfix.
 - **`ContinuousFeed::open` refuses a replay window outside the roll table's
   build span** rather than returning a series quietly missing contracts
   (D-0045). Rebuild the table instead: it is curated data, and disposable.
+- **Every combo's equity curve starts with a flat prefix as long as the
+  *grid's* warmup, not its own**, so a 10-bar combo sits idle for 200 bars
+  next to a 200-bar one. That is §2.6 working (D-0061): the alternative is a
+  short combo scored on a longer, differently-timed sample. The prefix is
+  identical across the grid, so rankings are fair; each naive Sharpe carries
+  the same `sqrt(n_eval/n_total)` factor until the walk-forward runner slices
+  the window out of the metrics. `combo` prints the suppressed-order count so
+  the effect is visible rather than absorbed.
+- **A float parameter axis cannot be written as `{ start, end, step }`**
+  though an integer one can (D-0060). Repeated addition of 0.1 lands on
+  2.0000000000000004, so the *number of points* on the axis — and with it the
+  combo count, every combo index, and every trial charged to the hypothesis
+  family — would depend on floating-point accumulation. Write the values out.
+- **Rule evaluation never short-circuits, and all four rules are evaluated
+  every bar** even when the position makes the answer irrelevant. A
+  `crosses_*` node that misses a bar compares against a reading from two bars
+  ago and fires late — a lookahead-shaped bug with none of the symptoms.
+- **`combo` refuses a config declaring two instruments or two timeframes**
+  rather than running the first. The cross-product over a universe is the
+  funnel's job; a partial answer printed in the shape of a whole one is worse
+  than a refusal that costs a config edit.
+- **A combo where `enter_long` and `enter_short` fire together takes no
+  position**, and the count is printed. Picking one arbitrarily would be a
+  silently-wrong result; the config, not the strategy, is what is broken.
 
 ---
 

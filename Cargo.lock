@@ -454,6 +454,8 @@ dependencies = [
  "crucible-strategies",
  "dotenvy",
  "parquet",
+ "serde",
+ "toml",
 ]
 
 [[package]]

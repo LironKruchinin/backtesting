@@ -21,20 +21,27 @@ dotenvy = "0.15"
 # Real arg parsing: `pull` takes value-carrying flags whose misreading would
 # cost money, which is exactly the point at which §6 blesses clap.
 clap = { version = "4.6", features = ["derive"] }
+# Combo configs. `crucible-strategies` must stay dependency-free (§3), so the
+# TOML seam lives here and maps onto its plain-data spec types (D-0060).
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.9"
+# Config identity: blake3 over the canonical form (D-0012). §6's blake3 row
+# gained `cli` with D-0060 — this is no longer optional, because `combo` needs
+# it in a default build.
+blake3 = "1.8"
 # `theta-golden` reads back the Parquet it just wrote and hashes the vendor's
-# raw response. Both are gated with the `thetadata` feature, so the default
-# build takes neither.
+# raw response. Gated with the `thetadata` feature, so the default build takes
+# neither it nor the vendor client.
 parquet = { version = "59.1", default-features = false, features = [
     "zstd",
 ], optional = true }
-blake3 = { version = "1.8", optional = true }
 
 [features]
 # Forwards to crucible-data. Non-default, so `cargo check` and the default CI
 # gates stay free of tokio/reqwest; CI runs a second pass with --all-features.
 databento = ["crucible-data/databento"]
 # Same shape, for the ThetaData path (D-0051).
-thetadata = ["crucible-data/thetadata", "dep:parquet", "dep:blake3"]
+thetadata = ["crucible-data/thetadata", "dep:parquet"]
 
 [lints]
 workspace = true
