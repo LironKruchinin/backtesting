@@ -496,6 +496,8 @@ name = "crucible-funnel"
 version = "0.1.0"
 dependencies = [
  "crucible-core",
+ "crucible-engine",
+ "crucible-strategies",
 ]
 
 [[package]]

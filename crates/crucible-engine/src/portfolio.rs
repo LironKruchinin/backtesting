@@ -7,6 +7,42 @@
 
 use crucible_core::prelude::*;
 
+/// A completed round-trip: the position left flat and returned to flat.
+///
+/// The timestamp is what makes a *windowed* report possible. A run summary
+/// only ever needed the PnL, but a walk-forward fold that says "14 round
+/// trips" while counting the whole run's trades is a number wearing another
+/// window's label, which is precisely the failure the fold table exists to
+/// prevent.
+///
+/// **Attribution is by close, not by open.** A round-trip opened inside a
+/// training window and closed inside the test window counts as a test-window
+/// trade, because `closed_ts` is when its PnL settles into cash. The
+/// mark-to-market equity series already splits the *money* correctly across
+/// the boundary (each window keeps the marks that happened inside it); this
+/// field only decides which window gets the trade *count*.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClosedTrade {
+    /// `avail_ts` of the fill that returned the position to flat.
+    pub closed_ts: Ts,
+    /// Net PnL of the round-trip, fees included.
+    pub net_nano_usd: NanoUsd,
+}
+
+/// A commission charged at an instant.
+///
+/// Recorded per fill, and only when nonzero — under `FreeFills` there are no
+/// fee events at all, which is the honest representation of an execution
+/// assumption that charges nothing (D-0006). Costs are visible per window
+/// (CLAUDE.md §2.4), not as one whole-run total reported under every fold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FeeEvent {
+    /// `avail_ts` of the fill that incurred it.
+    pub ts: Ts,
+    /// Commission and exchange fees for that fill.
+    pub fee_nano_usd: NanoUsd,
+}
+
 /// Single-instrument portfolio. The cross-sectional, multi-instrument
 /// portfolio arrives with SSRN-style strategies (post-M4).
 #[derive(Debug)]
@@ -22,8 +58,10 @@ pub struct Portfolio {
     last_mark: Option<Price>,
     /// Net realized PnL (fees included) of the round-trip currently open.
     episode_net: NanoUsd,
-    /// Net PnL of each completed round-trip (position returned to flat).
-    closed_trades: Vec<NanoUsd>,
+    /// Each completed round-trip (position returned to flat), in close order.
+    closed_trades: Vec<ClosedTrade>,
+    /// Each nonzero commission, in fill order.
+    fee_events: Vec<FeeEvent>,
 }
 
 impl Portfolio {
@@ -39,6 +77,7 @@ impl Portfolio {
             last_mark: None,
             episode_net: 0,
             closed_trades: Vec::new(),
+            fee_events: Vec::new(),
         }
     }
 
@@ -51,6 +90,12 @@ impl Portfolio {
         self.cash_nano_usd -= fill.fee_nano_usd;
         self.fees_nano_usd += fill.fee_nano_usd;
         self.episode_net -= fill.fee_nano_usd;
+        if fill.fee_nano_usd != 0 {
+            self.fee_events.push(FeeEvent {
+                ts: fill.ts,
+                fee_nano_usd: fill.fee_nano_usd,
+            });
+        }
 
         let mut remaining = fill_signed;
 
@@ -68,7 +113,10 @@ impl Portfolio {
             remaining += closed_signed; // consumed by the close
 
             if self.position == 0 {
-                self.closed_trades.push(self.episode_net);
+                self.closed_trades.push(ClosedTrade {
+                    closed_ts: fill.ts,
+                    net_nano_usd: self.episode_net,
+                });
                 self.episode_net = 0;
                 self.avg_entry = Price::ZERO;
             }
@@ -126,13 +174,27 @@ impl Portfolio {
     }
 
     #[must_use]
-    pub fn closed_trades(&self) -> &[NanoUsd] {
+    pub fn closed_trades(&self) -> &[ClosedTrade] {
         &self.closed_trades
+    }
+
+    #[must_use]
+    pub fn fee_events(&self) -> &[FeeEvent] {
+        &self.fee_events
     }
 
     #[must_use]
     pub fn fees_nano_usd(&self) -> NanoUsd {
         self.fees_nano_usd
+    }
+
+    /// Consumes the portfolio, yielding its per-event records.
+    ///
+    /// The run is over by the time a caller wants these, and moving beats
+    /// cloning a vector per run when the funnel is doing it once per combo.
+    #[must_use]
+    pub fn into_records(self) -> (Vec<ClosedTrade>, Vec<FeeEvent>) {
+        (self.closed_trades, self.fee_events)
     }
 }
 
@@ -149,14 +211,24 @@ mod tests {
     }
 
     fn fill(side: Side, qty: i32, points: f64, fee_usd: i64) -> Fill {
+        fill_at(Ts(0), side, qty, points, fee_usd)
+    }
+
+    fn fill_at(ts: Ts, side: Side, qty: i32, points: f64, fee_usd: i64) -> Fill {
         Fill {
             order_id: 0,
-            ts: Ts(0),
+            ts,
             side,
             qty: Qty(qty),
             price: Price::from_points_f64_lossy(points),
             fee_nano_usd: fee_usd * 1_000_000_000,
         }
+    }
+
+    /// Net PnL of each round-trip, dropping the timestamps — the shape the
+    /// arithmetic assertions below care about.
+    fn nets(p: &Portfolio) -> Vec<NanoUsd> {
+        p.closed_trades().iter().map(|t| t.net_nano_usd).collect()
     }
 
     /// Long 1 @100 -> sell 2 @110 (flip) -> buy 1 @105 (close short).
@@ -172,12 +244,12 @@ mod tests {
         let v = p.view();
         assert_eq!(v.position, Qty(-1));
         assert_eq!(v.avg_entry, Some(Price::from_points(110)));
-        assert_eq!(p.closed_trades(), &[500_000_000_000]);
+        assert_eq!(nets(&p), vec![500_000_000_000]);
 
         p.apply_fill(&fill(Side::Buy, 1, 105.0, 0));
         let v = p.view();
         assert_eq!(v.position, Qty(0));
-        assert_eq!(p.closed_trades(), &[500_000_000_000, 250_000_000_000]);
+        assert_eq!(nets(&p), vec![500_000_000_000, 250_000_000_000]);
         assert_eq!(v.cash_nano_usd, 750_000_000_000); // $750 realized
         assert_eq!(v.equity_nano_usd, 750_000_000_000);
     }
@@ -187,9 +259,49 @@ mod tests {
         let mut p = Portfolio::new(es_spec(), 100_000_000_000_000); // $100k
         p.apply_fill(&fill(Side::Buy, 1, 100.0, 2)); // $2 fee
         p.apply_fill(&fill(Side::Sell, 1, 101.0, 2)); // +1pt = $50, $2 fee
-        assert_eq!(p.closed_trades(), &[46_000_000_000]); // 50 - 4
+        assert_eq!(nets(&p), vec![46_000_000_000]); // 50 - 4
         assert_eq!(p.view().equity_nano_usd, 100_046_000_000_000);
         assert_eq!(p.fees_nano_usd(), 4_000_000_000);
+    }
+
+    /// A round-trip is stamped with the fill that flattened it, and a fee with
+    /// the fill that incurred it. Both are what lets a fold report the trades
+    /// and costs that happened *inside* the window it names.
+    #[test]
+    fn records_carry_the_instant_they_happened() {
+        let mut p = Portfolio::new(es_spec(), 0);
+        p.apply_fill(&fill_at(Ts(10), Side::Buy, 1, 100.0, 2));
+        p.apply_fill(&fill_at(Ts(40), Side::Sell, 1, 101.0, 2));
+        assert_eq!(
+            p.closed_trades(),
+            &[ClosedTrade {
+                closed_ts: Ts(40), // the CLOSING fill, not the opening one
+                net_nano_usd: 46_000_000_000,
+            }]
+        );
+        assert_eq!(
+            p.fee_events(),
+            &[
+                FeeEvent {
+                    ts: Ts(10),
+                    fee_nano_usd: 2_000_000_000
+                },
+                FeeEvent {
+                    ts: Ts(40),
+                    fee_nano_usd: 2_000_000_000
+                },
+            ]
+        );
+    }
+
+    /// `FreeFills` charges nothing, so there is nothing to record. An empty
+    /// vector is the honest shape — not a run of zero-valued entries that a
+    /// windowed cost report would have to filter out.
+    #[test]
+    fn a_costless_fill_records_no_fee_event() {
+        let mut p = Portfolio::new(es_spec(), 0);
+        p.apply_fill(&fill_at(Ts(10), Side::Buy, 1, 100.0, 0));
+        assert!(p.fee_events().is_empty());
     }
 
     #[test]

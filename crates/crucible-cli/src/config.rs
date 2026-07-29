@@ -19,17 +19,21 @@
 //!   `= 1.25` is refused, because `1.25` is exact but `0.1` is not, and a
 //!   money field that is sometimes exact is worse than one that never is.
 //!
-//! Sections this build does not consume yet (`[walk_forward]`, `[funnel]`,
-//! and parts of `[execution]`) still parse and are still checked for typos —
-//! and `crucible combo` **names them in its output** rather than reading past
-//! them, because a declared kill criterion that nothing evaluates is the
-//! quietest way for a config to lie.
+//! Sections a given command does not consume (`[funnel]` in every build so
+//! far; `[walk_forward]` under `crucible combo`, which reports one window and
+//! has no folds to cut) still parse and are still checked for typos — and
+//! every report **names them in its output** rather than reading past them,
+//! because a declared kill criterion that nothing evaluates is the quietest
+//! way for a config to lie. [`LoadedConfig::unconsumed_sections`] takes which
+//! command is asking, so the list is true per command rather than true on
+//! average.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crucible_core::prelude::*;
 use crucible_data::ingest::money::parse_usd_to_nano;
+use crucible_funnel::walkforward::{FoldError, FoldSpec};
 use crucible_strategies::combo::{
     ComboError, ComboSpec, ConfigHash, FloatAxis, Grid, IndicatorSpec, IntAxis, RuleSource,
 };
@@ -58,7 +62,8 @@ pub struct ConfigFile {
     pub rules: RulesCfg,
     /// The execution assumption.
     pub execution: Execution,
-    /// Declared; consumed by the walk-forward runner.
+    /// The fold layout. Consumed by `crucible walk-forward`; named as
+    /// unconsumed by every other command that prints a report.
     pub walk_forward: Option<WalkForward>,
     /// Declared; consumed by `crucible funnel` (M3).
     pub funnel: Option<FunnelCfg>,
@@ -212,20 +217,46 @@ pub struct Execution {
     pub fee_per_contract_usd: String,
 }
 
-/// `[walk_forward]` — parsed, not yet consumed.
+/// `[walk_forward]` — consumed by `crucible walk-forward`.
+///
+/// Counted in **trading days**, not months (D-0062): a "6-month" window holds
+/// between 122 and 130 CME sessions depending on where it lands, so a fold
+/// layout written in months has a sample size chosen by the exchange's
+/// holiday schedule rather than by the researcher.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[expect(
-    dead_code,
-    reason = "declared by the schema and typo-checked here, consumed by the walk-forward runner; `LoadedConfig::unconsumed_sections` names it in every report so the gap is visible rather than assumed"
-)]
 pub struct WalkForward {
-    /// `rolling` or `anchored`.
+    /// `rolling` (fixed-length training window that slides) or `anchored`
+    /// (training window that grows from a fixed start).
     pub scheme: String,
-    /// In-sample months per fold.
-    pub train_months: u32,
-    /// Out-of-sample months per fold.
-    pub test_months: u32,
+    /// In-sample trading days per fold.
+    pub train_days: usize,
+    /// Out-of-sample trading days per fold.
+    pub test_days: usize,
+    /// Trading days each fold advances. Defaults to `test_days`, which tiles
+    /// the sample exactly; a smaller value is refused, because the headline
+    /// pools the test windows and overlapping windows count a session twice.
+    pub step_days: Option<usize>,
+}
+
+impl WalkForward {
+    /// The fold layout this section describes.
+    ///
+    /// # Errors
+    /// [`ConfigError::Folds`] if `scheme` is not a scheme this build knows.
+    /// Everything else about the layout is judged by [`FoldPlan::build`],
+    /// which is where the rules live — a refusal reads the same whether the
+    /// layout came from a config or from a unit test.
+    ///
+    /// [`FoldPlan::build`]: crucible_funnel::FoldPlan::build
+    pub fn to_fold_spec(&self) -> Result<FoldSpec, ConfigError> {
+        Ok(FoldSpec {
+            scheme: self.scheme.parse().map_err(ConfigError::Folds)?,
+            train_days: self.train_days,
+            test_days: self.test_days,
+            step_days: self.step_days.unwrap_or(self.test_days),
+        })
+    }
 }
 
 /// `[funnel]` — parsed, not yet consumed.
@@ -254,12 +285,11 @@ pub struct FunnelCfg {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunCfg {
-    /// Seeds strategy randomness. No strategy takes one yet; distinct from
-    /// the synthetic feed's own seed.
-    #[expect(
-        dead_code,
-        reason = "§2.2 requires seeds to be config-carried; no strategy is randomized yet, and `unconsumed_sections` says so on every run"
-    )]
+    /// Roots every derived per-run seed: `crucible walk-forward` mixes it
+    /// with the config hash, the combo index and the fold to get the seed
+    /// §2.2 requires. Distinct from the synthetic feed's own seed, and read
+    /// even though no strategy is randomized yet — see
+    /// `crucible_funnel::walkforward::seed`.
     pub seed: u64,
     /// Starting capital, as decimal dollars in a string.
     pub initial_cash_usd: String,
@@ -328,6 +358,8 @@ pub enum ConfigError {
     },
     /// The config parsed but does not describe a runnable grid.
     Spec(ComboError),
+    /// `[walk_forward]` does not describe a fold layout.
+    Folds(FoldError),
     /// A field parsed as text but is not a valid value.
     Field {
         /// Dotted path of the field.
@@ -357,6 +389,7 @@ impl std::fmt::Display for ConfigError {
                  something to guess at"
             ),
             ConfigError::Spec(e) => write!(f, "{e}"),
+            ConfigError::Folds(e) => write!(f, "walk_forward: {e}"),
             ConfigError::Field { field, message } => write!(f, "{field}: {message}"),
         }
     }
@@ -551,22 +584,31 @@ impl FloatAxisCfg {
 }
 
 impl LoadedConfig {
-    /// Names the sections that parsed but that this build does not act on.
+    /// Names the sections that parsed but that the running command does not
+    /// act on.
     ///
     /// Printed with every report. A declared kill criterion nothing evaluates
     /// is the quietest way for a config to be wrong, so the honest move is to
     /// say so on every run rather than to trust a reader to remember which
-    /// milestone consumes what.
+    /// milestone consumes what. `walk_forward_consumed` is what makes the
+    /// list command-specific: `crucible combo` reports one number for the
+    /// whole series and genuinely ignores `[walk_forward]` and `[run].seed`;
+    /// `crucible walk-forward` reads both, so listing them there would be a
+    /// different lie from the one this method exists to prevent.
     #[must_use]
-    pub fn unconsumed_sections(&self) -> Vec<&'static str> {
+    pub fn unconsumed_sections(&self, walk_forward_consumed: bool) -> Vec<&'static str> {
         let mut out = Vec::new();
-        if self.file.walk_forward.is_some() {
-            out.push("[walk_forward] — folds arrive with the walk-forward runner");
+        if self.file.walk_forward.is_some() && !walk_forward_consumed {
+            out.push("[walk_forward] — folds; run `crucible walk-forward` to consume them");
         }
         if self.file.funnel.is_some() {
             out.push("[funnel] — stages, the cost sweep and the kill criteria arrive with M3");
         }
-        out.push("[run].seed — no strategy takes a seed yet");
+        if !walk_forward_consumed {
+            out.push(
+                "[run].seed — nothing reads it here; `walk-forward` derives per-fold seeds from it",
+            );
+        }
         out
     }
 }

@@ -15,7 +15,10 @@
 //! `combo` is the same replay path driven by a config rather than by flags:
 //! it expands a TOML parameter grid and runs every point on one shared bar
 //! series. The config parser lives in [`config`] because
-//! `crucible-strategies` must stay dependency-free (D-0060).
+//! `crucible-strategies` must stay dependency-free (D-0060). `walk-forward`
+//! runs the same grid on the same series and cuts it into train/test folds,
+//! so that every statistic it prints was computed on the window it names —
+//! which `combo`, reporting one number for the whole replay, cannot do.
 //!
 //! ## Environment (D-0022)
 //!
@@ -36,6 +39,7 @@ mod qa;
 mod rolls;
 mod theta;
 mod transcode;
+mod walkforward;
 
 use std::path::{Path, PathBuf};
 
@@ -105,6 +109,8 @@ enum Command {
     Backtest(backtest::BacktestArgs),
     /// Expand a TOML combo config into a grid, and optionally replay it.
     Combo(combo::ComboArgs),
+    /// Replay a combo config in train/test folds and report out-of-sample.
+    WalkForward(walkforward::WalkForwardArgs),
     /// Inspect curated bars for gaps, spikes, and vendor-reported problems.
     Qa(qa::QaArgs),
     /// Build a continuous-contract roll table from curated bars.
@@ -140,6 +146,7 @@ fn main() {
         Some(Command::Transcode(args)) => transcode::run(&args),
         Some(Command::Backtest(args)) => backtest::run(&args),
         Some(Command::Combo(args)) => combo::run_cmd(&args),
+        Some(Command::WalkForward(args)) => walkforward::run_cmd(&args),
         Some(Command::Qa(args)) => qa::run(&args),
         Some(Command::Rolls(args)) => rolls::run(&args),
         Some(Command::ThetaGolden(args)) => theta::run(&args),

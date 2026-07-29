@@ -101,9 +101,22 @@ ESH4 January-2024 1m bars, 30,167 bars, −23.51% under `spread_cross`.
       strategies get it too and the engine loop keeps its single job
       (D-0061). The proof is `a_short_warmup_combo_gains_nothing_from_being_short`,
       which asserts the head start exists unaligned and is gone aligned
-- [ ] Walk-forward runner: anchored + rolling folds over a `Feed`. Takes over
-      slicing the eval window out of the *metrics* — today every combo's
-      equity carries an identical flat warmup prefix (D-0061)
+- [x] Walk-forward runner (2026-07-29): anchored + rolling folds over one
+      shared bar series, in `crucible-funnel::walkforward`, driven by
+      `crucible walk-forward`. Fold boundaries are **trading days**, not
+      wall-clock months — a "6-month" window holds 122–130 CME sessions
+      depending on where it lands, so a month-denominated layout has a sample
+      size the exchange's holiday schedule picks (D-0062). A fold is a metric
+      *window* over one replay rather than a separate backtest, with an anchor
+      bar, rebasing to declared capital, and delta-stitched pooling (D-0063);
+      that is what takes over slicing the eval window out of the metrics, so
+      D-0061's warmup-prefix caveat retires for this output and remains for
+      `combo`. Per-fold seeds derive from
+      `(config_hash, [run].seed, combo_index, fold)` (D-0064). The proof is
+      `walkforward::tests`: a 72-bar fixture whose fold boundaries and per-fold
+      statistics — including one Sharpe in closed form, −√21 — are hand-derived
+      in comments, and whose training-window trade is exactly the difference
+      between the whole-run and out-of-sample headline
 - [x] Config-driven combo strategies (2026-07-29): tagged indicator slots with
       parameter axes, a rule grammar parsed to an AST at load time, mixed-radix
       grid expansion, and a factory — all plain data in

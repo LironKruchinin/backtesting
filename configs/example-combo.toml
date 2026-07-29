@@ -66,10 +66,16 @@ fill_model = "spread_cross"  # "free_fills" is only legal in stages s0/s1
 half_spread_ticks = 1
 fee_per_contract_usd = "1.25"
 
-[walk_forward]               # declared; consumed by the walk-forward runner
+[walk_forward]               # consumed by `crucible walk-forward`
 scheme = "rolling"           # "rolling" | "anchored"
-train_months = 24
-test_months = 6
+# TRADING DAYS, not months (D-0062). A "6-month" window holds anywhere from
+# 122 to 130 CME sessions depending on where it lands, so a fold layout
+# written in months has a sample size the exchange's holiday schedule picks.
+train_days = 504             # two years of sessions
+test_days = 126              # one half-year
+step_days = 126              # tile exactly; this is also the default, and a
+                             # smaller value is refused (the headline pools
+                             # the test windows, and overlap double-counts)
 
 [funnel]                     # declared; consumed by `crucible funnel` (M3)
 stages = ["s0", "s1", "s2", "s3"]

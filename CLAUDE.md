@@ -180,7 +180,11 @@ Pinned conventions:
 - **Timestamps**: UTC nanoseconds (`Ts`) everywhere. Timezone/session logic
   exists only in `crucible-data::calendar`.
 - **Config field names**: `snake_case`, units suffixed like code
-  (`fee_per_contract_usd`, `train_months`).
+  (`fee_per_contract_usd`, `train_days`).
+- **Fold windows are measured in trading days**, never months or bars
+  (`train_days`, `test_days`, `step_days` — D-0062). A month holds a number of
+  sessions the exchange's holiday schedule picks; a bar count ends
+  mid-session.
 
 ---
 
@@ -416,9 +420,10 @@ reference; supersede the decision if you disagree — don't hotfix.
   next to a 200-bar one. That is §2.6 working (D-0061): the alternative is a
   short combo scored on a longer, differently-timed sample. The prefix is
   identical across the grid, so rankings are fair; each naive Sharpe carries
-  the same `sqrt(n_eval/n_total)` factor until the walk-forward runner slices
-  the window out of the metrics. `combo` prints the suppressed-order count so
-  the effect is visible rather than absorbed.
+  the same `sqrt(n_eval/n_total)` factor. `combo` prints the suppressed-order
+  count so the effect is visible rather than absorbed, and points at
+  `walk-forward`, which slices the window out of the metrics and so does not
+  carry the factor (D-0063).
 - **A float parameter axis cannot be written as `{ start, end, step }`**
   though an integer one can (D-0060). Repeated addition of 0.1 lands on
   2.0000000000000004, so the *number of points* on the axis — and with it the
@@ -435,6 +440,30 @@ reference; supersede the decision if you disagree — don't hotfix.
 - **A combo where `enter_long` and `enter_short` fire together takes no
   position**, and the count is printed. Picking one arbitrarily would be a
   silently-wrong result; the config, not the strategy, is what is broken.
+- **`walk-forward` refuses `step_days < test_days`** rather than running
+  overlapping out-of-sample windows (D-0062). The headline pools the test
+  windows; pooling overlapping ones counts a session twice, which inflates the
+  sample size and flatters every statistic that reads it. A step *wider* than
+  `test_days` is allowed, and the sessions no fold reaches are printed.
+- **`walk-forward` drops the partial session the warmup ends inside**, so the
+  first fold opens on a whole trading day and its "60 sessions" is 60 sessions
+  (D-0062). The dropped bars are counted in the report, not absorbed.
+- **A round-trip opened in a training window and closed in a test window is a
+  test-window trade** (D-0063). The equity series still splits the *money* at
+  the boundary correctly — each window keeps the marks inside it — but the
+  trade count and win rate follow the closing fill, which is when the PnL
+  settles into cash.
+- **Per-fold percentages are computed against the config's declared capital,
+  not against the equity the account had drifted to** (D-0063). Position size
+  is a fixed contract count, so a window's dollar PnL does not scale with the
+  account, and rebasing is what makes fold 7 comparable to fold 1.
+- **`walk-forward` prints per-fold detail for the first N combos by grid
+  index, never for "the best N"**. A report sorted by the number you are about
+  to quote is a selection step wearing a report's clothes.
+- **Every (combo, fold) carries a derived seed although nothing consumes
+  randomness yet** (D-0064). Building the derivation before its first consumer
+  is the point: otherwise the first randomized component invents its own, in
+  the least visible place.
 
 ---
 
@@ -463,6 +492,13 @@ cargo run -p crucible-cli -- combo --config configs/example-combo.toml
 cargo run -p crucible-cli -- combo --config configs/combo-smoke.toml --run
 cargo run -p crucible-cli -- combo --config configs/combo-smoke.toml \
   --run --hash-only                            # the grid determinism gate
+
+# The same grid, cut into train/test folds by trading day (D-0062). Every
+# number states the window it was computed on, so D-0061's warmup-prefix
+# caveat does not apply to this output — it still applies to `combo`.
+cargo run -p crucible-cli -- walk-forward --config configs/combo-smoke.toml
+cargo run -p crucible-cli -- walk-forward --config configs/combo-smoke.toml \
+  --hash-only                                  # the walk-forward determinism gate
 
 # The acquisition path. `--features databento` is required (D-0025); without
 # it `pull` exits 2 saying so. A pull is a DRY RUN by default and spends

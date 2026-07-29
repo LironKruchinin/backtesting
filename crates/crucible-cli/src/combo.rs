@@ -38,12 +38,12 @@ use crate::config::{self, ConfigError, DataSource, LoadedConfig};
 use crate::pull::{EXIT_FAILED, EXIT_USAGE, data_dir};
 
 /// Nanoseconds in a mean Gregorian year (365.2425 days).
-const NANOS_PER_YEAR: f64 = 365.2425 * 86_400.0 * 1e9;
+pub(crate) const NANOS_PER_YEAR: f64 = 365.2425 * 86_400.0 * 1e9;
 
 /// Combos above which a grid is more likely a mistyped `step` than a plan.
 /// `crucible-funnel::grid`'s spec says warn here; the funnel will refuse,
 /// once a run costs hours rather than seconds.
-const LOUD_COMBO_COUNT: usize = 10_000;
+pub(crate) const LOUD_COMBO_COUNT: usize = 10_000;
 
 /// Combos listed in full before the listing is elided.
 const LIST_LIMIT: usize = 40;
@@ -82,7 +82,7 @@ pub fn run_cmd(args: &ComboArgs) -> i32 {
 
     let hash_only = args.hash_only;
     if !hash_only {
-        print_header(&loaded);
+        print_header(&loaded, "combo");
     }
     if !args.run && !hash_only {
         print_grid_listing(&loaded);
@@ -194,7 +194,7 @@ impl Feed for SliceFeed<'_> {
 }
 
 /// Materializes the config's data source into one bar series.
-fn collect_events(loaded: &LoadedConfig) -> Result<Vec<MarketEvent>, (i32, String)> {
+pub(crate) fn collect_events(loaded: &LoadedConfig) -> Result<Vec<MarketEvent>, (i32, String)> {
     let instrument = &loaded.file.universe.instruments[0];
     match &loaded.file.data {
         DataSource::Synthetic {
@@ -243,8 +243,8 @@ fn collect_events(loaded: &LoadedConfig) -> Result<Vec<MarketEvent>, (i32, Strin
                     format!(
                         "{instrument} is a continuous alias. Replaying one needs a consumer \
                          that says whether a signal reads the adjusted series and PnL the \
-                         tradeable one (D-0042); `combo` runs raw contracts (ESH4) until the \
-                         walk-forward runner lands"
+                         tradeable one (D-0042); `combo` and `walk-forward` both run raw \
+                         contracts (ESH4) until that consumer exists"
                     ),
                 ));
             }
@@ -285,7 +285,7 @@ fn collect_events(loaded: &LoadedConfig) -> Result<Vec<MarketEvent>, (i32, Strin
 /// answer is exact arithmetic rather than a measurement. Archived `ohlcv` data
 /// does not, so it takes the same precedence `backtest` uses (D-0039):
 /// calendar if one governs the instrument, otherwise the sample.
-fn annualization(loaded: &LoadedConfig, events: &[MarketEvent]) -> f64 {
+pub(crate) fn annualization(loaded: &LoadedConfig, events: &[MarketEvent]) -> f64 {
     let tf = loaded.timeframe;
     #[expect(clippy::cast_precision_loss, reason = "statistics space (§2.3)")]
     let interval = tf.duration_ns() as f64;
@@ -330,13 +330,13 @@ fn grid_hash(results: &[Replay]) -> u64 {
     h.finish()
 }
 
-fn usd(n: NanoUsd) -> String {
+pub(crate) fn usd(n: NanoUsd) -> String {
     format!("${:.2}", nano_usd_to_f64(n))
 }
 
-fn print_header(loaded: &LoadedConfig) {
+pub(crate) fn print_header(loaded: &LoadedConfig, command: &str) {
     let file = &loaded.file;
-    println!("Crucible combo — {}", file.meta.name);
+    println!("Crucible {command} — {}", file.meta.name);
     println!(
         "  config         {}  (schema v{})",
         loaded.path.display(),
@@ -524,9 +524,17 @@ fn print_results(loaded: &LoadedConfig, results: &[Replay]) {
 
 fn print_footer(loaded: &LoadedConfig) {
     println!("  not consumed by `combo`:");
-    for section in loaded.unconsumed_sections() {
+    for section in loaded.unconsumed_sections(false) {
         println!("    {section}");
     }
+    println!(
+        "\n  Every number above is measured over the WHOLE series, warmup prefix included:\n\
+         \x20 each combo sits flat for the grid's {} warmup bars and its naive Sharpe carries\n\
+         \x20 the same sqrt(n_eval/n_total) factor for it (D-0061). That is fair *within* the\n\
+         \x20 grid — the factor is identical across it — but it is not a number to quote.\n\
+         \x20 `crucible walk-forward` computes each statistic on the window it names.",
+        loaded.grid.max_warmup_bars()
+    );
     println!(
         "\n  No folds, no stages, no trial count, no verdict: `combo` proves a config\n\
          \x20 expands and replays fairly, which is a different question from whether the\n\

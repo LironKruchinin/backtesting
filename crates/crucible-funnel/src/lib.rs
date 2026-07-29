@@ -18,9 +18,15 @@
 //! (config `[funnel]` section), because criteria chosen after seeing results
 //! are not criteria, they're rationalization.
 //!
-//! Everything in this crate except [`stages::Verdict`] is currently an
-//! **M3 spec encoded in module docs**. Implement in this order:
-//! `grid` → `registry` → `scheduler` → `stages` → `stats` → `scorecard`.
+//! [`walkforward`] is implemented (M2): it cuts a grid's replay into
+//! train/test folds by trading day and reports each statistic on the window
+//! it names. It is the machinery S2 runs on, not S2 itself — it produces
+//! evidence and stops there, because a verdict needs the cost sweep, the
+//! trial count and the battery that only this crate's M3 half provides.
+//!
+//! Everything else here except [`stages::Verdict`] is an **M3 spec encoded in
+//! module docs**. Implement in this order: `grid` → `registry` →
+//! `scheduler` → `stages` → `stats` → `scorecard`.
 
 pub mod grid;
 pub mod registry;
@@ -28,5 +34,7 @@ pub mod scheduler;
 pub mod scorecard;
 pub mod stages;
 pub mod stats;
+pub mod walkforward;
 
 pub use stages::Verdict;
+pub use walkforward::{FoldPlan, FoldScheme, FoldSpec, WalkForwardReport};

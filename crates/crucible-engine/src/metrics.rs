@@ -11,6 +11,8 @@
 
 use crucible_core::prelude::*;
 
+use crate::portfolio::ClosedTrade;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Summary {
     pub initial_equity_nano_usd: NanoUsd,
@@ -32,7 +34,7 @@ impl Summary {
     #[must_use]
     pub fn compute(
         equity: &[(Ts, NanoUsd)],
-        closed_trades: &[NanoUsd],
+        closed_trades: &[ClosedTrade],
         fees_nano_usd: NanoUsd,
         bars_per_year: f64,
     ) -> Summary {
@@ -67,7 +69,7 @@ impl Summary {
         }
         let sharpe_naive = sharpe(&rets, bars_per_year);
 
-        let wins = closed_trades.iter().filter(|&&pnl| pnl > 0).count();
+        let wins = closed_trades.iter().filter(|t| t.net_nano_usd > 0).count();
         let win_rate = if closed_trades.is_empty() {
             None
         } else {
@@ -118,6 +120,16 @@ mod tests {
             .collect()
     }
 
+    fn trades(nets: &[NanoUsd]) -> Vec<ClosedTrade> {
+        nets.iter()
+            .enumerate()
+            .map(|(i, &net)| ClosedTrade {
+                closed_ts: Ts(i as i64),
+                net_nano_usd: net,
+            })
+            .collect()
+    }
+
     #[test]
     fn drawdown_known_series() {
         // 100 -> 120 -> 90 -> 130: max dd = (120-90)/120 = 25%
@@ -128,7 +140,7 @@ mod tests {
 
     #[test]
     fn win_rate_counts_positive_net_trades() {
-        let s = Summary::compute(&eq(&[100, 104]), &[5, -3, 2, 0], 0, 1.0);
+        let s = Summary::compute(&eq(&[100, 104]), &trades(&[5, -3, 2, 0]), 0, 1.0);
         assert_eq!(s.round_trips, 4);
         let wr = s.win_rate.expect("has trades");
         assert!((wr - 0.5).abs() < 1e-9); // 2 of 4 (zero is not a win)

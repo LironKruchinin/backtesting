@@ -18,6 +18,14 @@
 //! **cost-sensitivity sweep** (0 / 0.5 / 1 / 2 ticks): an edge that dies at
 //! 1 tick is not an edge — `Kill`, and say so in the scorecard.
 //!
+//! The folds themselves are done: [`crate::walkforward`] lays them out and
+//! computes per-fold IS/OOS statistics on the windows they name (D-0062,
+//! D-0063), and `crucible walk-forward` prints them. What S2 adds is what
+//! turns that evidence into a gate — the cost sweep across the sanctioned
+//! tick levels, the survivor-region selection that decides *which* combos get
+//! rerun, and the kill criteria read from the config's `[funnel]` section.
+//! Do not reimplement fold layout here.
+//!
 //! **S3 — the battery** (the expensive one; survivors are rare by now):
 //! - parameter perturbation: ±1 grid step neighbors must not collapse
 //!   (plateau test)

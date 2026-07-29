@@ -169,7 +169,7 @@ damage. That is the control group working exactly as intended.
 | `crucible-data` | Databento ingest, immutable archive + manifest, calendars, continuous contracts, synthetic feeds. |
 | `crucible-engine` | Deterministic single-threaded replay: portfolio, fill models, metrics. |
 | `crucible-strategies` | Streaming indicators (SMA/EMA/Bollinger), strategies, config-driven combos. |
-| `crucible-funnel` | Grid expansion, parallel scheduling, funnel stages, overfitting stats, trial registry, scorecards. |
+| `crucible-funnel` | Walk-forward folds, parallel scheduling, funnel stages, overfitting stats, trial registry, scorecards. |
 | `crucible-cli` | `crucible` binary. |
 
 Status: **M0 (skeleton) complete**, **M1 (data foundation) in progress** —

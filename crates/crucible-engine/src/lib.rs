@@ -21,5 +21,5 @@ pub mod replay;
 
 pub use execution::{FreeFills, SpreadCrossFills};
 pub use metrics::Summary;
-pub use portfolio::Portfolio;
+pub use portfolio::{ClosedTrade, FeeEvent, Portfolio};
 pub use replay::{BacktestParams, BacktestResult, EngineError, run};

@@ -811,3 +811,125 @@ propose a superseding entry — don't silently diverge.
   belongs to the walk-forward runner, which has to slice folds anyway; until it
   lands, `crucible combo` prints the eval-window start so the factor is visible
   rather than absorbed.
+- **D-0062** (2026-07-29) — **Walk-forward folds are counted in TRADING DAYS,
+  and the config field names say so.** `[walk_forward]` is `scheme` +
+  `train_days` / `test_days` / `step_days`, superseding the `train_months` /
+  `test_months` spelling that CLAUDE.md §4 used as its units-suffix example
+  (§4's example is updated in the same commit; the convention it illustrates —
+  units in the name — is unchanged, and is exactly what this rename obeys).
+  **Why not months:** a "6-month" CME window holds between roughly 122 and 130
+  sessions depending on where it lands, because holidays cluster (Thanksgiving,
+  Christmas, Good Friday) and Easter moves. Fold *k*'s out-of-sample Sharpe is
+  then estimated on a sample whose size the exchange's holiday schedule chose,
+  the pooled headline weights folds by that accident, and two configs differing
+  only in start date get different effective layouts. Sessions make every fold's
+  *n* a number the researcher wrote down. Trading days are also immune to DST,
+  which a wall-clock month is not.
+  **Why not bars:** a bar-counted window ends mid-session, splitting one trading
+  day across the train/test boundary — the single place where a position carried
+  across the seam looks most like leakage. Every window here is a whole number
+  of whole sessions.
+  **Three boundary rules, all of which move numbers:** (1) the first fold starts
+  at the first *whole* trading day at or after the grid's warmup, and the bars of
+  the partial session the warmup ended inside are reported as `partial_day_bars`
+  rather than absorbed; (2) `step_days` defaults to `test_days` (which tiles the
+  sample exactly) and `step_days < test_days` is **refused**, because the
+  headline pools the test windows and overlapping windows count a session twice
+  — inflating *n*, shrinking the standard error, and flattering everything
+  downstream that reads it; a step *wider* than `test_days` merely wastes
+  sessions and is allowed, with the unused tail reported; (3) both schemes place
+  the *same* test windows and differ only in the training window, so an anchored
+  and a rolling run are comparable to each other.
+  **Where the definition of a trading day lives:** not in `crucible-funnel`.
+  `FoldPlan::build` takes `day_keys: &[i64]`, one nondecreasing key per bar, and
+  the CLI computes them as
+  `days_from_civil(calendar.trading_day(bar.avail_ts()))`. Same device as
+  D-0015's caller-supplied `acquired_ts` and D-0060's caller-supplied config
+  hash: the way to keep a capability (here `crucible-data`, and with it `chrono`
+  and the compiled-in calendar tables) out of a crate is to make the call not
+  exist there. §3's `funnel → core + engine + strategies` edge is unchanged; the
+  `engine` and `strategies` edges are taken up now that code uses them, and
+  their placeholder comments are deleted from `Cargo.toml` per §6.
+  **Keyed on `avail_ts`, never `ts_open`** (§2.1). A fold boundary decides which
+  bars are ordered into which window, and ordering decisions use availability
+  time. For 1m bars the two agree; for coarser ones they need not, and the
+  availability answer is the one that cannot see the future.
+  **Instruments no calendar governs** (every `SYN:*` feed, and any root without a
+  bundled table) fall back to UTC civil days, and the report says so on every
+  run. For a synthetic feed that is exactly right — it has no exchange. For a
+  real instrument it means a session spanning midnight UTC is split, which is why
+  it is printed rather than assumed.
+  **`schema_version` stays 1.** That field exists to protect the interpretation
+  of fields something has *read*; `[walk_forward]` had never been consumed by any
+  build, so there is no interpretation to protect and no stored result that could
+  be misread. A config carrying `train_months` now fails on `unknown field`,
+  naming the line and the four fields that replaced it — the loud failure §5.5
+  asks for.
+- **D-0063** (2026-07-29) — **A fold is a metric WINDOW over one replay, not a
+  separate backtest, and three slicing conventions make its numbers mean what
+  they say.** `walkforward::runner` replays each combo once over the shared bar
+  series and cuts the resulting equity curve; it does not re-replay per fold.
+  Nothing here re-fits anything — walk-forward exists to produce an
+  out-of-sample *sample*, and parameter selection across combos is the funnel's
+  job (M3) — so a per-fold replay would recompute identical fills. A continuous
+  replay is also what a deployed strategy does: resetting indicator state at each
+  boundary would make every test window open with a strategy that has forgotten
+  the market, which is a property of the fold layout rather than of the strategy,
+  and it would move the numbers.
+  **The anchor bar.** A window `[start, end)` is measured from the equity point
+  at `start − 1`, so the move *into* its first bar is its first return. Measuring
+  from `start` silently drops that return.
+  **Rebasing to declared capital.** Each window's curve carries its own per-bar
+  equity *deltas* applied to the config's `initial_cash_usd`, not to whatever
+  equity had drifted to when the window opened. Position size is a fixed contract
+  count (`run.qty_contracts`), so a window's dollar PnL does not scale with the
+  account, and quoting fold 7 against fold 7's opening equity would make two
+  identical windows report different percentages purely because of what preceded
+  them. The rebase is additive integer nano-USD — no float re-enters accounting
+  (§2.3).
+  **Pooling by deltas, not by levels.** The headline out-of-sample curve is the
+  concatenation of every test window's deltas. Concatenating *levels* across the
+  training windows between them would invent a jump at each seam and hand
+  `max_drawdown_pct` a drawdown nobody could have suffered. Tiled windows share a
+  seam bar, and the seam contributes one return, not two — otherwise every pooled
+  Sharpe would be biased downward by an artifact of the fold count.
+  **The honest consequence, stated because it is a printed number:** a round-trip
+  opened in a training window and closed in a test window counts as a
+  test-window *trade*. The mark-to-market series still splits the *money*
+  correctly (each window keeps the marks inside it); only the trade count and win
+  rate attribute the whole round-trip to where it was realized. M2's
+  stops/targets work will make this more visible.
+  **The engine change this required:** `Portfolio` now records
+  `ClosedTrade { closed_ts, net_nano_usd }` and `FeeEvent { ts, fee_nano_usd }`
+  rather than a bare `Vec<NanoUsd>` and a running total, and `BacktestResult`
+  carries both. Without timestamps, a fold reporting "14 round trips" or a fee
+  figure would be quoting the whole run under a window's label. Fee events are
+  recorded only when nonzero, so a `FreeFills` run has none at all — the honest
+  shape for an execution assumption that charges nothing. `demo --hash-only` and
+  `combo --run --hash-only` are byte-for-byte unchanged by the refactor.
+  **D-0061's caveat retires for this command and only this command.** Every
+  number `crucible walk-forward` prints excludes the grid's warmup and every
+  training window, so the `sqrt(n_eval / n_total)` factor does not apply to it.
+  `crucible combo` still carries it, because it still reports one window and that
+  window still contains the warmup — and it now says so in its footer and points
+  at the command that slices.
+- **D-0064** (2026-07-29) — **Derived seeds exist before the first thing that
+  consumes randomness, and the config's own `[run].seed` is part of the tuple.**
+  `walkforward::seed::derive_seed(config_hash, root_seed, combo_index,
+  fold_index) → u64` is computed and recorded for every (combo, fold) even though
+  nothing in this build draws a random number. Why now: the alternative is that
+  the first randomized component — a block permuter, a bootstrap resampler —
+  invents its own seeding in a hurry, in the place where it is least visible,
+  which is how a "deterministic" pipeline stops being one. Why `[run].seed` joins
+  §2.2's `(config_hash, combo_index, fold)` triple: that triple is a floor, and
+  `config_hash` is blake3 over a `ComboSpec::canonical_form` — slots, rules and
+  size — which deliberately does not cover `[run].seed`. Leaving it out would
+  make two configs differing only in their declared seed derive identical
+  per-fold seeds, defeating the field. The mixer is hand-rolled (FNV-1a absorb,
+  SplitMix64 finalize) for the same reason the CLI's `Fnv64` is: `DefaultHasher`
+  is not stable across Rust releases, and a seed that changes with the toolchain
+  is not a seed. It is not a PRF and does not need to be; it needs to be stable
+  and to avalanche, so adjacent `(combo, fold)` pairs do not start correlated
+  streams. One value is pinned by test — changing the derivation changes every
+  seed in every stored result, which is a decision-log event rather than a
+  refactor.

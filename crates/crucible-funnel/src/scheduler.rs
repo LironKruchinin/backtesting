@@ -22,7 +22,16 @@
 //!   cache-resident (the 5800X3D's 96 MB L3 is the budget). Requires a
 //!   `MultiStrategy` fan-out adapter in the engine (M3 engine work item).
 //! - Determinism: seeds derive from (config_hash, combo_index, fold) — never
-//!   from thread id, completion order, or time.
+//!   from thread id, completion order, or time. That derivation is
+//!   implemented: [`crate::walkforward::derive_seed`], which also mixes in the
+//!   config's `[run].seed` because the config hash does not cover it
+//!   (D-0064). Use it; do not write a second one here.
+//!
+//! The unit of work this scheduler will hand out is already shaped:
+//! [`crate::walkforward::run_grid`] replays one grid over one shared bar
+//! series, single-threaded, and returns results in grid-index order. Making
+//! it parallel is a matter of splitting that loop across combos — the fold
+//! plan is immutable and shared, and every combo's result is independent.
 
 /// Placeholder for the M3 scheduler implementation.
 #[derive(Debug, Clone, Copy)]

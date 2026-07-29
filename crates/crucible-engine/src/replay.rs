@@ -19,7 +19,7 @@ use std::collections::VecDeque;
 use crucible_core::prelude::*;
 
 use crate::metrics::Summary;
-use crate::portfolio::Portfolio;
+use crate::portfolio::{ClosedTrade, FeeEvent, Portfolio};
 
 #[derive(Debug, Clone)]
 pub struct BacktestParams {
@@ -36,6 +36,15 @@ pub struct BacktestResult {
     pub n_fills: usize,
     /// Orders still pending when the feed ended (cancelled, never filled).
     pub cancelled_at_eof: usize,
+    /// Every completed round-trip, stamped with the fill that flattened it.
+    ///
+    /// `summary` already aggregates these over the whole run; they are kept
+    /// per-event so a caller slicing the run into windows — the walk-forward
+    /// runner — can report the trades that happened inside each one instead
+    /// of repeating the whole-run count under every fold.
+    pub closed_trades: Vec<ClosedTrade>,
+    /// Every nonzero commission, stamped with its fill. Same reason.
+    pub fee_events: Vec<FeeEvent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,11 +142,15 @@ where
         portfolio.fees_nano_usd(),
         params.bars_per_year,
     );
+    let cancelled_at_eof = pending.len();
+    let (closed_trades, fee_events) = portfolio.into_records();
 
     Ok(BacktestResult {
         equity,
         summary,
         n_fills,
-        cancelled_at_eof: pending.len(),
+        cancelled_at_eof,
+        closed_trades,
+        fee_events,
     })
 }

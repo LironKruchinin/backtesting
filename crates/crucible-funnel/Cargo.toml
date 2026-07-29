@@ -7,10 +7,16 @@ license.workspace = true
 
 [dependencies]
 crucible-core = { path = "../crucible-core" }
+# The walk-forward runner replays a grid and slices the result into folds, so
+# it needs the engine that replays and the strategies that are replayed
+# (CLAUDE.md §3 blesses both edges). Note what is NOT here: `crucible-data`.
+# Fold boundaries are trading days, but the trading-day key of each bar is
+# supplied by the caller — the same device that keeps a clock out of
+# `crucible-data` (D-0015) and blake3 out of `crucible-strategies` (D-0060).
+crucible-engine = { path = "../crucible-engine" }
+crucible-strategies = { path = "../crucible-strategies" }
 
 # --- Milestone M3 additions (do not add before implementing; CLAUDE.md §6) ---
-# crucible-engine     = { path = "../crucible-engine" }
-# crucible-strategies = { path = "../crucible-strategies" }
 # rayon  = "..."      # run-level parallelism (the ONLY place threads are spawned)
 # duckdb = "..."      # results store + trial registry
 # serde / toml        # config parsing (deny_unknown_fields everywhere)

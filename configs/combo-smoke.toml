@@ -58,6 +58,15 @@ fill_model = "spread_cross"
 half_spread_ticks = 1
 fee_per_contract_usd = "1.25"
 
+# Folds for `crucible walk-forward`, in TRADING DAYS (D-0062). The synthetic
+# feed has no exchange, so "trading day" here means UTC civil day and the
+# command says so on every run. 20,000 1m bars is just under 14 of them.
+[walk_forward]
+scheme = "rolling"
+train_days = 5
+test_days = 2
+step_days = 2
+
 [run]
 seed = 42
 initial_cash_usd = "100000"
