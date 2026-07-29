@@ -172,16 +172,39 @@ time (D-0057).
 
 ### 3.4 History floors are per root **and** per endpoint
 
-| Root | `eod` | `greeks/eod` |
-|---|---|---|
-| SPY | 2012-06-01 | **~2017** (472 "No data" on 2013-07-15, 2015-07-15, 2016-07-15, 2016-10-03, 2016-12-01; 200 on 2017-01-03) |
-| QQQ | 2012-06-01 | **≤ 2013-07-15** |
-| NDX | 2012-06-01 | **~2026-06** (empty 2026-05-01, 1.5 MB 2026-07-01) |
+**Measured for all nine roots** by `crucible theta-floors`, 132 requests total,
+each answer verified (the previous session answers 472, and three sessions
+sampled above the boundary all carry data):
 
-Remaining roots' greeks floors are **unprobed** — T0 bisects each (~12 requests
-per root) and records them in the inventory header. A request below a floor
-answers **HTTP 472** ("No data found for your request"), which is an ordinary
-outcome to record, not a failure to retry.
+| Root | `eod` | `greeks/eod` | previous session |
+|---|---|---|---|
+| SPY | 2012-06-01 | **2017-01-03** | 2016-12-30 → 472 |
+| IWM | 2012-06-01 | **2017-01-03** | 2016-12-30 → 472 |
+| SPX | 2012-06-01 | **2017-01-03** | 2016-12-30 → 472 |
+| SPXW | 2012-06-01 | **2017-01-03** | 2016-12-30 → 472 |
+| VIX | 2012-06-01 | **2017-01-03** | 2016-12-30 → 472 |
+| DIA | 2012-06-01 | **2017-01-03** | 2016-12-30 → 472 |
+| RUT | 2012-06-01 | **2018-12-03** | 2018-11-30 → 472 |
+| QQQ | 2012-06-01 | **≤ 2012-06-01** | at or below the subscription floor |
+| NDX | 2012-06-01 | **2026-05-08** | 2026-05-07 → 472 |
+
+**Six roots share one date to the day.** That is not six independent data
+availabilities; it is a vendor pipeline switching on at the 2016→2017 turn —
+structurally the same kind of boundary as D-0054's 2021→2022 dedup change, and
+it corroborates the earlier hand probe that put SPY at "200 on 2017-01-03".
+QQQ and RUT are the exceptions, so the switch-on was not uniform.
+
+A request below a floor answers **HTTP 472** ("No data found for your
+request"), which is an ordinary outcome to record, not a failure to retry.
+
+> **Bisect over sessions, never over calendar days.** The first version of the
+> probe searched calendar days and reported SPY's floor as **2021-03-22** —
+> wrong by four years, and self-confirming, because 2021-03-21 is a Sunday and
+> answered 472 like any date below the floor. Weekends make the predicate
+> non-monotone over days, so a midpoint landing on one drags the lower bound
+> past years of real history. SPY returns 4,818 contracts on 2017-01-03. The
+> probe now indexes into the sessions `us_equity_options` lists (D-0058), and
+> verifies the answer instead of trusting the loop invariant.
 
 ### 3.5 `underlying_price` rides along at 1-minute
 

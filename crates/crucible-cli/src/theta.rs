@@ -65,6 +65,35 @@ pub fn run(_args: &ThetaGoldenArgs) -> i32 {
 #[cfg(feature = "thetadata")]
 pub use enabled::run;
 
+/// Arguments for `theta-floors`.
+#[derive(Debug, clap::Args)]
+pub struct ThetaFloorsArgs {
+    /// Roots to probe, comma separated.
+    #[arg(long, default_value = "SPY,QQQ,IWM,SPX,SPXW,NDX,VIX,RUT,DIA")]
+    pub roots: String,
+    /// Earliest date the subscription could answer, `YYYY-MM-DD`.
+    #[arg(long, default_value = "2012-06-01")]
+    pub floor: String,
+    /// Latest date to search up to, `YYYY-MM-DD`.
+    #[arg(long, default_value = "2026-07-01")]
+    pub ceiling: String,
+    /// Base URL of the Theta Terminal.
+    #[arg(long)]
+    pub base_url: Option<String>,
+}
+
+#[cfg(not(feature = "thetadata"))]
+pub fn run_floors(_args: &ThetaFloorsArgs) -> i32 {
+    eprintln!(
+        "error: `theta-floors` needs a build with the ThetaData client.\n\
+         \n    cargo run -p crucible-cli --features thetadata -- theta-floors"
+    );
+    EXIT_NO_FEATURE
+}
+
+#[cfg(feature = "thetadata")]
+pub use enabled::run_floors;
+
 #[cfg(feature = "thetadata")]
 mod enabled {
     use std::collections::BTreeMap;
@@ -78,7 +107,7 @@ mod enabled {
     use parquet::file::reader::{FileReader, SerializedFileReader};
     use parquet::record::Field;
 
-    use super::ThetaGoldenArgs;
+    use super::{ThetaFloorsArgs, ThetaGoldenArgs};
 
     const EXIT_OK: i32 = 0;
     const EXIT_FAILED: i32 = 4;
@@ -442,6 +471,238 @@ mod enabled {
         }
     }
 
+    /// Bisects each root's `greeks/eod` history floor **over sessions**.
+    ///
+    /// A request below a root's floor answers HTTP 472 ("No data found for your
+    /// request"), an ordinary outcome to record rather than a failure to retry.
+    /// That makes the floor a monotone predicate and binary search finds it in
+    /// ~14 requests per root instead of the thousands a linear scan needs.
+    ///
+    /// **It is monotone over sessions and NOT over calendar days**, which the
+    /// first version of this got wrong and paid for. A weekend answers 472
+    /// exactly like a date below the floor, so a midpoint landing on a Sunday
+    /// reads as "nothing here" and drags the lower bound past years of real
+    /// history. It reported SPY's floor as 2021-03-22 — a Monday whose
+    /// preceding Sunday appeared to confirm it — when SPY in fact returns 4,818
+    /// contracts on 2017-01-03. The search therefore indexes into the sessions
+    /// the `us_equity_options` calendar lists (D-0058) and never probes a day
+    /// the exchange was shut.
+    ///
+    /// **The answer is verified rather than trusted.** Monotonicity still
+    /// assumes no interior holes, so three sessions sampled above the boundary
+    /// must also carry data. A root that fails that is reported `UNCERTAIN` and
+    /// its number is not banked (§0.4) — a floor nobody checked is exactly the
+    /// kind of plausible figure that turns a real gap into an expected 472.
+    pub fn run_floors(args: &ThetaFloorsArgs) -> i32 {
+        let base_url = args
+            .base_url
+            .clone()
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
+        let client = match ThetaClient::open(&base_url, 8) {
+            Ok(client) => client,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return EXIT_FAILED;
+            }
+        };
+        let (Some(low), Some(high)) = (parse_day(&args.floor), parse_day(&args.ceiling)) else {
+            eprintln!("error: --floor and --ceiling must be YYYY-MM-DD");
+            return EXIT_FAILED;
+        };
+        if low >= high {
+            eprintln!("error: --floor must precede --ceiling");
+            return EXIT_FAILED;
+        }
+
+        let calendar = match crucible_data::calendar::Calendar::by_id("us_equity_options") {
+            Ok(calendar) => calendar,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return EXIT_FAILED;
+            }
+        };
+        // Every session in the window, in order. Bisection indexes into this,
+        // so a probe can never land on a day the exchange was closed.
+        let sessions: Vec<i64> = (low..high)
+            .filter(|d| calendar.is_trading_day(crucible_data::ingest::window::civil_from_days(*d)))
+            .collect();
+        if sessions.len() < 8 {
+            eprintln!("error: the window holds too few sessions to search");
+            return EXIT_FAILED;
+        }
+
+        println!("greeks/eod history floors, bisected over sessions");
+        println!("  terminal   {base_url}");
+        println!(
+            "  window     {} .. {}  ({} sessions)",
+            args.floor,
+            args.ceiling,
+            sessions.len()
+        );
+        println!();
+        println!("  {:<6} {:<12} {:>9}  verdict", "root", "floor", "requests");
+
+        let mut requests_total = 0u32;
+        let mut failed = 0u32;
+        for root in args
+            .roots
+            .split(',')
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+        {
+            let mut requests = 0u32;
+            let mut probe = |index: usize, requests: &mut u32| -> Option<bool> {
+                *requests += 1;
+                requests_total += 1;
+                match has_greeks(&client, root, sessions[index]) {
+                    Ok(answer) => Some(answer),
+                    Err(e) => {
+                        eprintln!("  {root}: {e}");
+                        None
+                    }
+                }
+            };
+
+            let last = sessions.len() - 1;
+            // Does the root have greeks at all, anywhere in the window?
+            match probe(last, &mut requests) {
+                Some(true) => {}
+                Some(false) => {
+                    println!(
+                        "  {root:<6} {:<12} {requests:>9}  no greeks anywhere in the window",
+                        "none"
+                    );
+                    continue;
+                }
+                None => {
+                    failed += 1;
+                    continue;
+                }
+            }
+
+            // Invariant: session `lo` has no greeks, session `hi` has them.
+            // If `lo` already has them the floor is at or below the window's
+            // start and bisection has nothing to find.
+            let (mut lo, mut hi) = (0usize, last);
+            match probe(lo, &mut requests) {
+                Some(true) => {
+                    println!(
+                        "  {root:<6} {:<12} {requests:>9}  at or below the subscription floor",
+                        render_day(sessions[0])
+                    );
+                    continue;
+                }
+                Some(false) => {}
+                None => {
+                    failed += 1;
+                    continue;
+                }
+            }
+            let mut broke = false;
+            while hi - lo > 1 {
+                let mid = lo + (hi - lo) / 2;
+                match probe(mid, &mut requests) {
+                    Some(true) => hi = mid,
+                    Some(false) => lo = mid,
+                    None => {
+                        broke = true;
+                        break;
+                    }
+                }
+            }
+            if broke {
+                failed += 1;
+                continue;
+            }
+
+            // Verify rather than trust. The loop's invariant already proves
+            // `hi` has data and `lo` does not, but it proves nothing about
+            // interior holes — and a hole is what would make bisection's whole
+            // premise false. Sample three sessions above the boundary.
+            let mut holes = Vec::new();
+            for quarter in 1..=3usize {
+                let at = hi + (last - hi) * quarter / 4;
+                if at <= hi || at > last {
+                    continue;
+                }
+                match probe(at, &mut requests) {
+                    Some(true) => {}
+                    Some(false) => holes.push(render_day(sessions[at])),
+                    None => {
+                        broke = true;
+                        break;
+                    }
+                }
+            }
+            if broke {
+                failed += 1;
+                continue;
+            }
+            if holes.is_empty() {
+                println!(
+                    "  {root:<6} {:<12} {requests:>9}  verified; previous session {} answered 472",
+                    render_day(sessions[hi]),
+                    render_day(sessions[lo])
+                );
+            } else {
+                println!(
+                    "  {root:<6} {:<12} {requests:>9}  UNCERTAIN — interior holes at {}; not banked",
+                    render_day(sessions[hi]),
+                    holes.join(", ")
+                );
+                failed += 1;
+            }
+        }
+
+        println!();
+        println!("{requests_total} requests total.");
+        println!(
+            "Record these in docs/THETADATA_PLAN.md §3.4 — a floor is what makes \
+             a 472 an expected outcome rather than a gap."
+        );
+        if failed > 0 {
+            eprintln!("{failed} root(s) could not be resolved");
+            return EXIT_FAILED;
+        }
+        EXIT_OK
+    }
+
+    /// True when `greeks/eod` returns data for this root on this day.
+    ///
+    /// 472 is "no data", which is the answer this search is looking for and
+    /// not an error. Weekends and holidays also answer 472, so the caller's
+    /// bisection lands on *a* date with data rather than necessarily the very
+    /// first session — which is why the printed line says "on or before".
+    fn has_greeks(client: &ThetaClient, root: &str, epoch_day: i64) -> Result<bool, String> {
+        let compact = render_day(epoch_day).replace('-', "");
+        let request = Request::new(Endpoint::OptionGreeksEod.path())
+            .with("symbol", root)
+            .with("expiration", "*")
+            .with("start_date", compact.clone())
+            .with("end_date", compact);
+        match client.fetch(&request) {
+            Ok(body) => Ok(body.len() > 64),
+            Err(e) if e.is_no_data() => Ok(false),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// `YYYY-MM-DD` to days since the Unix epoch.
+    fn parse_day(text: &str) -> Option<i64> {
+        let mut parts = text.split('-');
+        let year: i64 = parts.next()?.parse().ok()?;
+        let month: u32 = parts.next()?.parse().ok()?;
+        let day: u32 = parts.next()?.parse().ok()?;
+        Some(crucible_data::ingest::window::days_from_civil(
+            crucible_data::calendar::CivilDate { year, month, day },
+        ))
+    }
+
+    /// Days since the Unix epoch back to `YYYY-MM-DD`.
+    fn render_day(epoch_day: i64) -> String {
+        let date = crucible_data::ingest::window::civil_from_days(epoch_day);
+        format!("{:04}-{:02}-{:02}", date.year, date.month, date.day)
+    }
     /// Keeps `PathBuf` in scope for the argument type without an unused import.
     const _: Option<PathBuf> = None;
 }

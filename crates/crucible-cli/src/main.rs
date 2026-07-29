@@ -103,6 +103,8 @@ enum Command {
     /// Round-trip one ThetaData response per endpoint and measure the
     /// CSV-to-Parquet ratio.
     ThetaGolden(theta::ThetaGoldenArgs),
+    /// Bisect each option root's greeks history floor.
+    ThetaFloors(theta::ThetaFloorsArgs),
 }
 
 fn main() {
@@ -129,6 +131,7 @@ fn main() {
         Some(Command::Qa(args)) => qa::run(&args),
         Some(Command::Rolls(args)) => rolls::run(&args),
         Some(Command::ThetaGolden(args)) => theta::run(&args),
+        Some(Command::ThetaFloors(args)) => theta::run_floors(&args),
         // Bare `crucible` stays a zero-exit help screen: it is what a new
         // reader types first, and it has not failed at anything.
         None => {
