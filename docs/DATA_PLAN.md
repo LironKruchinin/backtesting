@@ -91,6 +91,59 @@ D-0023 buys it inside one $199 subscription month instead.
 | **Bulk L2 history** | Same argument extended over years. The M4 queue model calibrates against one month of L3; buying years of L2 would be storage spent on a question nobody is asking. |
 | **Pre-stitched continuous symbology** (`ES.v.0` et al.) | ~10% cheaper to download, and declined anyway: a roll rule we did not choose is a research assumption we cannot defend. Continuous series are constructed locally in `crucible-data::continuous`. |
 
+## Free, manual: the Cboe VIX complex (`external/cboe/`)
+
+The volatility complex is the one dataset in the whole plan that costs nothing.
+Cboe publishes daily index history as plain CSV, so it does not go through
+`pull`, does not appear in `manifest.jsonl`, and is not an acquisition. It gets
+its own convention instead.
+
+**Where it lives.** `$CRUCIBLE_DATA_DIR/external/cboe/` — a sibling of `raw/`
+and `curated/`, for the same reason `staging/` and `delivery/` are: `raw/` is
+exactly what D-0017 says it is, and nothing else may pretend to be an
+acquisition.
+
+**What to take**, all from
+<https://www.cboe.com/tradable_products/vix/vix_historical_data/>:
+
+| file | index | note |
+|---|---|---|
+| `VIX_History.csv` | VIX — 30-day implied vol | 1990→present |
+| `VIX9D_History.csv` | 9-day | the short end of the term structure |
+| `VIX3M_History.csv` | 3-month | from 2009-09-18 |
+| `VIX1D_History.csv` | 1-day | **only from 2023**; before that, compute a 0–1DTE proxy |
+| VX settlement history | VIX futures | from <https://www.cboe.com/us/futures/market_statistics/historical_data/> |
+
+The daily-index files are all
+`https://cdn.cboe.com/api/global/us_indices/daily_prices/{SYMBOL}_History.csv`
+with header `DATE,OPEN,HIGH,LOW,CLOSE` (verified 2026-07-28 for `VIX3M`). That
+is a pattern, not a promise — record the URL you actually used.
+
+**No scraper.** D-0010 descoped scraping and that applies here: a scheduled
+fetch of a vendor page is a thing that breaks silently in month four and
+back-fills a research dataset with whatever the page said that day. These files
+are downloaded by hand, dated, and left alone.
+
+**The availability rule — the first design question, always (§2.1).** A daily
+index value is knowable **at that session's close**, not at its open and not on
+the morning of the date it is stamped with. So `avail_ts` for a Cboe daily row
+is the close of the *same* trading day, 15:00 CT, which is
+`crucible-data::calendar`'s job to supply. Any loader that stamps these rows at
+midnight, or joins them to a futures bar by calendar date, has invented
+lookahead worth roughly one session — enough on its own to make a
+volatility-timing strategy look profitable.
+
+**Every download carries a README.** Copy `docs/templates/external-cboe-README.md`
+to `external/cboe/README.md` and fill it in: the exact URL, the date you
+downloaded it, the row count, and the last date each file contains. Data whose
+provenance is not written down is a rumour (§2.5), and a CSV in a folder is
+exactly the kind of thing that acquires a false history six months later.
+
+**The loader is not built yet**, deliberately. It arrives with the regime work
+in the post-M4 backlog, at which point it reads these files, applies the
+availability rule above, and is tested against a hand-checked fixture. Until
+then the convention exists so the *files* can be collected correctly today.
+
 ## Later, metered, small
 
 **SPY + QQQ 1-minute bars.** A few dollars, pay-as-you-go, no subscription.

@@ -234,8 +234,9 @@ when the code that uses them lands**, never speculatively. Blessed set:
 | `sha2` | data, `databento` feature | verifying a delivery against the vendor's published digest before it enters the immutable archive (D-0031) |
 | `time` | data, `databento` feature, `ingest::databento` only | not a choice — the vendor API spells its timestamps `time::OffsetDateTime` |
 | `parquet` | data only | Curated Parquet, low-level typed columns, `default-features = false` + `zstd`. NEVER in engine (D-0037) |
-| `polars` | data only, **data-QA report only** | gap/spike/DST reporting. NOT the feed path — it depends on rayon, and only `funnel` spawns threads (D-0037) |
-| `chrono` + `chrono-tz` | data::calendar only | the one timezone-aware module |
+| ~~`polars`~~ | — | **removed** (D-0040). The data-QA report is one ordered pass over a bar series; `polars-core` depends on rayon non-optionally, and only `funnel` spawns threads |
+| `chrono` + `chrono-tz` | data::calendar only | the one timezone-aware module. Requested without `clock`, but `parquet` enables it via feature unification — the real clock ban is `clippy.toml` (D-0048) |
+| `toml` | funnel, data, cli | configs, and the compiled-in calendar tables (D-0039) |
 | `rand_chacha` | where seeded randomness is needed | resampling/permutation |
 | `clap` | cli | args (when >1 real command) |
 | `criterion` | dev | benchmarks |
@@ -375,6 +376,41 @@ reference; supersede the decision if you disagree — don't hotfix.
   demo's 347,760 constant: real `ohlcv` data has no bar for an interval that
   did not trade, and the constant would flatter Sharpe (D-0038). `calendar`
   v1 takes this over.
+- **`backtest` prints two annualization numbers when they differ.** The
+  calendar counts the `tf` intervals a year of sessions *contains*; measuring
+  the sample counts the intervals that actually *traded*, which is fewer,
+  because `ohlcv` has no bar for an interval with no trade. Neither is wrong
+  and the calendar is used (D-0039, superseding D-0038's sample default). A
+  large gap means a thin contract or a hole — that is the point of showing it.
+- **The bundled CME calendar has no 15:15–15:30 CT halt**, though CME's own
+  E-mini contract-spec page lists one. Our archive falsifies it for the
+  current era: ESH4 January 2024 has 315 bars with nonzero volume in exactly
+  that window (D-0040). The archive is evidence; the spec page is a claim.
+- **Most CME "holidays" are early closes at 12:00 CT, not closures**, and the
+  evening before still opens. CME's trading-hours *landing page* says
+  "Globex closed" and its per-holiday grids disagree; the grids win, and MLK
+  2024-01-15 in our archive agrees with them. Encoding closures would delete a
+  real overnight session plus a real morning from 16 years of backtests.
+- **The calendar answers about 2013 even though it says `valid_from`
+  2015-09-21**: the functions are total by design — there is nowhere to put a
+  `Result` inside replay. `qa` and `backtest` warn when a span starts earlier;
+  the two older session eras are documented in the table, not modelled.
+- **`crucible qa` exits 4 when it finds something**, like `verify`. A
+  scheduled job that reads "coverage 61 %" as success is worse than no job.
+- **`AdjustedPrice` cannot be converted to `Price`, and that is the feature**
+  (D-0042). Back-adjusted levels are for signals; PnL uses the tradeable price
+  of the then-front contract. Adding a `From` impl reintroduces the classic
+  silent-corruption bug this whole type exists to prevent.
+- **`raw/` and `curated/` nest in opposite orders** — `{dataset}/{schema}/
+  {symbol}` vs `{kind}/{instrument}/{grain}`. Deliberate, argued at length in
+  `docs/DATA_LAYOUT.md` (D-0049); unifying them destroys either coverage
+  subtraction or curated provenance. `layout-check` enforces both shapes.
+- **`layout-check` has no `--fix`** and must never grow one: a manifest
+  `file_path` names the bytes a result read, so renaming an archived file
+  breaks provenance retroactively and silently (D-0049).
+- **`ContinuousFeed::open` refuses a replay window outside the roll table's
+  build span** rather than returning a series quietly missing contracts
+  (D-0045). Rebuild the table instead: it is curated data, and disposable.
 
 ---
 
@@ -388,6 +424,7 @@ cargo run -p crucible-cli -- demo               # the vertical slice
 cargo run -p crucible-cli -- demo --hash-only   # determinism hash (CI gate)
 cargo run -p crucible-cli -- env                # what .env/env actually resolved to
 cargo run -p crucible-cli -- verify             # re-hash the archive vs the manifest
+cargo run -p crucible-cli -- layout-check      # is the tree the shape DATA_LAYOUT.md says?
 
 # The replay path. `transcode` needs the feature (it decodes DBN); `backtest`
 # does not. Curated data is disposable: `--force` rebuilds, deleting is safe.
@@ -405,8 +442,9 @@ cargo run -p crucible-cli --features databento -- \
        --start 2024-01-01 --end 2024-02-01
 ```
 
-Acquisition planning lives in `docs/DATA_PLAN.md`; the ordered, checklisted
-procedure for the subscription month is `docs/RUNBOOK_BLITZ.md`.
+Acquisition planning lives in `docs/DATA_PLAN.md`; the reasoning for the
+subscription month is `docs/RUNBOOK_BLITZ.md`, and the copy-paste command list
+for the day itself is `docs/BLITZ_CHECKLIST.md`.
 
 ---
 
@@ -424,10 +462,12 @@ Where to start reading in M1: `crucible-data::catalog` (the archive/manifest
 contract), then `crucible-data::ingest` (acquisition, and the rolling-window
 deadlines that make the monthly pull time-sensitive by design), then
 `crucible-data::curated` (the file format the engine actually replays) and
-`crucible-data::transcode` (how raw becomes curated). All four are
-implemented; `calendar` and `continuous` still carry their specs in `//!`
-docs. `docs/DECISIONS.md` is the source of truth for why anything looks the
-way it does.
+`crucible-data::transcode` (how raw becomes curated). `calendar` defines when
+the exchange is open, `continuous` stitches contracts, and `qa` is the module
+that reads the others back and asks whether the archive is any good — start
+there if you want to know what the data actually looks like. Every module is
+implemented. `docs/DECISIONS.md` is the source of truth for why anything looks
+the way it does.
 
 Known open questions (decide when reached, log when decided): margin
 modeling (M2); multi-instrument portfolio accounting (post-M4); Welford vs

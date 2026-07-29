@@ -42,7 +42,16 @@ deadline-driven (see `crucible-data::ingest` module docs).
 - [ ] Bootstrap pulls: 16y `ohlcv-1s`/`ohlcv-1m` + `definition` + `statistics`
       for the seven-parent basket in `docs/DATA_PLAN.md` — the acquisition
       itself, run against a live Standard subscription per
-      `docs/RUNBOOK_BLITZ.md`. Tooling is done; this box is the shopping trip
+      `docs/RUNBOOK_BLITZ.md` and `docs/BLITZ_CHECKLIST.md`. Tooling is done;
+      this box is the shopping trip
+      - [x] `definition`, 16y, ES/NQ/RTY (2026-07-28): pulled ahead of the
+            subscription because the roll table needs expiries. Quoted
+            **$0.0000** — a flat-rate entitlement was already active on the
+            account, so the ~$0.15 metered estimate was never charged.
+            12.06 MB across three files, `verify` clean. The first attempt
+            died on an HTTP 504 mid-poll (exit 4) and re-running the identical
+            command adopted all three jobs and submitted nothing twice — the
+            resume path working exactly as D-0029/D-0034 designed it
 - [ ] Monthly archival job for the rolling L1/L3 windows — `trades`, `tbbo`,
       `mbo`; `mbp-10` deliberately excluded (D-0023). Documented cron in
       `docs/RUNBOOK_BLITZ.md`, later automated; runs `--max-cost-usd 0.00` so
@@ -58,10 +67,24 @@ deadline-driven (see `crucible-data::ingest` module docs).
 - [x] `crucible backtest` (2026-07-28): the exit artifact — SmaCross on
       archived bars under `spread_cross`, printing its own assumptions
       (D-0038)
-- [ ] Session calendar v1 (Globex sessions, holidays, `bars_per_year`)
-- [ ] Continuous contracts v1: volume-roll table + back-adjust at load;
-      signals on adjusted, PnL on tradeable prices
-- [ ] Data QA report: gaps, zero-volume runs, price spikes, DST boundaries
+- [x] Session calendar v1 (2026-07-28): Globex sessions, holiday/early-close
+      rules with sources cited, `bars_per_year` — a compiled-in TOML table,
+      `chrono`/`chrono-tz` confined here, and `backtest` annualizing from it
+      instead of from the sample (D-0039). Covers the current session era
+      only (`valid_from = 2015-09-21`); the two earlier eras are documented
+      and warned about, not modelled
+- [x] Continuous contracts v1 (2026-07-28): versioned volume-crossover roll
+      table under `curated/rolls/`, back-adjustment applied at load and never
+      stored, and `AdjustedPrice` as a distinct type so a back-adjusted level
+      cannot reach `pnl_nano_usd` (D-0041..D-0046)
+- [x] Data QA report (2026-07-28): coverage against the calendar, gaps,
+      out-of-session bars, zero-volume runs, robust spike detection, DST
+      boundaries, and the vendor's own `condition.json` — `crucible qa`,
+      exit 4 on findings (D-0040). Its first real run corrected the calendar
+      - [x] Archive layout enforced (2026-07-28): `docs/DATA_LAYOUT.md` pins
+            the tree and `crucible layout-check` refuses on any departure —
+            six violation classes, each with a negative control, exit 4
+            (D-0049). Complements `verify`: shape, not bytes
 
 **Acceptance:** one command takes a fresh machine (with API key) to a
 validated local ES archive; the demo strategy runs on real ES 1m bars.
