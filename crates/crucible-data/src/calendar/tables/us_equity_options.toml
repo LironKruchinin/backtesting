@@ -1,0 +1,235 @@
+# US equity and equity-option session calendar (NYSE / Nasdaq / OCC / Cboe).
+#
+# Built for the ThetaData tranches (D-0050), whose validation gate asks "is
+# every expected trading day present?" — a question that needs the *trading-day
+# set* far more than it needs intraday hours. Read the three warnings before
+# trusting a number that came out of this file.
+#
+# ## 1. What this file is FOR, and what it is not good enough for
+#
+# It answers **which dates had a session**. That is what `qa`-style coverage
+# checks and the ThetaData reconciliation edges need, and it is what the holiday
+# rules below are sourced for.
+#
+# It is deliberately NOT a per-product hours table. US index options do not all
+# keep cash-equity hours: SPX and VIX run global/extended sessions, several
+# roots have late-afternoon closes that cash equities do not, and 0DTE SPXW
+# settles differently again. Encoding one set of hours and pointing every root
+# at it would produce an `is_open` that is confidently wrong for exactly the
+# roots this project cares most about. So the session below is the **cash
+# equity 09:30-16:00 ET** template, `roots` claims only the ETF roots that
+# genuinely keep those hours, and the index roots are listed in the comment at
+# the bottom rather than claimed. `bars_per_year` from this calendar is
+# meaningful for SPY/QQQ/IWM/DIA and for nothing else here.
+#
+# ## 2. This is the CURRENT holiday era only
+#
+# `valid_from = 2012-06-01`, the ThetaData options history floor, which is the
+# earliest date anything in this project asks about. Juneteenth is rule-limited
+# to 2022+ rather than back-dated, because it was not an exchange holiday
+# before then and a rule that pretended otherwise would delete ten real
+# sessions.
+#
+# ## 3. The trading-day set is NOT the same as CME's
+#
+# This is the reason this file exists rather than pointing ThetaData at
+# `cme_globex_equity_index`. The two disagree inside this window:
+#
+#   - 2012-10-29 and 2012-10-30 (Hurricane Sandy): the NYSE was **closed for
+#     two consecutive days**, the first weather closure of that length since
+#     1888. CME Globex kept trading electronically and only cancelled its floor
+#     session, which is why `cme_globex.toml` records those two dates as
+#     *early closes* and this file records them as *closures*.
+#   - Days of national mourning (2018-12-05, 2025-01-09): the NYSE closed for
+#     the whole day; CME ran an abbreviated session to 08:30 CT.
+#
+# Substituting CME's calendar here would have reported four real closures as
+# missing data and, worse, would have looked plausible while doing it.
+#
+# ## 4. Known gaps, listed rather than hidden
+#
+# - **Early closes (13:00 ET) are encoded for the three recurring cases** —
+#   the day before Independence Day, the day after Thanksgiving, and Christmas
+#   Eve when it falls on a weekday. They matter for `bars_per_year` and not at
+#   all for the trading-day set, which is what this file is used for today.
+# - The 2001 and 2004 closures and every pre-2012 special closure are out of
+#   scope and out of `valid_from`.
+# - Half-day rules for Christmas Eve are the fiddliest thing here: the NYSE
+#   closes early on 24 December only when it is a weekday AND is not itself the
+#   observed Christmas holiday. The `weekday_before` rule expresses that; the
+#   years where 25 December falls on a Sunday (observed Monday 26th) leave the
+#   24th a full Friday session, which this rule gets right by construction.
+
+schema_version = 1
+
+[[calendar]]
+id = "us_equity_options"
+description = "US cash equities and their listed options (NYSE/Nasdaq/OCC hours)"
+timezone = "America/New_York"
+# Only the roots that actually keep 09:30-16:00. See warning 1: index roots are
+# deliberately NOT claimed, because their hours differ and a wrong `is_open` is
+# worse than no answer. `for_instrument` returns None for them, and the
+# ThetaData coverage check uses the trading-day set explicitly.
+roots = ["SPY", "QQQ", "IWM", "DIA"]
+valid_from = "2012-06-01"
+sources = [
+  "https://www.nyse.com/markets/hours-calendars",
+  "https://www.nasdaq.com/market-activity/stock-market-holiday-schedule",
+  "https://www.optionseducation.org/referencelibrary/expiration-calendar",
+]
+
+[calendar.session]
+# Cash equities open and close on the same calendar day — there is no overnight
+# leg, which is why this table needs `shape` at all (D-0058).
+shape = "same_day"
+open_local = "09:30"
+close_local = "16:00"
+rth_open_local = "09:30"
+rth_close_local = "16:00"
+source = "https://www.nyse.com/markets/hours-calendars"
+
+[calendar.reference_span]
+start = "2016-01-01"
+end = "2026-01-01"
+rationale = """
+Ten whole calendar years, fixed forever so bars_per_year is reproducible on \
+every machine and in every future build. Both ends are year boundaries so leap \
+years and weekday drift average out. It deliberately matches the span \
+cme_globex.toml uses, so the two calendars' trading-day counts are directly \
+comparable."""
+
+# --- full closures ------------------------------------------------------
+
+[[calendar.holiday]]
+name = "New Year's Day"
+# Saturday 1 January is NOT observed on the preceding Friday by the NYSE — the
+# exchange does not close on 31 December. Sunday moves to Monday. This is the
+# one place US equity observance differs from the generic federal rule, and
+# getting it wrong deletes a real session every few years.
+rule = { kind = "fixed_date", month = 1, day = 1, observance = "sunday_to_monday" }
+effect = { kind = "closed" }
+source = "https://www.nyse.com/markets/hours-calendars"
+
+[[calendar.holiday]]
+name = "Martin Luther King Jr. Day"
+rule = { kind = "nth_weekday", month = 1, weekday = "monday", nth = 3 }
+effect = { kind = "closed" }
+source = "https://www.nyse.com/markets/hours-calendars"
+
+[[calendar.holiday]]
+name = "Washington's Birthday"
+rule = { kind = "nth_weekday", month = 2, weekday = "monday", nth = 3 }
+effect = { kind = "closed" }
+source = "https://www.nyse.com/markets/hours-calendars"
+
+[[calendar.holiday]]
+name = "Good Friday"
+# The NYSE closes on Good Friday every year in this window, with no
+# nonfarm-payroll exception — unlike CME, which runs an abbreviated session
+# those years. That divergence is real and is the second reason these two
+# calendars cannot be shared.
+rule = { kind = "good_friday" }
+effect = { kind = "closed" }
+source = "https://www.nyse.com/markets/hours-calendars"
+
+[[calendar.holiday]]
+name = "Memorial Day"
+rule = { kind = "nth_weekday", month = 5, weekday = "monday", nth = -1 }
+effect = { kind = "closed" }
+source = "https://www.nyse.com/markets/hours-calendars"
+
+[[calendar.holiday]]
+name = "Juneteenth National Independence Day"
+# First observed by the NYSE in 2022 (Monday 20 June, since 19 June 2022 fell
+# on a Sunday). Rule-limited rather than back-dated: applying it to 2012-2021
+# would delete ten sessions that genuinely traded.
+rule = { kind = "fixed_date", month = 6, day = 19, observance = "nearest_weekday" }
+effect = { kind = "closed" }
+first_year = 2022
+source = "https://www.nyse.com/markets/hours-calendars"
+
+[[calendar.holiday]]
+name = "Independence Day"
+rule = { kind = "fixed_date", month = 7, day = 4, observance = "nearest_weekday" }
+effect = { kind = "closed" }
+source = "https://www.nyse.com/markets/hours-calendars"
+
+[[calendar.holiday]]
+name = "Labor Day"
+rule = { kind = "nth_weekday", month = 9, weekday = "monday", nth = 1 }
+effect = { kind = "closed" }
+source = "https://www.nyse.com/markets/hours-calendars"
+
+[[calendar.holiday]]
+name = "Thanksgiving Day"
+rule = { kind = "nth_weekday", month = 11, weekday = "thursday", nth = 4 }
+effect = { kind = "closed" }
+source = "https://www.nyse.com/markets/hours-calendars"
+
+[[calendar.holiday]]
+name = "Christmas Day"
+rule = { kind = "fixed_date", month = 12, day = 25, observance = "nearest_weekday" }
+effect = { kind = "closed" }
+source = "https://www.nyse.com/markets/hours-calendars"
+
+# --- early closes at 13:00 ET -------------------------------------------
+#
+# These do not change the trading-day set at all; they change session length,
+# and therefore bars_per_year. Encoded because leaving them out would overstate
+# a year's open seconds by about nineteen hours.
+
+[[calendar.holiday]]
+name = "Day before Independence Day"
+rule = { kind = "weekday_before", month = 7, day = 4, observance = "nearest_weekday" }
+effect = { kind = "early_close", close_local = "13:00" }
+source = "https://www.nyse.com/markets/hours-calendars"
+
+[[calendar.holiday]]
+name = "Day after Thanksgiving"
+rule = { kind = "day_after_nth_weekday", month = 11, weekday = "thursday", nth = 4 }
+effect = { kind = "early_close", close_local = "13:00" }
+source = "https://www.nyse.com/markets/hours-calendars"
+
+[[calendar.holiday]]
+name = "Christmas Eve"
+rule = { kind = "weekday_before", month = 12, day = 25, observance = "nearest_weekday" }
+effect = { kind = "early_close", close_local = "13:00" }
+source = "https://www.nyse.com/markets/hours-calendars"
+
+# --- dated exceptions no rule generates ---------------------------------
+
+[[calendar.one_off]]
+date = "2012-10-29"
+name = "Hurricane Sandy — market closed"
+# CME traded electronically through both days; the NYSE did not open at all.
+# This divergence is the reason us_equity_options exists as its own table.
+effect = { kind = "closed" }
+source = "https://www.sec.gov/news/press-release/2012-2012-217htm"
+
+[[calendar.one_off]]
+date = "2012-10-30"
+name = "Hurricane Sandy — market closed"
+effect = { kind = "closed" }
+source = "https://www.sec.gov/news/press-release/2012-2012-217htm"
+
+[[calendar.one_off]]
+date = "2018-12-05"
+name = "National Day of Mourning — George H. W. Bush"
+# Full closure, where CME ran an abbreviated session to 08:30 CT.
+effect = { kind = "closed" }
+source = "https://www.nyse.com/markets/hours-calendars"
+
+[[calendar.one_off]]
+date = "2025-01-09"
+name = "National Day of Mourning — Jimmy Carter"
+effect = { kind = "closed" }
+source = "https://www.nyse.com/markets/hours-calendars"
+
+# Index-option roots deliberately NOT claimed above, and why: SPX, SPXW, XSP
+# and VIX trade sessions this template does not describe (Cboe global trading
+# hours, and a 16:15 ET close for VIX/XSP), while NDX and RUT are Nasdaq/Cboe
+# index products with their own schedules. Their *holiday* set is the same as
+# the one above — they are US exchanges — but their *hours* are not, so
+# claiming them would give `is_open` and `bars_per_year` a confident wrong
+# answer. When a tranche needs intraday index-option hours, that is a second
+# calendar with its own sourced session block, not a `roots` line added here.

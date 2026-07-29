@@ -73,16 +73,41 @@ pub(super) struct CalendarSpec {
     pub sources: Vec<String>,
 }
 
+/// Whether a trading day's session starts the calendar day before it.
+///
+/// CME Globex opens the evening before, so the session that starts Sunday
+/// evening is Monday's trade date. A US equity or equity-option session does
+/// not: 09:30 to 16:00 on the trading day itself, with no overnight.
+///
+/// This was originally not a choice at all — the loader hard-refused any table
+/// whose close was not before its open, which encoded "every market is CME"
+/// into a module whose docs claimed to be about exchanges in general (D-0058).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum SessionShape {
+    /// Opens on `D - 1`, closes on `D`. The CME convention, and the default so
+    /// that a table written before this existed keeps its exact meaning.
+    #[default]
+    Overnight,
+    /// Opens and closes on `D`. US cash equities and their options.
+    SameDay,
+}
+
 /// The repeating weekly shape of a trading day.
 ///
-/// A trading day `D` runs from `open_local` on `D - 1` to `close_local` on
-/// `D`, minus any halts. That is the CME convention: the session that opens on
+/// For an `overnight` session a trading day `D` runs from `open_local` on
+/// `D - 1` to `close_local` on `D`, minus any halts: the session that opens on
 /// Sunday evening is Monday's trade date, and the gap between `close_local` and
-/// the next `open_local` is the daily maintenance break.
+/// the next `open_local` is the daily maintenance break. For a `same_day`
+/// session both ends fall on `D`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct SessionSpec {
-    /// Local time the session opens, on the day *before* the trading day.
+    /// Whether the session starts the calendar day before the trading day.
+    #[serde(default)]
+    pub shape: SessionShape,
+    /// Local time the session opens — on the day *before* the trading day for
+    /// an `overnight` session, on the trading day itself for `same_day`.
     pub open_local: String,
     /// Local time the session closes, on the trading day itself.
     pub close_local: String,

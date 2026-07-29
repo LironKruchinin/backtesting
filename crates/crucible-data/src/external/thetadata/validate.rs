@@ -62,6 +62,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::error::ThetaError;
 use super::schema::{ColumnIndex, ContractKey, Endpoint, is_zero_sentinel};
+use crate::calendar::CivilDate;
 
 /// How rows of one endpoint are expected to be unique.
 ///
@@ -621,6 +622,90 @@ pub fn reconcile(
     }
 
     Ok(out)
+}
+
+/// §4.4's third edge: the days a calendar expects against the days we hold.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CoverageVsCalendar {
+    /// Sessions the calendar expects in the window.
+    pub expected_sessions: u64,
+    /// Of those, how many the inventory holds.
+    pub present_sessions: u64,
+    /// Expected sessions with no data, in order. **The finding.**
+    pub missing: Vec<CivilDate>,
+    /// Dates we hold that the calendar says were not sessions, in order.
+    ///
+    /// Reported, never refused. This check runs *backwards* as well as
+    /// forwards: real data is evidence and a calendar is a claim, so a pile of
+    /// these means the calendar is wrong — which is exactly how D-0040
+    /// falsified CME's published 15:15 CT halt. `qa` treats the same signal the
+    /// same way.
+    pub unexpected: Vec<CivilDate>,
+}
+
+impl CoverageVsCalendar {
+    /// Fraction of expected sessions present, or `None` when none were
+    /// expected.
+    ///
+    /// `None` rather than 1.0 for an empty window, for the same reason
+    /// [`Reconciliation::oi_coverage`] does it: a coverage figure over nothing
+    /// is unmeasured, and reporting it as perfect is how an empty run passes
+    /// for a complete one (§0.4).
+    #[must_use]
+    pub fn coverage(&self) -> Option<f64> {
+        (self.expected_sessions > 0)
+            .then(|| self.present_sessions as f64 / self.expected_sessions as f64)
+    }
+
+    /// True when every expected session is present and nothing extra is held.
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        self.missing.is_empty() && self.unexpected.is_empty()
+    }
+}
+
+/// Compares the sessions a calendar expects over `[start, end)` against `held`.
+///
+/// This is the edge that could not be computed before `us_equity_options`
+/// existed (D-0058): the only bundled calendar described CME Globex, whose
+/// trading-day set genuinely differs from the US equity one inside this span —
+/// the NYSE was shut for Hurricane Sandy on 2012-10-29 and 30 while Globex
+/// traded — so borrowing it would have reported real closures as missing data.
+///
+/// `end` is exclusive, matching every other range in this crate.
+#[must_use]
+pub fn coverage_vs_calendar(
+    calendar: &crate::calendar::Calendar,
+    start: CivilDate,
+    end: CivilDate,
+    held: &BTreeSet<CivilDate>,
+) -> CoverageVsCalendar {
+    use crate::ingest::window::{civil_from_days, days_from_civil};
+
+    let mut out = CoverageVsCalendar::default();
+    let mut day = start;
+    let mut expected: BTreeSet<CivilDate> = BTreeSet::new();
+    while days_from_civil(day) < days_from_civil(end) {
+        if calendar.is_trading_day(day) {
+            expected.insert(day);
+            out.expected_sessions += 1;
+            if held.contains(&day) {
+                out.present_sessions += 1;
+            } else {
+                out.missing.push(day);
+            }
+        }
+        day = civil_from_days(days_from_civil(day) + 1);
+    }
+    for date in held {
+        if days_from_civil(*date) >= days_from_civil(start)
+            && days_from_civil(*date) < days_from_civil(end)
+            && !expected.contains(date)
+        {
+            out.unexpected.push(*date);
+        }
+    }
+    out
 }
 
 #[cfg(test)]

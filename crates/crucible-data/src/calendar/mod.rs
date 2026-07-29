@@ -70,7 +70,8 @@ pub use eastern::{EasternTimeError, eastern_wall_clock_to_ts};
 pub use error::CalendarError;
 
 use table::{
-    CalendarSpec, CalendarTable, Effect, LocalTime, TABLE_SCHEMA_VERSION, add_days, is_weekday,
+    CalendarSpec, CalendarTable, Effect, LocalTime, SessionShape, TABLE_SCHEMA_VERSION, add_days,
+    is_weekday,
 };
 
 /// Re-exported so callers need not reach into `ingest` for the date type the
@@ -83,7 +84,13 @@ use crate::ingest::window::days_from_civil;
 const DAYS_PER_YEAR: f64 = 365.2425;
 
 /// The bundled calendar tables, compiled in rather than read from disk.
-const BUNDLED: &[(&str, &str)] = &[("cme_globex.toml", include_str!("tables/cme_globex.toml"))];
+const BUNDLED: &[(&str, &str)] = &[
+    ("cme_globex.toml", include_str!("tables/cme_globex.toml")),
+    (
+        "us_equity_options.toml",
+        include_str!("tables/us_equity_options.toml"),
+    ),
+];
 
 /// Which named session an instant falls in.
 ///
@@ -166,6 +173,7 @@ pub struct Calendar {
     description: String,
     tz: chrono_tz::Tz,
     roots: Vec<String>,
+    shape: SessionShape,
     open_local: LocalTime,
     close_local: LocalTime,
     halts_local: Vec<(LocalTime, LocalTime)>,
@@ -316,7 +324,11 @@ impl Calendar {
         let seconds = i64::from(local.hour()) * 3600
             + i64::from(local.minute()) * 60
             + i64::from(local.second());
-        if seconds >= self.open_local.seconds_of_day() {
+        // Only an overnight market attributes the evening to tomorrow. A
+        // same-day market's trade date is simply the calendar date — rolling
+        // it forward at 09:30 would label an entire session with the next
+        // day's date.
+        if self.shape == SessionShape::Overnight && seconds >= self.open_local.seconds_of_day() {
             add_days(date, 1)
         } else {
             date
@@ -383,7 +395,11 @@ impl Calendar {
             }
             _ => self.close_local,
         };
-        let start = self.instant(add_days(date, -1), self.open_local);
+        let open_date = match self.shape {
+            SessionShape::Overnight => add_days(date, -1),
+            SessionShape::SameDay => date,
+        };
+        let start = self.instant(open_date, self.open_local);
         let end = self.instant(date, close);
         if end <= start {
             return Vec::new();
@@ -600,12 +616,23 @@ impl Calendar {
             &spec.id,
             "session.rth_close_local",
         )?;
-        if close_local >= open_local {
-            return Err(invalid(format!(
-                "the session closes at {}:{:02} and opens at {}:{:02}; a trading day must open on \
-                 the previous calendar day and close on its own",
-                close_local.hour, close_local.minute, open_local.hour, open_local.minute
-            )));
+        match spec.session.shape {
+            SessionShape::Overnight if close_local >= open_local => {
+                return Err(invalid(format!(
+                    "the session closes at {}:{:02} and opens at {}:{:02}; an `overnight` trading \
+                     day must open on the previous calendar day and close on its own. If this \
+                     market opens and closes on the same day, say `shape = \"same_day\"`",
+                    close_local.hour, close_local.minute, open_local.hour, open_local.minute
+                )));
+            }
+            SessionShape::SameDay if close_local <= open_local => {
+                return Err(invalid(format!(
+                    "the session opens at {}:{:02} and closes at {}:{:02}; a `same_day` trading \
+                     day must close after it opens",
+                    open_local.hour, open_local.minute, close_local.hour, close_local.minute
+                )));
+            }
+            _ => {}
         }
         if rth_close_local <= rth_open_local {
             return Err(invalid(
@@ -739,6 +766,7 @@ impl Calendar {
             description: spec.description,
             tz,
             roots: spec.roots,
+            shape: spec.session.shape,
             open_local,
             close_local,
             halts_local,

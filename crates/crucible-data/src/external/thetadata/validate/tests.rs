@@ -552,3 +552,79 @@ fn a_row_with_the_wrong_field_count_refuses_the_file() {
     .expect_err("four fields against a six-column pin");
     assert!(matches!(err, ThetaError::MalformedRow { .. }), "{err}");
 }
+
+// -------------------------------------------------------------------------
+// §4.4 edge 3 — coverage against the session calendar (D-0058).
+// -------------------------------------------------------------------------
+
+fn day(year: i64, month: u32, day: u32) -> CivilDate {
+    CivilDate { year, month, day }
+}
+
+fn us_calendar() -> crate::calendar::Calendar {
+    crate::calendar::Calendar::by_id("us_equity_options").expect("bundled")
+}
+
+// One ordinary week: five sessions, all held, nothing missing.
+#[test]
+fn a_complete_week_reports_full_coverage() {
+    let held: BTreeSet<CivilDate> = (2..=5).map(|d| day(2024, 1, d)).collect();
+    let out = coverage_vs_calendar(&us_calendar(), day(2024, 1, 1), day(2024, 1, 7), &held);
+    // 1 Jan 2024 was New Year's Day (Monday) — a holiday, so four sessions.
+    assert_eq!(out.expected_sessions, 4);
+    assert_eq!(out.present_sessions, 4);
+    assert!(out.is_clean());
+    assert_eq!(out.coverage(), Some(1.0));
+}
+
+// PLANTED CONTROL: a session the vendor did not serve. This is the whole point
+// of the edge — `verify` re-hashes bytes and `layout-check` reads paths, and
+// neither can see a missing Tuesday.
+#[test]
+fn planted_missing_session_is_found_and_named() {
+    let mut held: BTreeSet<CivilDate> = (2..=5).map(|d| day(2024, 1, d)).collect();
+    held.remove(&day(2024, 1, 4));
+    let out = coverage_vs_calendar(&us_calendar(), day(2024, 1, 1), day(2024, 1, 7), &held);
+    assert_eq!(out.missing, vec![day(2024, 1, 4)]);
+    assert_eq!(out.present_sessions, 3);
+    assert!(!out.is_clean());
+    assert_eq!(out.coverage(), Some(0.75));
+}
+
+// The check runs backwards too. Real data is evidence and a calendar is a
+// claim, so data on a day the calendar calls closed indicts the calendar —
+// exactly how D-0040 falsified CME's published 15:15 CT halt.
+#[test]
+fn planted_data_on_a_closed_day_is_reported_as_unexpected() {
+    let mut held: BTreeSet<CivilDate> = (2..=5).map(|d| day(2024, 1, d)).collect();
+    held.insert(day(2024, 1, 1));
+    let out = coverage_vs_calendar(&us_calendar(), day(2024, 1, 1), day(2024, 1, 7), &held);
+    assert_eq!(out.unexpected, vec![day(2024, 1, 1)]);
+    assert!(!out.is_clean(), "a calendar this contradicts needs a look");
+}
+
+// Would have fired on the Hurricane Sandy week had the CME calendar been
+// borrowed: Globex traded 29-30 October 2012 and the NYSE did not, so those
+// two dates must NOT be expected of an equity vendor.
+#[test]
+fn the_sandy_closure_is_not_expected_of_an_equity_vendor() {
+    let held: BTreeSet<CivilDate> = [day(2012, 10, 31), day(2012, 11, 1), day(2012, 11, 2)]
+        .into_iter()
+        .collect();
+    let out = coverage_vs_calendar(&us_calendar(), day(2012, 10, 29), day(2012, 11, 3), &held);
+    assert_eq!(out.expected_sessions, 3, "Wed-Fri only");
+    assert!(
+        out.is_clean(),
+        "borrowing the CME calendar would have called Mon+Tue missing: {:?}",
+        out.missing
+    );
+}
+
+// An empty window is unmeasured, not perfect (§0.4 again).
+#[test]
+fn an_empty_window_reports_unmeasured_coverage() {
+    let held = BTreeSet::new();
+    let out = coverage_vs_calendar(&us_calendar(), day(2024, 1, 6), day(2024, 1, 8), &held);
+    assert_eq!(out.expected_sessions, 0, "a weekend");
+    assert_eq!(out.coverage(), None, "not Some(1.0)");
+}

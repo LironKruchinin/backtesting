@@ -695,3 +695,32 @@ propose a superseding entry — don't silently diverge.
   rather than read, because §3.3's silent-parameter behaviour means only a bad
   *value* announces itself — an unknown *parameter* returns 200 and is ignored.
   `greeks/first_order` additionally refuses `expiration=*`.
+- **D-0058** (2026-07-29) — **A session may open on its own calendar day, and
+  US equities/options get their own bundled calendar.** The loader hard-refused
+  any table whose close was not strictly before its open — "a trading day must
+  open on the previous calendar day and close on its own" — which encoded *every
+  market is CME* into the one module whose docs claim to describe exchanges in
+  general. `[calendar.session] shape` now selects `overnight` (the default, so
+  every existing table keeps its exact meaning and no golden value moves) or
+  `same_day`. Three behaviours are shape-dependent and all three were wrong for
+  a same-day market: the open date of a session, whether the evening belongs to
+  tomorrow's trade date, and which inversion of open/close is an error.
+  **Why a second table rather than reusing `cme_globex_equity_index`:** because
+  the trading-day sets genuinely differ inside the ThetaData span, and borrowing
+  would have manufactured findings. The NYSE was closed for two consecutive days
+  for Hurricane Sandy (2012-10-29 and 30) while Globex traded electronically and
+  cancelled only its floor session; the two national days of mourning
+  (2018-12-05, 2025-01-09) closed equities outright where CME ran an abbreviated
+  session; and CME abbreviates Good Friday when payrolls land on it while the
+  NYSE simply closes. Reusing CME's calendar would have reported four real
+  closures as missing vendor data — plausibly, and wrongly. There is a test
+  asserting the disagreement in both directions.
+  **The table claims only the roots whose hours it describes**: SPY, QQQ, IWM,
+  DIA. SPX/SPXW/VIX/NDX/RUT share the holiday set but not the session — Cboe
+  global hours, 16:15 ET closes — so claiming them would give `is_open` and
+  `bars_per_year` a confident wrong answer for exactly the roots this project
+  cares most about. `for_instrument` returns `None` for them by design, and
+  intraday index-option hours are a future table with its own sourced session
+  block, never a `roots` line added here. The holiday set is validated by a
+  hand-derived count: 2024 holds 262 weekdays minus ten weekday holidays =
+  **252 sessions**, the figure the exchange publishes.

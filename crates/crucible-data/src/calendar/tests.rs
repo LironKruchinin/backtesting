@@ -491,3 +491,263 @@ effect = { kind = "early_close", close_local = "23:00" }"#,
         Err(CalendarError::Invalid { .. })
     ));
 }
+
+// ---------------------------------------------------------------------------
+// The same-day session shape, and the bundled US equity/options table (D-0058).
+// ---------------------------------------------------------------------------
+
+/// Loads the bundled US equity calendar, or explains why it could not.
+fn us() -> Calendar {
+    Calendar::by_id("us_equity_options").expect("the bundled table must parse and be bundled")
+}
+
+// A cash-equity session opens and closes on the same date. Before this existed
+// the loader hard-refused such a table — "a trading day must open on the
+// previous calendar day" — which encoded "every market is CME" into a module
+// whose docs claim to describe exchanges generally.
+#[test]
+fn a_same_day_calendar_has_no_overnight_leg() {
+    let cal = us();
+    // 2024-01-02 is EST (UTC-5). Unix days to 2024-01-02 = 19_724, so midnight
+    // UTC is 19_724 * 86_400 = 1_704_153_600. 09:30 ET = 14:30 UTC = +52_200s;
+    // 16:00 ET = 21:00 UTC = +75_600s.
+    let midnight_utc = 1_704_153_600i64;
+    let open = Ts((midnight_utc + 52_200) * 1_000_000_000);
+    let before_open = Ts((midnight_utc + 52_100) * 1_000_000_000);
+    let close = Ts((midnight_utc + 75_600) * 1_000_000_000);
+    let midday = Ts((midnight_utc + 60_000) * 1_000_000_000);
+
+    assert!(cal.is_open(open), "09:30 ET is open");
+    assert!(cal.is_open(midday));
+    assert!(!cal.is_open(before_open), "09:28 ET is not open");
+    assert!(!cal.is_open(close), "16:00 ET is the close, exclusive");
+
+    // The decisive one: an overnight calendar would call 03:00 ET open,
+    // because the session that started the previous evening is still running.
+    let overnight = Ts((midnight_utc + 3 * 3600) * 1_000_000_000);
+    assert!(
+        !cal.is_open(overnight),
+        "cash equities do not trade at 03:00"
+    );
+
+    assert_eq!(cal.session_of(midday), SessionId::Regular);
+    assert_eq!(cal.session_of(overnight), SessionId::Closed);
+}
+
+// An overnight calendar attributes the evening to tomorrow's trade date. A
+// same-day one must not: rolling forward at 09:30 would label a whole session
+// with the next day's date.
+#[test]
+fn a_same_day_calendar_attributes_the_session_to_its_own_date() {
+    let cal = us();
+    let midnight_utc = 1_704_153_600i64;
+    let midday = Ts((midnight_utc + 60_000) * 1_000_000_000);
+    assert_eq!(
+        cal.trading_day(midday),
+        CivilDate {
+            year: 2024,
+            month: 1,
+            day: 2
+        }
+    );
+}
+
+// Hand-derived, and the single best check that the holiday set is right.
+// 2024 is a leap year beginning on a Monday, so it holds 366 days = 52 weeks
+// + Monday + Tuesday, giving 52*5 + 2 = 262 weekdays. Ten NYSE holidays fall
+// on weekdays that year: New Year (Mon 1 Jan), MLK (15 Jan), Washington's
+// Birthday (19 Feb), Good Friday (29 Mar), Memorial (27 May), Juneteenth
+// (Wed 19 Jun), Independence (Thu 4 Jul), Labor (2 Sep), Thanksgiving
+// (28 Nov) and Christmas (Wed 25 Dec). 262 - 10 = 252, the figure the
+// exchange publishes.
+#[test]
+fn twenty_twenty_four_has_two_hundred_and_fifty_two_sessions() {
+    let cal = us();
+    let mut day = CivilDate {
+        year: 2024,
+        month: 1,
+        day: 1,
+    };
+    let end = CivilDate {
+        year: 2025,
+        month: 1,
+        day: 1,
+    };
+    let mut sessions = 0;
+    while days_from_civil(day) < days_from_civil(end) {
+        if cal.is_trading_day(day) {
+            sessions += 1;
+        }
+        day = add_days(day, 1);
+    }
+    assert_eq!(sessions, 252);
+}
+
+// THE divergence that justifies this file existing rather than pointing
+// ThetaData at the CME table. The NYSE closed for two consecutive days; CME
+// Globex kept trading electronically and only cancelled its floor session, so
+// `cme_globex.toml` records these dates as early closes. Reusing CME's
+// calendar would have reported two real closures as missing data.
+#[test]
+fn hurricane_sandy_closed_the_equity_market_but_not_globex() {
+    let equities = us();
+    let futures = Calendar::by_id("cme_globex_equity_index").expect("parses and is bundled");
+
+    for day in [29, 30] {
+        let date = CivilDate {
+            year: 2012,
+            month: 10,
+            day,
+        };
+        assert!(
+            !equities.is_trading_day(date),
+            "2012-10-{day}: the NYSE was closed"
+        );
+        assert!(
+            futures.is_trading_day(date),
+            "2012-10-{day}: Globex traded electronically — this is the disagreement"
+        );
+    }
+}
+
+// Days of national mourning are the same story: a full equity closure against
+// an abbreviated CME session.
+#[test]
+fn days_of_national_mourning_close_the_equity_market_outright() {
+    let cal = us();
+    for (year, month, day) in [(2018, 12, 5), (2025, 1, 9)] {
+        assert!(
+            !cal.is_trading_day(CivilDate { year, month, day }),
+            "{year}-{month:02}-{day:02} was a full closure"
+        );
+    }
+}
+
+// Juneteenth is rule-limited rather than back-dated. Applying it to 2012-2021
+// would delete ten sessions that genuinely traded, which is the error that
+// hides — a missing session looks like a vendor gap, not like a calendar bug.
+#[test]
+fn juneteenth_closes_only_from_2022() {
+    let cal = us();
+    // 2021-06-18 was a Friday and an ordinary session; the holiday did not
+    // exist yet. (19 June 2021 was a Saturday.)
+    assert!(cal.is_trading_day(CivilDate {
+        year: 2021,
+        month: 6,
+        day: 18
+    }));
+    // First observance: Monday 20 June 2022, since 19 June fell on a Sunday.
+    assert!(!cal.is_trading_day(CivilDate {
+        year: 2022,
+        month: 6,
+        day: 20
+    }));
+    assert!(!cal.is_trading_day(CivilDate {
+        year: 2024,
+        month: 6,
+        day: 19
+    }));
+}
+
+// The NYSE does NOT close on the Friday before a Saturday New Year's Day. The
+// generic federal nearest-weekday rule would close 2021-12-31, deleting a real
+// session — one of the few places US equity observance genuinely differs.
+#[test]
+fn a_saturday_new_year_does_not_close_the_preceding_friday() {
+    let cal = us();
+    assert!(
+        cal.is_trading_day(CivilDate {
+            year: 2021,
+            month: 12,
+            day: 31
+        }),
+        "31 Dec 2021 traded a full session"
+    );
+    // Good Friday, by contrast, closes every year in this window — unlike CME,
+    // which runs an abbreviated session when payrolls land on it.
+    assert!(!cal.is_trading_day(CivilDate {
+        year: 2024,
+        month: 3,
+        day: 29
+    }));
+}
+
+#[test]
+fn the_day_after_thanksgiving_is_an_early_close_not_a_closure() {
+    let cal = us();
+    let date = CivilDate {
+        year: 2024,
+        month: 11,
+        day: 29,
+    };
+    assert!(cal.is_trading_day(date), "it trades");
+    assert_eq!(
+        cal.day_effect(date),
+        DayEffect::EarlyClose {
+            name: "Day after Thanksgiving".to_owned(),
+            close_local: "13:00".to_owned()
+        }
+    );
+}
+
+// The table claims only the roots whose hours it actually describes. Index
+// options keep the same holidays but different hours, so claiming them would
+// give `is_open` a confident wrong answer for exactly the roots this project
+// cares most about.
+#[test]
+fn the_us_table_claims_etf_roots_and_declines_index_roots() {
+    for root in ["SPY", "QQQ", "IWM", "DIA"] {
+        let found = Calendar::for_instrument(&InstrumentId::new(root))
+            .expect("parses")
+            .expect("claimed");
+        assert_eq!(found.id(), "us_equity_options", "{root}");
+    }
+    for root in ["SPX", "SPXW", "VIX", "NDX", "RUT"] {
+        assert!(
+            Calendar::for_instrument(&InstrumentId::new(root))
+                .expect("parses")
+                .is_none(),
+            "{root} must not be claimed — its hours are not this template's"
+        );
+    }
+    // And the CME table still owns its own roots.
+    let es = Calendar::for_instrument(&InstrumentId::new("ESH4"))
+        .expect("parses")
+        .expect("claimed");
+    assert_eq!(es.id(), "cme_globex_equity_index");
+}
+
+// A same-day table whose close precedes its open is as wrong as an overnight
+// table whose does not, and must be refused rather than silently producing a
+// negative-length session.
+#[test]
+fn a_same_day_table_with_an_inverted_session_is_refused() {
+    let bad = r#"
+schema_version = 1
+
+[[calendar]]
+id = "backwards"
+description = "closes before it opens"
+timezone = "America/New_York"
+roots = ["ZZZ"]
+valid_from = "2020-01-01"
+sources = ["fixture"]
+
+[calendar.session]
+shape = "same_day"
+open_local = "16:00"
+close_local = "09:30"
+rth_open_local = "09:30"
+rth_close_local = "16:00"
+source = "fixture"
+
+[calendar.reference_span]
+start = "2020-01-01"
+end = "2021-01-01"
+rationale = "fixture"
+"#;
+    assert!(matches!(
+        Calendar::parse_table("fixture", bad),
+        Err(CalendarError::Invalid { .. })
+    ));
+}
