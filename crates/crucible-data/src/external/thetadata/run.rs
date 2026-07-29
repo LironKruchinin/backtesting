@@ -22,6 +22,15 @@
 //! worst case is an orphan file with no line, which resume simply re-fetches
 //! and overwrites.
 //!
+//! **That ordering constraint has now paid for itself twice, measured.** The T0
+//! tranche was killed mid-run on two separate occasions — once to fix serial
+//! fetching, once to fix a chunk-size barrier — and both times left **zero
+//! orphan `.partial` files** (508 and 572 inventory lines respectively), with
+//! the restart planning exactly 82,981 of 83,489 requests: precisely what had
+//! not been done, and nothing that had. Write-to-temp-then-rename and
+//! append-after-placement are what make a kill a non-event rather than a
+//! forensic exercise.
+//!
 //! ## One bad day must not kill a 60,000-request run
 //!
 //! A validation failure refuses **that file**, records it in the refusal ledger,

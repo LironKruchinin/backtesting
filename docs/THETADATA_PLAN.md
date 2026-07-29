@@ -541,7 +541,44 @@ it is fixed.** `is_trading_day` is untouched, so day-level coverage and every
 T0 reconciliation edge are unaffected (D-0059).
 
 **Before T1** — measured SPX/QQQ/IWM per-day sizes · Databento blitz at terminal
-state (`statistics` still at `submitted`).
+state (`statistics` still at `submitted`) · **streaming completions in the
+acquisition driver**.
+
+*Streaming completions, deferred to pre-T1 deliberately.* `run_tranche` fetches
+in chunks of 8 and waits for the whole chunk, so it still pays the slowest draw
+in each — bounded now, but not zero. The fix is to process each response as it
+arrives rather than by chunk, which is safe because **resume keys on the request
+string and not on position**: nothing anywhere requires results to be handled in
+order. It is *not* worth doing mid-T0. A healthy acquisition running at
+1.33–1.68 req/s finishes overnight unattended, and restarting it to chase the
+measured 3.04 req/s ceiling risks hours to save hours. T1 is where the change
+pays: far more requests, far larger payloads, and §7.2's whole-chain 1-minute
+days are exactly the shape whose tail latency a chunk barrier amplifies worst.
+
+### 8.1 When the T0 validation gate report is written
+
+Two things must appear in it, recorded here so they survive the session that
+found them.
+
+**A worked example of present-but-empty.** `open_interest` for **SPY on
+2014-11-11** returned no data: the inventory holds a line with `file_path:""`
+and `row_count:0`, and there is no Parquet file. 2014-11-11 is Veterans Day,
+which the **NYSE trades** — the bond market closes, the stock market does not,
+and `us_equity_options` has no Veterans Day entry — so the calendar is right and
+this is a genuine vendor gap on one root-day. It is neither a calendar error nor
+a silent hole: the request was asked, answered, and recorded. Coverage must
+report it as a **present-but-empty session**, not as a missing one, and the
+distinction has to be visible in the report rather than collapsed. It is also
+the first evidence on real data that the 472 path works — without that line,
+every future resume would re-ask the same empty question until the subscription
+ends.
+
+**Carry-forward tracked items**, both open and neither blocking T0:
+
+| Item | Status | Blocks |
+|---|---|---|
+| July-3rd conditional early close | six phantom 13:00 closes; test asserts the current wrong behaviour so a fix must flip it (D-0059) | the **session-hours layer** — equity `bars_per_year`, T1 intraday minute grids |
+| Streaming completions | driver still barriers per chunk of 8 | nothing; **pre-T1** throughput |
 
 ---
 
