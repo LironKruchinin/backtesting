@@ -832,11 +832,28 @@ rationale = "fixture"
     ));
 }
 
-// The six dates the `weekday_before` vocabulary cannot exclude. Named so that
-// the gap is written down rather than discovered, and so that a future rule
-// vocabulary able to express "only when 4 July falls Tue-Fri" has a list to
-// verify against. Worth ~18h across ~3,539 sessions and zero effect on the
-// trading-day set (D-0059).
+// DEFERRED DEFECT, asserted as it currently behaves — WRONGLY — on purpose.
+//
+// These six dates are NOT early closes at the real exchange. The NYSE (and
+// Cboe, whose 2026 schedule confirms it) closes early on 3 July only when
+// 4 July falls Tuesday-Friday; when it lands on a weekend or a Monday there is
+// no early close at all. `HolidayRule::WeekdayBefore` has no way to express
+// that condition, so the table fires anyway.
+//
+// **The fix is a rule-engine extension**: a `WeekdayBefore` variant carrying an
+// anchor-weekday predicate — roughly `only_when_anchor_weekday_in = ["tuesday",
+// "wednesday", "thursday", "friday"]` — applied before the step-back. Whoever
+// lands it must consciously flip this test, which is the entire point of
+// asserting the wrong behaviour rather than skipping the dates: a defect nobody
+// is forced to look at is a defect that survives.
+//
+// **Scope of the deferral.** This touches only the HOURS layer. It changes
+// `open_intervals`, `day_effect` and therefore `bars_per_year`; it does not
+// touch `is_trading_day`, so day-level coverage and every ThetaData
+// reconciliation edge are unaffected and T0 is unaffected. The gate ledger
+// carries it as an open defect **blocking the session-hours layer**: equity
+// `bars_per_year` and T1's intraday minute grids do not run over a table with
+// six known phantom early closes (D-0059).
 #[test]
 fn the_known_spurious_july_early_closes_are_exactly_these_six() {
     let cal = us();

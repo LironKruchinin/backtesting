@@ -94,6 +94,39 @@ pub fn run_floors(_args: &ThetaFloorsArgs) -> i32 {
 #[cfg(feature = "thetadata")]
 pub use enabled::run_floors;
 
+/// Arguments for `theta-pull`.
+#[derive(Debug, clap::Args)]
+pub struct ThetaPullArgs {
+    /// First session to acquire, `YYYY-MM-DD`.
+    #[arg(long, default_value = "2012-06-01")]
+    pub start: String,
+    /// Last session, exclusive, `YYYY-MM-DD`.
+    #[arg(long, default_value = "2026-07-01")]
+    pub end: String,
+    /// Override the tranche's roots, comma separated.
+    #[arg(long)]
+    pub roots: Option<String>,
+    /// Actually acquire. Without this the command is a dry run and fetches
+    /// nothing — the Databento plan-then-execute pattern (D-0024).
+    #[arg(long)]
+    pub execute: bool,
+    /// Base URL of the Theta Terminal.
+    #[arg(long)]
+    pub base_url: Option<String>,
+}
+
+#[cfg(not(feature = "thetadata"))]
+pub fn run_pull(_args: &ThetaPullArgs) -> i32 {
+    eprintln!(
+        "error: `theta-pull` needs a build with the ThetaData client.\n\
+         \n    cargo run -p crucible-cli --features thetadata -- theta-pull"
+    );
+    EXIT_NO_FEATURE
+}
+
+#[cfg(feature = "thetadata")]
+pub use enabled::run_pull;
+
 #[cfg(feature = "thetadata")]
 mod enabled {
     use std::collections::BTreeMap;
@@ -107,7 +140,7 @@ mod enabled {
     use parquet::file::reader::{FileReader, SerializedFileReader};
     use parquet::record::Field;
 
-    use super::{ThetaFloorsArgs, ThetaGoldenArgs};
+    use super::{ThetaFloorsArgs, ThetaGoldenArgs, ThetaPullArgs};
 
     const EXIT_OK: i32 = 0;
     const EXIT_FAILED: i32 = 4;
@@ -683,6 +716,214 @@ mod enabled {
     fn render_day(epoch_day: i64) -> String {
         let date = crucible_data::ingest::window::civil_from_days(epoch_day);
         format!("{:04}-{:02}-{:02}", date.year, date.month, date.day)
+    }
+
+    /// Plans a tranche, prints the dry run, and executes only if asked and only
+    /// if every guard clears.
+    pub fn run_pull(args: &ThetaPullArgs) -> i32 {
+        let data_dir = match crate::pull::data_dir() {
+            Ok(dir) => dir,
+            Err(message) => {
+                eprintln!("error: {message}");
+                return EXIT_FAILED;
+            }
+        };
+        let calendar = match crucible_data::calendar::Calendar::by_id("us_equity_options") {
+            Ok(calendar) => calendar.into_trading_days(),
+            Err(e) => {
+                eprintln!("error: {e}");
+                return EXIT_FAILED;
+            }
+        };
+        let (Some(start), Some(end)) = (parse_civil(&args.start), parse_civil(&args.end)) else {
+            eprintln!("error: --start and --end must be YYYY-MM-DD");
+            return EXIT_FAILED;
+        };
+
+        let mut spec = crucible_data::external::thetadata::plan::t0(start, end);
+        if let Some(roots) = &args.roots {
+            spec.roots = roots
+                .split(',')
+                .map(str::trim)
+                .filter(|r| !r.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
+        let plan = spec.expand(&calendar);
+        let inventory = crucible_data::external::thetadata::Inventory::open(&data_dir);
+
+        let theta_dir = data_dir.join("external").join("thetadata");
+        let existing = directory_bytes(&theta_dir);
+        let free = free_bytes(&data_dir);
+
+        let report = match plan.dry_run_report(&inventory, existing, free) {
+            Ok(report) => report,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return EXIT_FAILED;
+            }
+        };
+        println!("{report}");
+
+        if !args.execute {
+            println!("\nDry run only. Add --execute to acquire.");
+            return EXIT_OK;
+        }
+        if !report.may_execute() {
+            eprintln!("\nrefusing to execute: a guard is not clear");
+            return EXIT_FAILED;
+        }
+
+        let outstanding = match plan.outstanding(&inventory) {
+            Ok(outstanding) => outstanding,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return EXIT_FAILED;
+            }
+        };
+        let client = match ThetaClient::open(
+            args.base_url
+                .clone()
+                .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned()),
+            8,
+        ) {
+            Ok(client) => client,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return EXIT_FAILED;
+            }
+        };
+
+        println!("\nexecuting {} request(s)…", outstanding.len());
+        // The one OS-clock read in the workspace, in a bin target for exactly
+        // that reason (D-0032). Taken once, so every line this run appends
+        // carries the same `fetched_ts` rather than a drifting one.
+        let now_ts = {
+            use crucible_data::ingest::clock::Clock;
+            crate::pull::SystemClock.now_ts().0
+        };
+        let mut last_percent = u64::MAX;
+        let result = crucible_data::external::thetadata::run_tranche(
+            &client,
+            &plan,
+            &outstanding,
+            &inventory,
+            &data_dir,
+            now_ts,
+            |request, done, total| {
+                let percent = done.checked_mul(100).and_then(|n| n.checked_div(total));
+                let percent = percent.unwrap_or(100);
+                if percent != last_percent {
+                    last_percent = percent;
+                    println!(
+                        "  {percent:>3}%  {done}/{total}  {} {} {}",
+                        request.root,
+                        crucible_data::external::thetadata::run::type_segment(request.endpoint),
+                        request.date
+                    );
+                }
+            },
+        );
+
+        match result {
+            Ok(run) => {
+                println!("\ntranche complete");
+                print!("{run}");
+                if run.halted.is_some() {
+                    return EXIT_FAILED;
+                }
+                if run.refusals.is_empty() {
+                    EXIT_OK
+                } else {
+                    // Findings exit 4, like `qa` and `verify`: a scheduled job
+                    // that reads "38 refusals" as success is worse than none.
+                    EXIT_FAILED
+                }
+            }
+            Err(e) => {
+                eprintln!("\nrun ended: {e}");
+                EXIT_FAILED
+            }
+        }
+    }
+
+    /// Total bytes under a directory, recursively. Missing reads as zero.
+    fn directory_bytes(path: &std::path::Path) -> u64 {
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return 0;
+        };
+        entries
+            .flatten()
+            .map(|entry| match entry.file_type() {
+                Ok(t) if t.is_dir() => directory_bytes(&entry.path()),
+                Ok(_) => entry.metadata().map(|m| m.len()).unwrap_or(0),
+                Err(_) => 0,
+            })
+            .sum()
+    }
+
+    /// Free bytes on the volume holding `path`, or `None` when it cannot be
+    /// determined.
+    ///
+    /// `None` is a real answer and the guard refuses on it: a run that cannot
+    /// check the disk must not assume it would have passed. There is no std API
+    /// for this, and adding a dependency to a library crate for it would be out
+    /// of §6's policy — so a bin target asks the OS the way an operator would,
+    /// which is exactly the kind of thing bin targets are for (D-0022).
+    fn free_bytes(path: &std::path::Path) -> Option<u64> {
+        let display = path.display().to_string();
+        #[cfg(windows)]
+        let output = {
+            // Pull the drive letter out here rather than in PowerShell: the
+            // quoting needed to do it there is exactly the kind of cleverness
+            // that fails silently and lands in the "could not be measured"
+            // branch, which then refuses a perfectly healthy run.
+            let letter = display
+                .chars()
+                .next()
+                .filter(char::is_ascii_alphabetic)
+                .ok_or(())
+                .ok()?;
+            std::process::Command::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    &format!("(Get-PSDrive -Name {letter}).Free"),
+                ])
+                .output()
+                .ok()?
+        };
+        #[cfg(not(windows))]
+        let output = std::process::Command::new("df")
+            .args(["-k", "--output=avail", &display])
+            .output()
+            .ok()?;
+
+        let text = String::from_utf8_lossy(&output.stdout);
+        #[cfg(windows)]
+        {
+            text.trim().lines().last()?.trim().parse::<u64>().ok()
+        }
+        #[cfg(not(windows))]
+        {
+            text.lines()
+                .nth(1)?
+                .trim()
+                .parse::<u64>()
+                .ok()
+                .map(|kb| kb * 1024)
+        }
+    }
+
+    /// `YYYY-MM-DD` into a civil date.
+    fn parse_civil(text: &str) -> Option<crucible_data::calendar::CivilDate> {
+        let mut parts = text.split('-');
+        Some(crucible_data::calendar::CivilDate {
+            year: parts.next()?.parse().ok()?,
+            month: parts.next()?.parse().ok()?,
+            day: parts.next()?.parse().ok()?,
+        })
     }
     /// Keeps `PathBuf` in scope for the argument type without an unused import.
     const _: Option<PathBuf> = None;

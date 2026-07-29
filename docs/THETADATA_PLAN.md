@@ -499,6 +499,17 @@ that drifts shows up as a cell mismatch rather than as a plausible file.
 
 ### OPEN
 
+**OPEN DEFECT — blocks the session-hours layer, not T0.** `us_equity_options`
+fires a phantom 13:00 early close on **2015-07-02, 2016-07-01, 2020-07-02,
+2021-07-02, 2022-07-01, 2026-07-02**. The exchange closes early on 3 July only
+when 4 July falls Tue-Fri, and `HolidayRule::WeekdayBefore` cannot express the
+condition; the fix is a rule-engine extension carrying an anchor-weekday
+predicate. Deferred deliberately, with a test asserting the current wrong
+behaviour so a fix must consciously flip it. **Consequence: equity
+`bars_per_year` and T1's intraday minute grids do not run over this table until
+it is fixed.** `is_trading_day` is untouched, so day-level coverage and every
+T0 reconciliation edge are unaffected (D-0059).
+
 **Before T0** — the acquisition driver (`external::thetadata::plan`): tranche
 expansion, resume by inventory diff, the free-disk guard, and the dry run T0
 fires through. Nothing else.

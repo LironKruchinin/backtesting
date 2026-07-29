@@ -105,6 +105,8 @@ enum Command {
     ThetaGolden(theta::ThetaGoldenArgs),
     /// Bisect each option root's greeks history floor.
     ThetaFloors(theta::ThetaFloorsArgs),
+    /// Acquire a ThetaData tranche. Dry run unless --execute.
+    ThetaPull(theta::ThetaPullArgs),
 }
 
 fn main() {
@@ -132,6 +134,7 @@ fn main() {
         Some(Command::Rolls(args)) => rolls::run(&args),
         Some(Command::ThetaGolden(args)) => theta::run(&args),
         Some(Command::ThetaFloors(args)) => theta::run_floors(&args),
+        Some(Command::ThetaPull(args)) => theta::run_pull(&args),
         // Bare `crucible` stays a zero-exit help screen: it is what a new
         // reader types first, and it has not failed at anything.
         None => {

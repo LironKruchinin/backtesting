@@ -133,10 +133,15 @@ pub struct PullArgs {
 /// [`Clock`](crucible_data::ingest::clock::Clock) in the workspace that
 /// touches the OS, kept here because library crates read no clock (D-0015,
 /// CLAUDE.md §2.2).
-#[cfg(feature = "databento")]
+///
+/// Gated on either acquisition feature rather than on `databento` alone: it is
+/// not a Databento detail, it is *the* clock, and `thetadata` needs the same
+/// one to stamp `fetched_ts` on an inventory line. Two OS-clock implementations
+/// would be exactly the duplication D-0032 exists to prevent.
+#[cfg(any(feature = "databento", feature = "thetadata"))]
 pub struct SystemClock;
 
-#[cfg(feature = "databento")]
+#[cfg(any(feature = "databento", feature = "thetadata"))]
 impl crucible_data::ingest::clock::Clock for SystemClock {
     #[expect(
         clippy::disallowed_methods,
