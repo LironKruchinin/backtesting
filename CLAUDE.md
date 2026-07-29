@@ -227,7 +227,7 @@ when the code that uses them lands**, never speculatively. Blessed set:
 | `rayon` | funnel only | run-level parallelism |
 | `duckdb` | funnel only | registry/results store |
 | `serde`, `toml`, `serde_json` | funnel, data, cli | configs, manifest |
-| `blake3` | funnel, data | config identity, archive checksums |
+| `blake3` | funnel, data, cli | config identity, archive checksums. `cli` because it is where a combo config is loaded today (D-0060); `crucible-strategies` renders the canonical form and never hashes it |
 | `dbn` | data only | DBN decoding (sync). Consumed via the `databento::dbn` **re-export**, never pinned separately — a decoder that drifts from the client that wrote the file is a silent bug (D-0031) |
 | `databento` | data, `databento` feature, `ingest::databento` only | acquisition; async |
 | `tokio` | data, `databento` feature, `ingest::databento` only | current-thread runtime behind the sync `BatchProvider` seam (D-0025) |
@@ -431,6 +431,14 @@ cargo run -p crucible-cli -- layout-check      # is the tree the shape DATA_LAYO
 cargo run -p crucible-cli --features databento -- transcode
 cargo run -p crucible-cli -- backtest --instrument ESH4 --timeframe 1m \
   --start 2024-01-01 --end 2024-02-01 --fast 20 --slow 50
+
+# The combo path: a strategy defined in TOML rather than in Rust. Expansion
+# alone spends nothing and touches no archive; `--run` replays every combo on
+# the config's declared data source.
+cargo run -p crucible-cli -- combo --config configs/example-combo.toml
+cargo run -p crucible-cli -- combo --config configs/combo-smoke.toml --run
+cargo run -p crucible-cli -- combo --config configs/combo-smoke.toml \
+  --run --hash-only                            # the grid determinism gate
 
 # The acquisition path. `--features databento` is required (D-0025); without
 # it `pull` exits 2 saying so. A pull is a DRY RUN by default and spends

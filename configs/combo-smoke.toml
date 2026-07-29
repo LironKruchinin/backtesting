@@ -1,0 +1,64 @@
+# The runnable combo config: a 6-point SMA-crossover grid on a seeded random
+# walk. This is the null harness, not an idea — there is no edge in a random
+# walk, so anything this prints that looks like one is a bug in the engine.
+#
+#   crucible combo --config configs/combo-smoke.toml            # expand
+#   crucible combo --config configs/combo-smoke.toml --run      # and replay
+#   crucible combo --config configs/combo-smoke.toml --run --hash-only
+#
+# The last form is the determinism gate: same config + same data must produce
+# a bit-identical hash on any machine (CLAUDE.md §2.2).
+
+schema_version = 1
+
+[meta]
+name = "syn-sma-cross-null"
+hypothesis_family = "null-harness-sma-cross"
+economic_rationale = "None, deliberately: the feed is a seeded random walk, so this config exists to prove the machinery is deterministic and fair, never to find edge."
+
+[universe]
+# The synthetic random walk emits SYN:RW, and the config has to say so — a
+# contract spec labelled with an instrument the feed never emits is a header
+# that lies.
+instruments = ["SYN:RW"]
+timeframes = ["1m"]
+
+[data]
+source = "synthetic"
+# Seeds the bar generator (SplitMix64, D-0011). Distinct from [run] seed,
+# which seeds strategy randomness — no strategy takes one yet.
+seed = 42
+bars = 20000
+start_price_points = "5000"
+vol_ticks = 4
+
+[contract]
+tick_points = "0.25"
+point_value_usd = 50
+
+[indicators.fast]
+kind = "sma"
+period = [10, 20]
+
+[indicators.slow]
+kind = "sma"
+period = { start = 50, end = 100, step = 25 }
+
+# Stop-and-reverse: the same crossover exits one side and enters the other, so
+# a cross emits one order for twice the size. This is `SmaCross` written in
+# TOML, and there is a test asserting the two produce identical intents.
+[rules]
+enter_long = "fast crosses_above slow"
+exit_long = "fast crosses_below slow"
+enter_short = "fast crosses_below slow"
+exit_short = "fast crosses_above slow"
+
+[execution]
+fill_model = "spread_cross"
+half_spread_ticks = 1
+fee_per_contract_usd = "1.25"
+
+[run]
+seed = 42
+initial_cash_usd = "100000"
+qty_contracts = 1

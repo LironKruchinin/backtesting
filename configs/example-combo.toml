@@ -1,12 +1,22 @@
 # Reference config: Bollinger mean-reversion gated by an EMA trend filter.
-# This file is the canonical example of the config schema (parsed from M2;
-# see crucible-strategies::combo and crucible-funnel::grid module docs).
+# This file is the canonical example of the config schema, and it is parsed by
+# the real loader — `crucible combo --config configs/example-combo.toml`
+# expands it and prints the grid. Semantics live in
+# `crucible-strategies::combo`; the parser lives in `crucible-cli::config`.
 #
 # Parsing rules (CLAUDE.md §5.5):
 # - unknown fields are a HARD ERROR (deny_unknown_fields) — typos must not
 #   silently become no-ops in a research pipeline
 # - every config declares schema_version and a hypothesis_family
-# - ranges: { start, end, step } (inclusive) or explicit lists
+# - integer ranges: { start, end, step } (inclusive) or explicit lists; float
+#   axes are explicit lists ONLY, because a stepped float axis has a
+#   floating-point-dependent length (D-0060)
+# - money is written as a decimal STRING ("1.25", not 1.25): it parses to
+#   integer nanodollars without ever constructing an f64 (D-0027)
+#
+# This config names a continuous contract, so `--run` refuses it: replaying a
+# back-adjusted series needs a consumer that says which of the two price
+# series it wants (D-0042). `configs/combo-smoke.toml` is the runnable one.
 
 schema_version = 1
 
@@ -20,13 +30,21 @@ hypothesis_family = "es-meanrev-bb"
 economic_rationale = "Short-horizon overreaction in ES mean-reverts intraday except in strong trends; the EMA filter avoids fighting the trend."
 
 [universe]
+# One instrument and one timeframe today: the cross-product over a universe is
+# the funnel's job (M3), and `combo` refuses rather than silently running the
+# first entry of a list it cannot fully evaluate.
 instruments = ["ES.v.0"]   # volume-rolled continuous; raw contracts also valid
 timeframes = ["5m"]
 
 [data]
-source = "curated"          # "curated" | "synthetic:seed=42" (null harness)
-start = "2012-01-01"
-end = "2026-06-30"
+source = "curated"          # "curated" | "synthetic"
+start = "2012-01-01"        # inclusive UTC date
+end = "2026-06-30"          # exclusive UTC date
+
+[contract]
+# Named, not implied (§2.4). Decimal text to integers, never through f64.
+tick_points = "0.25"
+point_value_usd = 50
 
 [indicators.bb]
 kind = "bollinger"
@@ -37,7 +55,7 @@ k = [1.5, 2.0, 2.5]
 kind = "ema"
 period = [100, 200]
 
-[rules]                      # M2 rule DSL, evaluated on completed bars only
+[rules]                      # evaluated on completed bars only
 enter_long = "close < bb.lower and close > trend"
 exit_long = "close > bb.mid"
 enter_short = "close > bb.upper and close < trend"
@@ -46,14 +64,14 @@ exit_short = "close < bb.mid"
 [execution]
 fill_model = "spread_cross"  # "free_fills" is only legal in stages s0/s1
 half_spread_ticks = 1
-fee_per_contract_usd = 1.25
+fee_per_contract_usd = "1.25"
 
-[walk_forward]
+[walk_forward]               # declared; consumed by the walk-forward runner
 scheme = "rolling"           # "rolling" | "anchored"
 train_months = 24
 test_months = 6
 
-[funnel]
+[funnel]                     # declared; consumed by `crucible funnel` (M3)
 stages = ["s0", "s1", "s2", "s3"]
 cost_sensitivity_ticks = [0.0, 0.5, 1.0, 2.0]
 # Pre-registered kill criteria — written BEFORE running, judged by machines.
@@ -64,5 +82,5 @@ kill_if_dead_at_ticks = 1.0
 
 [run]
 seed = 42
-initial_cash_usd = 100000
+initial_cash_usd = "100000"
 qty_contracts = 1

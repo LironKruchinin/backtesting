@@ -760,3 +760,54 @@ propose a superseding entry — don't silently diverge.
   `bars_per_year`) and **zero** effect on the trading-day set, which is the only
   thing this calendar is used for today. `cme_globex.toml` carries the identical
   gap for the identical reason.
+- **D-0060** (2026-07-29) — **The combo layer splits along the dependency
+  boundary, not along the feature.** Spec types, parameter axes, the rule AST,
+  grid expansion and the strategy factory are plain data and pure functions in
+  `crucible-strategies::combo`; TOML parsing (`serde`, `toml`) lives in
+  `crucible-cli::config`; and the config hash is computed by the caller from a
+  `ComboSpec::canonical_form()` string this crate renders but never hashes.
+  Why not put serde in `strategies`: §3 says `engine` and `strategies` must
+  compile with no I/O, no async and no threads *forever*, and §6 blesses
+  `serde`/`toml` for `funnel`, `data` and `cli` only. A `#[derive(Deserialize)]`
+  on the spec types would be one line and would quietly make the crate that the
+  funnel instantiates thousands of times per data pass carry a parser it never
+  runs. Why the hash is supplied rather than computed: D-0012 pins config
+  identity to blake3, which is not a `strategies` dependency and must not
+  become one — so this crate produces the *canonical form* (sorted slots,
+  materialized axes, rules re-rendered from the AST rather than echoed from
+  source text, so comments, whitespace and redundant parentheses cannot change
+  an identity) and the crate that owns blake3 hashes it. Same device as D-0015,
+  which made `acquired_ts` caller-supplied so library code could not read a
+  clock: the way to keep a capability out of a crate is to make the call not
+  exist there. **§6 is amended:** `blake3`'s row gains `cli`, because the CLI is
+  where a config is loaded today (`funnel` inherits it in M3), and `serde` +
+  `toml` become real dependencies of `crucible-cli` rather than blessed-but-
+  unused. *Consequence to be aware of:* `crucible-funnel::grid`'s module doc
+  spec'd expansion as M3 funnel work. Expansion moved here because §2.6's
+  fair-comparison rule needs `max_warmup` across the grid at *build* time —
+  the funnel cannot align eval windows for combos it cannot yet construct —
+  and because expansion is a pure function over plain data with nothing to
+  parallelize. What stays in `funnel::grid` is what actually needs the funnel:
+  combo-count guardrails against a config, registry dedupe on
+  `(config_hash, combo_index, fold)`, and scheduling.
+- **D-0061** (2026-07-29) — **Warmup alignment is a `Strategy` decorator, and
+  it discards orders rather than withholding bars.** `strategies::align::Aligned`
+  wraps any strategy, forwards every bar to it — so indicators warm on exactly
+  the data they would otherwise see — and drops the intents it emits until the
+  grid's `max_warmup_bars` have been consumed. Why a decorator rather than an
+  engine feature: §2.6 is a statement about a *set* of runs, and the engine
+  deliberately knows nothing about grids; giving `replay.rs` a "start trading at
+  bar N" parameter would put a fairness rule inside the loop whose only job is
+  the no-lookahead rule, and every hand-written strategy would then be able to
+  ignore it. Why drop intents rather than skip `on_event`: an indicator that
+  does not see the warmup bars is not warm, so the short-warmup combo would
+  simply start late instead of starting aligned — which is the opposite of the
+  §2.6 guarantee. **The honest cost, stated because it shows up in a printed
+  number:** every combo's equity curve carries a flat prefix of exactly
+  `max_warmup` bars. It is identical across the grid, so a comparison within
+  the grid is fair and rankings are untouched, but the naive Sharpe of each
+  combo is scaled by the same `sqrt(n_eval / n_total)` factor against a run
+  that started at its own warmup. Slicing the eval window out of the metrics
+  belongs to the walk-forward runner, which has to slice folds anyway; until it
+  lands, `crucible combo` prints the eval-window start so the factor is visible
+  rather than absorbed.
