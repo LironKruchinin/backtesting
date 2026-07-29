@@ -23,6 +23,7 @@
 //! default, and the key is never printed, logged, or passed as an argument.
 
 mod backtest;
+mod layout_check;
 mod pull;
 mod rolls;
 mod transcode;
@@ -87,6 +88,8 @@ enum Command {
     Pull(pull::PullArgs),
     /// Re-hash the archive against the manifest.
     Verify,
+    /// Check the archive tree against docs/DATA_LAYOUT.md.
+    LayoutCheck,
     /// Build curated Parquet bars from the raw DBN archive.
     Transcode(transcode::TranscodeArgs),
     /// Replay curated bars through the reference strategy.
@@ -113,6 +116,7 @@ fn main() {
         }
         Some(Command::Pull(args)) => pull::run(&args),
         Some(Command::Verify) => pull::verify(),
+        Some(Command::LayoutCheck) => layout_check::run(),
         Some(Command::Transcode(args)) => transcode::run(&args),
         Some(Command::Backtest(args)) => backtest::run(&args),
         Some(Command::Rolls(args)) => rolls::run(&args),

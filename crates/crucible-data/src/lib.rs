@@ -47,6 +47,7 @@ pub mod continuous;
 pub mod curated;
 pub mod external;
 pub mod ingest;
+pub mod layout;
 pub mod synthetic;
 pub mod transcode;
 

@@ -18,6 +18,12 @@
 //! rather than per year — see D-0036 for why a year-named file would have to
 //! be merged.
 //!
+//! The whole tree — both orders, and why they differ — is specified in
+//! `docs/DATA_LAYOUT.md` and enforced by [`crate::layout`] (D-0049). This
+//! module's [`validate_file_path`] checks that a recorded path is *safe*
+//! (relative, ASCII, no traversal, under `raw/`); [`crate::layout`] checks
+//! that it is the right *shape*. Both matter and neither implies the other.
+//!
 //! The catalog takes an already-resolved data-dir [`PathBuf`]; reading
 //! `$CRUCIBLE_DATA_DIR` is the job of bin targets, never library code.
 //!
