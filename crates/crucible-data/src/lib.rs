@@ -45,6 +45,7 @@ pub mod calendar;
 pub mod catalog;
 pub mod continuous;
 pub mod curated;
+pub mod external;
 pub mod ingest;
 pub mod synthetic;
 pub mod transcode;

@@ -469,6 +469,7 @@ dependencies = [
  "databento",
  "parquet",
  "proptest",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2 0.11.0",

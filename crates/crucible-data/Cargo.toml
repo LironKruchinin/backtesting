@@ -11,6 +11,14 @@ license.workspace = true
 # `.await` exists in exactly one file. CI builds `--all-features` so the gated
 # module cannot rot unnoticed.
 databento = ["dep:databento", "dep:tokio", "dep:sha2", "dep:time"]
+# Everything that talks to ThetaData. Same seam as `databento` (D-0025): async
+# lives in exactly one module, behind a sync API, on a private current-thread
+# runtime. `reqwest` was already in the graph transitively under `databento`,
+# so this feature adds a direct edge rather than a second HTTP stack, and asks
+# for no TLS at all — the Theta Terminal is a plaintext HTTP server on
+# localhost, and a TLS backend we never use is a dependency we should not pay
+# for (D-0051).
+thetadata = ["dep:reqwest", "dep:tokio"]
 
 [dependencies]
 crucible-core = { path = "../crucible-core" }
@@ -40,6 +48,11 @@ toml = "0.9"
 # separately pinned `dbn`, so the client and the decoder cannot drift apart.
 databento = { version = "0.55", optional = true }
 tokio = { version = "1.53", features = ["rt", "time", "net"], optional = true }
+# ThetaData acquisition. `default-features = false` drops every TLS backend,
+# blocking client, and codec we do not use: the Theta Terminal serves plain
+# HTTP/1.1 on 127.0.0.1, so a TLS stack here would be dead weight that still
+# had to be audited and compiled. Reached only through `external::thetadata`.
+reqwest = { version = "0.13", default-features = false, optional = true }
 # Verifying a delivered file against the vendor's published digest before it
 # is allowed into the immutable archive.
 sha2 = { version = "0.11", optional = true }
