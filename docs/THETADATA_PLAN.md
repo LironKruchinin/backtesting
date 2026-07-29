@@ -359,6 +359,34 @@ count (8), and the standing fix is to process completions as they arrive rather
 than by chunk — resume keys on the request string, not on position, so nothing
 requires ordered handling.
 
+### 5.2 Streaming completions: measured, and the gain did not materialise
+
+Streaming was built, tested and deployed. **The throughput gain is under the
+1.5× threshold that would have justified further work, so the Terminal is the
+bottleneck and the long haul is accepted.** Recorded as a negative result
+because a measurement that disappoints is still a measurement.
+
+| shape | workload | rate |
+|---|---|---|
+| serial | SPY 2013–2016 | 0.84–0.96 req/s |
+| barriered chunks of 64 | SPY 2013–2020, mixed eras | **0.46 req/s average** |
+| barriered chunks of 64 | SPY 2020, instantaneous | 0.22 req/s |
+| **streaming** | SPY 2021, instantaneous | **0.25 req/s** |
+
+The comparison that matters is the last two, because they are the same root at
+comparable-or-heavier chain size: 0.22 → 0.25, roughly **1.1×**. Nowhere near
+1.5×. Per-request cost at the Terminal dominates, and no client-side scheduling
+recovers it.
+
+**Streaming is kept anyway**, on grounds that are not throughput: writes are now
+continuous rather than arriving in bursts of 64, so progress is observable, a
+kill loses at most the in-flight requests instead of a whole chunk, and the
+five-minute stalls are gone. Those were real operational costs.
+
+**Whole-tranche projection: 2–4 days** (47–87 h). The spread is real and not
+hedging — 0.25 req/s is the *heaviest* root at its heaviest era, while VIX, RUT,
+DIA and NDX chains are a fraction of SPY's. No single number is honest here.
+
 **Serial acquisition measures 0.84–0.96 req/s**, so the first driver — which
 called `fetch` per request and never `fetch_batch` — was leaving roughly 3× on
 the table while projecting 5.3.
@@ -554,6 +582,22 @@ order. It is *not* worth doing mid-T0. A healthy acquisition running at
 measured 3.04 req/s ceiling risks hours to save hours. T1 is where the change
 pays: far more requests, far larger payloads, and §7.2's whole-chain 1-minute
 days are exactly the shape whose tail latency a chunk barrier amplifies worst.
+
+### 8.0 T0 does not block M1 close
+
+**The ThetaData tranche and the Databento M1 close run in parallel, starting
+now.** They share almost nothing: M1 close is local work over an archive that
+already exists, T0 is a network-bound trickle measured in days. Holding the
+factory timeline behind a multi-day options pull would be sequencing by habit
+rather than by dependency.
+
+One rule, and it is the only coupling: **the M1 re-pull step never contends for
+`pull.lock`.** The lock refuses a second holder anyway, so this is about not
+generating a confusing refusal rather than about safety — sequence any re-pull
+*after* the `statistics` poller resolves. Everything else in M1 close is
+independent of both.
+
+The T0 gate report arrives whenever T0 lands. Nothing else waits on it.
 
 ### 8.1 When the T0 validation gate report is written
 
