@@ -1,17 +1,22 @@
-//! The acquisition loop: fetch a chunk concurrently, then take each response
-//! the rest of the way in request order.
+//! The acquisition loop: stream completions, taking each response all the way
+//! to its inventory line the moment it arrives.
 //!
 //! ```text
 //! pacer ─► fetch ─► validate ─► transcode ─► staging ─► rename ─► inventory
-//!   (8 in flight)   └────────── serial, in request order ──────────┘
+//!   (8 in flight)   └── per response, as it completes, in ANY order ──┘
 //! ```
 //!
-//! The fetch half is concurrent and the processing half is not, which is the
-//! right split: the first is IO-bound and the pacer already governs it, while
-//! the second appends to one inventory file and must stay ordered. The first
-//! version of this loop fetched serially and measured **0.84-0.96 req/s**
-//! against a projection of ~5.3 — a serial caller simply cannot use concurrency
-//! the pacer is willing to grant, and throughput collapses to 1/latency.
+//! **Nothing waits on a slower neighbour**, and getting there took two wrong
+//! shapes. Fetching one request at a time measured **0.84–0.96 req/s** against
+//! a projection of 5.3, because a serial caller cannot use concurrency the
+//! pacer is willing to grant. Fetching in barriered chunks of 64 was worse in
+//! the tail: a chunk costs its slowest member, and with SPY `eod` days of
+//! comparable size answering in **22.7 s, 4.8 s and 1.7 s**, one draw stalled
+//! sixty-three writes for five minutes with the CPU flat.
+//!
+//! Out-of-order processing is safe because **resume keys on the rendered
+//! request string, never on position** (§6.1). The inventory is append-only and
+//! its order is arrival order, which no reader depends on.
 //!
 //! **The inventory line is appended last, after the file is durably in place.**
 //! That ordering is the whole contract, and it is the same one D-0017 gives the
@@ -82,29 +87,21 @@ pub const REFUSAL_RATE_LIMIT: f64 = 0.02;
 /// whose failure mode produces the desired answer".
 pub const REFUSAL_MIN_SAMPLE: u64 = 200;
 
-/// Requests handed to one `fetch_batch` call.
+/// How many requests are streamed before the run pauses to check its own
+/// health.
 ///
-/// **A chunk is a barrier, so it is sized to the permit count and not larger.**
-/// `fetch_batch` returns only when every request in the chunk has finished, so
-/// a chunk costs its *slowest* member. Measured against the live Terminal,
-/// three consecutive SPY `eod` days of similar size answered in **22.7 s, 4.8 s
-/// and 1.7 s** — a 13× spread — so a 64-request chunk waits on the worst of 64
-/// draws from that distribution and stalls the 63 writes behind it. An early
-/// run sat for five minutes with the CPU flat at 7.6 s and sixteen connections
-/// parked, which is what that looks like from outside.
+/// **Not a batch.** Within a window every response is processed the instant it
+/// arrives, so nothing waits on a slower neighbour — that is the whole point of
+/// streaming, and a 64-request barrier once stalled this run for five minutes
+/// with the CPU flat. The window exists for two narrower reasons: it bounds how
+/// many futures are alive at once, and it gives the refusal-rate breaker a
+/// place to stop the run rather than draining 80,000 fetches it has already
+/// decided not to keep.
 ///
-/// At 8 the barrier spans exactly one set of permits: the next chunk launches
-/// as soon as the current one drains, and tail amplification is bounded by the
-/// slowest of 8 rather than the slowest of 64. Concurrency itself is worth
-/// having — measured 1.16 / 1.87 / 2.30 / 3.04 req/s at concurrency 1 / 2 / 4 /
-/// 8 on identical requests — so the answer is a smaller barrier, not less
-/// concurrency.
-///
-/// The real fix is to process completions as they arrive instead of by chunk;
-/// resume keys on the request string, not on position, so nothing requires
-/// results to be handled in order. That is a `fetch_batch` restructuring and is
-/// deliberately not bundled with this one.
-pub const FETCH_BATCH: usize = 8;
+/// At 2048 the one barrier per window costs a single worst draw — call it 30 s
+/// against a window that takes over an hour — which is under 1 % and buys clean
+/// abort semantics.
+pub const BREAKER_CHECKPOINT: usize = 2048;
 
 /// One request that did not produce a file, and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +129,20 @@ pub struct RunReport {
     pub golden_kept: u64,
     /// Set when the run stopped early, with the reason.
     pub halted: Option<String>,
+    /// Wall time of every request this run, in milliseconds.
+    ///
+    /// Kept per request rather than as a running mean because the *shape* is
+    /// what matters: measured SPY `eod` days of comparable size answered in
+    /// 22.7 s, 4.8 s and 1.7 s, and a mean over that hides exactly the tail
+    /// that governs how a barrier-free design beats a barriered one. T1's
+    /// projection wants this distribution by era; the inventory carries it per
+    /// line, and this is the in-run summary.
+    pub latencies_ms: Vec<u64>,
+}
+
+/// Milliseconds of a duration, saturating.
+fn millis_of(elapsed: core::time::Duration) -> u64 {
+    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
 }
 
 impl RunReport {
@@ -148,6 +159,25 @@ impl RunReport {
     #[must_use]
     pub fn refusal_rate_is_systemic(&self) -> bool {
         self.attempted >= REFUSAL_MIN_SAMPLE && self.refusal_rate() > REFUSAL_RATE_LIMIT
+    }
+
+    /// Latency percentiles in milliseconds: (min, median, p95, max).
+    ///
+    /// `None` when nothing was measured — unmeasured, never zero, the same
+    /// refusal to report a figure over an empty sample every other rate here
+    /// makes (§0.4).
+    #[must_use]
+    pub fn latency_percentiles(&self) -> Option<(u64, u64, u64, u64)> {
+        if self.latencies_ms.is_empty() {
+            return None;
+        }
+        let mut sorted = self.latencies_ms.clone();
+        sorted.sort_unstable();
+        let at = |q: f64| {
+            let index = ((sorted.len() as f64 - 1.0) * q).round() as usize;
+            sorted[index.min(sorted.len() - 1)]
+        };
+        Some((sorted[0], at(0.50), at(0.95), sorted[sorted.len() - 1]))
     }
 }
 
@@ -174,6 +204,14 @@ impl core::fmt::Display for RunReport {
             if self.refusals.len() > 40 {
                 writeln!(f, "    … and {} more", self.refusals.len() - 40)?;
             }
+        }
+        if let Some((min, median, p95, max)) = self.latency_percentiles() {
+            // Percentiles, never a mean: the mean is exactly what hides the
+            // tail that governs whether a barrier-free design is worth having.
+            writeln!(
+                f,
+                "  latency ms     min {min}  median {median}  p95 {p95}  max {max}"
+            )?;
         }
         if let Some(why) = &self.halted {
             writeln!(f, "\n  HALTED: {why}")?;
@@ -288,25 +326,31 @@ pub fn run_tranche(
     let mut report = RunReport::default();
     let total = outstanding.len() as u64;
 
-    for chunk in outstanding.chunks(FETCH_BATCH) {
-        // Fetch the chunk CONCURRENTLY, then process the results in request
-        // order. The first version called `fetch` per request and measured
-        // 0.84-0.96 req/s against a projection of ~5.3 — because a serial
-        // caller cannot use concurrency the pacer is willing to grant, and
-        // throughput collapses to 1/latency. Results come back in request
-        // order, so ordering, resume and the refusal ledger are unchanged.
-        let bodies =
-            client.fetch_batch(&chunk.iter().map(|r| r.request.clone()).collect::<Vec<_>>());
+    for window in outstanding.chunks(BREAKER_CHECKPOINT) {
+        let mut fatal: Option<ThetaError> = None;
+        let requests: Vec<_> = window.iter().map(|r| r.request.clone()).collect();
 
-        for (request, body) in chunk.iter().zip(bodies) {
+        // Streaming: each response is taken all the way to its inventory line
+        // the moment it arrives, so no request waits on a slower neighbour.
+        client.fetch_streaming(&requests, |index, body, elapsed| {
+            if fatal.is_some() || report.halted.is_some() {
+                // The run is already over. Remaining fetches drain without
+                // being written, and because they were never inventoried,
+                // resume picks them up untouched.
+                return;
+            }
+            let Some(request) = window.get(index) else {
+                return;
+            };
             report.attempted += 1;
+            report.latencies_ms.push(millis_of(elapsed));
             progress(request, report.attempted, total);
 
             let rendered = request.request.render();
             let outcome = process_one(body, request, data_dir, &golden, &rendered, &mut report);
 
             match outcome {
-                Err(e) => return Err(e),
+                Err(e) => fatal = Some(e),
                 Ok(Outcome::Refused(reason)) => {
                     report.refusals.push(Refusal {
                         request: rendered,
@@ -323,12 +367,15 @@ pub fn run_tranche(
                             report.attempted,
                             REFUSAL_RATE_LIMIT * 100.0
                         ));
-                        return Ok(report);
                     }
                 }
                 Ok(Outcome::Empty) => {
                     report.empty += 1;
-                    inventory.append(&empty_record(request, &rendered, now_ts))?;
+                    let mut record = empty_record(request, &rendered, now_ts);
+                    record.fetch_millis = millis_of(elapsed);
+                    if let Err(e) = inventory.append(&record) {
+                        fatal = Some(e);
+                    }
                 }
                 Ok(Outcome::Written {
                     bytes,
@@ -344,7 +391,7 @@ pub fn run_tranche(
                         .replace('\\', "/");
                     // The file is on disk under its real name by now. Only
                     // here is an inventory line honest.
-                    inventory.append(&InventoryRecord::new(
+                    let mut record = InventoryRecord::new(
                         request.endpoint.path(),
                         &request.root,
                         "daily",
@@ -357,9 +404,20 @@ pub fn run_tranche(
                         &validation,
                         None,
                         now_ts,
-                    ))?;
+                    );
+                    record.fetch_millis = millis_of(elapsed);
+                    if let Err(e) = inventory.append(&record) {
+                        fatal = Some(e);
+                    }
                 }
             }
+        });
+
+        if let Some(e) = fatal {
+            return Err(e);
+        }
+        if report.halted.is_some() {
+            return Ok(report);
         }
     }
     Ok(report)

@@ -243,3 +243,59 @@ fn the_report_names_refusals_so_they_are_not_merely_dropped() {
     assert!(rendered.contains("symbol=SPY"), "{rendered}");
     assert!(rendered.contains("UnexpectedColumns"), "{rendered}");
 }
+
+// -------------------------------------------------------------------------
+// Streaming: the window is a health checkpoint, not a batch.
+// -------------------------------------------------------------------------
+
+// The constant that governs how many futures are alive and where the breaker
+// may stop. If it ever shrinks toward the permit count it has become a batch
+// again, which is the design this replaced.
+#[test]
+fn the_breaker_checkpoint_is_far_larger_than_the_permit_count() {
+    // Compared against the pacer's real ceiling rather than a literal, so the
+    // relationship is what is asserted: a window near the permit count is a
+    // barrier wearing a checkpoint's name.
+    let permits = crate::external::thetadata::pacer::MAX_CONCURRENCY;
+    assert!(
+        BREAKER_CHECKPOINT > permits * 50,
+        "checkpoint {BREAKER_CHECKPOINT} is too close to {permits} permits"
+    );
+}
+
+// Latency is summarised by percentile rather than by mean, because the mean is
+// exactly what hides the tail this design exists to beat. Hand-checkable.
+#[test]
+fn latency_percentiles_report_the_shape_not_the_average() {
+    // The measured SPY spread, plus a long tail.
+    let report = RunReport {
+        latencies_ms: vec![1700, 4800, 22700, 1700, 1700, 1700, 1700, 1700, 1700, 30000],
+        ..RunReport::default()
+    };
+    let (min, median, p95, max) = report.latency_percentiles().expect("measured");
+    assert_eq!(min, 1700);
+    assert_eq!(median, 1700, "most days are fast");
+    assert_eq!(max, 30000, "and the tail is 17x the median");
+    assert!(p95 >= 22700, "p95 must land in the tail, got {p95}");
+}
+
+// Unmeasured is not zero (§0.4), the same refusal every other rate here makes.
+#[test]
+fn an_unmeasured_latency_distribution_reports_none() {
+    assert_eq!(RunReport::default().latency_percentiles(), None);
+}
+
+// The run log must show the distribution, because a number nobody prints is a
+// measurement nobody makes.
+#[test]
+fn the_run_report_prints_the_latency_distribution() {
+    let report = RunReport {
+        attempted: 3,
+        written: 3,
+        latencies_ms: vec![100, 200, 300],
+        ..RunReport::default()
+    };
+    let rendered = report.to_string();
+    assert!(rendered.contains("latency ms"), "{rendered}");
+    assert!(rendered.contains("median"), "{rendered}");
+}

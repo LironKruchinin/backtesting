@@ -93,6 +93,14 @@ pub struct InventoryRecord {
     pub conflicting_pairs: u64,
     /// Rows dropped by the zero-sentinel condition.
     pub sentinel_rows_dropped: u64,
+    /// Wall time this request took, in milliseconds, including retries and
+    /// any wait on the pacer.
+    ///
+    /// Recorded per request because T1's projection needs the real latency
+    /// **distribution by era**, and an inventory line is already keyed by date
+    /// — so the archive measures its own acquisition for free. `0` means the
+    /// line predates the field rather than "instant".
+    pub fetch_millis: u64,
     /// Fraction of kept rows whose OHLC block was entirely zero, or `None`
     /// where the endpoint has no OHLC or nothing was kept.
     ///
@@ -153,6 +161,7 @@ impl InventoryRecord {
             n_builds_distribution: report.n_builds_distribution.clone(),
             conflicting_pairs: report.conflicting_pairs,
             sentinel_rows_dropped: report.sentinel_rows_dropped,
+            fetch_millis: 0,
             zero_ohlc_rate: report.zero_ohlc_rate(),
             reconciliation,
             fetched_ts,
@@ -196,8 +205,8 @@ impl InventoryRecord {
              \"start_date\":{},\"end_date\":{},\"request\":{},\"file_path\":{},\
              \"file_blake3\":{},\"size_bytes\":{},\"row_count\":{},\
              \"distinct_contracts\":{},\"dup_rate\":{},\"n_builds_distribution\":{{{}}},\
-             \"conflicting_pairs\":{},\"sentinel_rows_dropped\":{},\"zero_ohlc_rate\":{},\
-             \"reconciliation\":{},\"fetched_ts\":{}}}",
+             \"conflicting_pairs\":{},\"sentinel_rows_dropped\":{},\"fetch_millis\":{},\
+             \"zero_ohlc_rate\":{},\"reconciliation\":{},\"fetched_ts\":{}}}",
             self.schema_version,
             json_string(&self.endpoint),
             json_string(&self.root),
@@ -214,6 +223,7 @@ impl InventoryRecord {
             builds,
             self.conflicting_pairs,
             self.sentinel_rows_dropped,
+            self.fetch_millis,
             self.zero_ohlc_rate
                 .map_or_else(|| "null".to_owned(), format_ratio),
             reconciliation,
@@ -456,6 +466,7 @@ fn parse_line(line: &str) -> Option<InventoryRecord> {
         n_builds_distribution: BTreeMap::new(),
         conflicting_pairs: number("conflicting_pairs").unwrap_or(0),
         sentinel_rows_dropped: number("sentinel_rows_dropped").unwrap_or(0),
+        fetch_millis: number("fetch_millis").unwrap_or(0),
         zero_ohlc_rate: float("zero_ohlc_rate"),
         reconciliation: None,
         fetched_ts: extract_bare_field(line, "fetched_ts")

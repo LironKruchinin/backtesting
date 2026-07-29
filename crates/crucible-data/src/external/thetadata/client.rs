@@ -218,35 +218,12 @@ impl ThetaClient {
         let mut out: Vec<Option<Result<Vec<u8>, ThetaError>>> =
             (0..requests.len()).map(|_| None).collect();
 
-        // Spawning happens INSIDE `block_on`. `JoinSet::spawn` needs an active
-        // runtime context and panics without one — "there is no reactor
-        // running" — and the panic is only reachable when a caller actually
-        // batches, which is why it survived until the first real tranche.
-        self.runtime.block_on(async {
-            let mut set = tokio::task::JoinSet::new();
-            for (index, request) in requests.iter().enumerate() {
-                let url = self.url_of(request);
-                let rendered = request.render();
-                let client = self.client.clone();
-                let pacer = self.pacer.clone();
-                set.spawn(async move {
-                    let result = fetch_one(&client, &pacer, &url, &rendered).await;
-                    (index, result)
-                });
-            }
-            while let Some(joined) = set.join_next().await {
-                match joined {
-                    Ok((index, result)) => {
-                        if let Some(slot) = out.get_mut(index) {
-                            *slot = Some(result);
-                        }
-                    }
-                    Err(e) => {
-                        // A task cannot panic here without a bug in this
-                        // module; surface it rather than losing a slot.
-                        debug_assert!(false, "thetadata fetch task failed: {e}");
-                    }
-                }
+        // Implemented on top of the streaming path rather than beside it, so
+        // there is one spawn-and-drive implementation to be right about and
+        // every `fetch_batch` test exercises the streaming code too.
+        self.fetch_streaming(requests, |index, result, _elapsed| {
+            if let Some(slot) = out.get_mut(index) {
+                *slot = Some(result);
             }
         });
 
@@ -264,6 +241,68 @@ impl ThetaClient {
                 })
             })
             .collect()
+    }
+
+    /// Fetches many requests, handing each result to `on_result` **the moment
+    /// it completes** rather than when its neighbours do.
+    ///
+    /// This is the shape acquisition wants and `fetch_batch` is not. A batch
+    /// returns only when its slowest member does, so a caller that batches pays
+    /// the worst draw in every group: three consecutive SPY `eod` days of
+    /// comparable size measured **22.7 s, 4.8 s and 1.7 s**, and a 64-request
+    /// chunk built out of draws like those stalled for five minutes with the CPU
+    /// flat. Streaming removes the barrier entirely — a permit freed by a fast
+    /// request is taken immediately and its result is processed immediately.
+    ///
+    /// **Out-of-order delivery is the point, and it is safe.** `on_result`
+    /// receives the request's *index*, so a caller can attribute every response
+    /// without relying on arrival order, and nothing downstream depends on that
+    /// order: resume keys on the rendered request string, never on position
+    /// (§6.1). `fetch_batch` re-imposes ordering for callers that want it.
+    ///
+    /// `elapsed` is the wall time that request took, including any retries and
+    /// any time spent waiting on the pacer. It is reported per request because
+    /// T1's projection needs the real latency *distribution* by era, and a run
+    /// that is already paying for the measurement should not throw it away.
+    ///
+    /// The callback runs on the runtime thread between polls, so heavy work in
+    /// it delays other in-flight requests. That is the right trade here — the
+    /// alternative is buffering every body until the end, which is the barrier
+    /// this exists to remove — but it is why the callback should write a file,
+    /// not compute a quarter of one.
+    pub fn fetch_streaming(
+        &self,
+        requests: &[Request],
+        mut on_result: impl FnMut(usize, Result<Vec<u8>, ThetaError>, Duration),
+    ) {
+        // Spawning happens INSIDE `block_on`. `JoinSet::spawn` needs an active
+        // runtime context and panics without one — "there is no reactor
+        // running" — and the panic is only reachable when a caller actually
+        // batches, which is why it survived until the first real tranche.
+        self.runtime.block_on(async {
+            let mut set = tokio::task::JoinSet::new();
+            for (index, request) in requests.iter().enumerate() {
+                let url = self.url_of(request);
+                let rendered = request.render();
+                let client = self.client.clone();
+                let pacer = self.pacer.clone();
+                set.spawn(async move {
+                    let started = tokio::time::Instant::now();
+                    let result = fetch_one(&client, &pacer, &url, &rendered).await;
+                    (index, result, started.elapsed())
+                });
+            }
+            while let Some(joined) = set.join_next().await {
+                match joined {
+                    Ok((index, result, elapsed)) => on_result(index, result, elapsed),
+                    Err(e) => {
+                        // A task cannot panic here without a bug in this
+                        // module; surface it rather than losing a slot.
+                        debug_assert!(false, "thetadata fetch task failed: {e}");
+                    }
+                }
+            }
+        });
     }
 
     /// Joins the base URL and a request into a full URL.
@@ -484,6 +523,139 @@ mod tests {
             DEFAULT_BASE_URL.starts_with("http://127.0.0.1:"),
             "the client must never reach the Terminal over a routable address"
         );
+    }
+
+    /// A one-shot HTTP server that answers each request after a delay encoded
+    /// in its path, so a test can force completions out of issue order.
+    ///
+    /// Deliberately `std::net` on a `std::thread` rather than tokio: the point
+    /// is to be an *independent* peer of the client under test, and borrowing
+    /// the client's own runtime to serve it would let a scheduling bug hide
+    /// itself. It also keeps tokio's feature set as-is — this needs no
+    /// `io-util`. A test thread is scaffolding; §3's "no thread ever starts
+    /// here" is about the shipped crate.
+    ///
+    /// Returns the base URL. The thread serves `count` connections and exits.
+    fn delay_server(count: usize) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            for _ in 0..count {
+                let Ok((mut socket, _)) = listener.accept() else {
+                    return;
+                };
+                std::thread::spawn(move || {
+                    let mut buf = [0u8; 2048];
+                    let Ok(n) = socket.read(&mut buf) else { return };
+                    let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                    // `?ms=NNN` in the path is how long to wait before
+                    // answering; `id=N` comes back in the body so the test can
+                    // prove which response went to which index.
+                    let ms: u64 = request
+                        .split("ms=")
+                        .nth(1)
+                        .and_then(|rest| rest.split(['&', ' ']).next())
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+                    let id: String = request
+                        .split("id=")
+                        .nth(1)
+                        .and_then(|rest| rest.split(['&', ' ']).next())
+                        .unwrap_or("?")
+                        .to_owned();
+                    std::thread::sleep(Duration::from_millis(ms));
+                    let body = format!("id\n{id}\n");
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes());
+                    let _ = socket.flush();
+                });
+            }
+        });
+        format!("http://127.0.0.1:{}", addr.port())
+    }
+
+    // THE test the streaming path exists for: completions must arrive as they
+    // finish, not in issue order, and every one must still be attributable.
+    //
+    // Request 0 is slow and 1..3 are fast, so a barrier design would deliver
+    // nothing until the slowest finished. Streaming must deliver 1, 2 and 3
+    // first. The assertion is deliberately on the *inversion* — if delivery
+    // ever comes back in issue order, the barrier is back and the whole reason
+    // for this code is gone.
+    #[test]
+    fn streaming_delivers_completions_out_of_issue_order_and_attributes_each() {
+        let base = delay_server(4);
+        let client = ThetaClient::open(&base, 8).expect("open");
+        let requests: Vec<Request> = [(0, 1200), (1, 5), (2, 5), (3, 5)]
+            .iter()
+            .map(|(id, ms)| {
+                Request::new("/x")
+                    .with("id", id.to_string())
+                    .with("ms", ms.to_string())
+            })
+            .collect();
+
+        let mut arrival: Vec<usize> = Vec::new();
+        let mut bodies: Vec<(usize, String)> = Vec::new();
+        let mut timings: Vec<(usize, Duration)> = Vec::new();
+        client.fetch_streaming(&requests, |index, result, elapsed| {
+            arrival.push(index);
+            timings.push((index, elapsed));
+            let body = String::from_utf8(result.expect("200")).expect("utf8");
+            bodies.push((index, body));
+        });
+
+        assert_eq!(arrival.len(), 4, "every request is delivered exactly once");
+        assert_ne!(
+            arrival,
+            vec![0, 1, 2, 3],
+            "delivery in issue order means the barrier is back"
+        );
+        assert_eq!(
+            *arrival.last().expect("non-empty"),
+            0,
+            "the slow request must be delivered last"
+        );
+
+        // Attribution survives reordering: index N got id=N's body.
+        for (index, body) in &bodies {
+            assert!(
+                body.contains(&format!("\n{index}\n")),
+                "index {index} received {body:?}"
+            );
+        }
+
+        // And the timing is per request, not per batch — the slow one is
+        // measurably slower than the fast ones, which is the distribution T1's
+        // projection wants.
+        let slow = timings.iter().find(|(i, _)| *i == 0).expect("index 0").1;
+        let fast = timings.iter().find(|(i, _)| *i == 1).expect("index 1").1;
+        assert!(
+            slow > fast * 4,
+            "per-request timing must distinguish {slow:?} from {fast:?}"
+        );
+    }
+
+    // The dead-endpoint case through the streaming path: no panic, one delivery
+    // per request, and the index attribution still holds when everything fails.
+    #[test]
+    fn streaming_answers_once_per_request_against_a_dead_endpoint() {
+        let client = ThetaClient::open("http://127.0.0.1:1/v3", 4).expect("open");
+        let requests: Vec<Request> = (0..3)
+            .map(|n| Request::new("/option/history/eod").with("symbol", format!("R{n}")))
+            .collect();
+
+        let mut seen: Vec<usize> = Vec::new();
+        client.fetch_streaming(&requests, |index, result, _| {
+            seen.push(index);
+            assert!(result.is_err(), "nothing listens on port 1");
+        });
+        seen.sort_unstable();
+        assert_eq!(seen, vec![0, 1, 2]);
     }
 
     // REGRESSION. `fetch_batch` spawned its tasks outside `block_on`, so
