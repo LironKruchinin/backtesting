@@ -362,3 +362,273 @@ propose a superseding entry — don't silently diverge.
   real `ohlcv` data has no bar for an interval that did not trade, so the
   constant overstates the bar count, which overstates the annualization
   factor, which flatters Sharpe. `calendar` v1 takes ownership of it.
+- **D-0039** (2026-07-28) — **Session calendar v1** is a TOML table compiled in
+  with `include_str!`, holidays expressed as *rules* rather than dates, and
+  `chrono`/`chrono-tz` confined to `crucible-data::calendar`. `chrono` is requested
+  **without its `clock` feature** to say that the calendar must never read a
+  clock — though that is intent, not a guarantee, because `parquet` enables the
+  feature through Cargo's unification; the enforcement is D-0048's clippy gate. Why compiled in rather
+  than read at runtime: a calendar is consulted from inside replay and
+  annualization, and a file read there would let the same config mean two
+  things on two machines. Why rules: a dated holiday list is correct until the
+  year it runs out and then silently answers "open" for every future Christmas.
+  Every rule carries a `source` URL and construction refuses a table that cites
+  nothing. A trading day `D` runs `open_local` on `D−1` to `close_local` on `D`;
+  a `Closed` holiday removes `D` *and* the evening before, because that evening
+  exists only to open `D`. Local times in 01:00–03:00 are refused at load, which
+  is what makes the runtime local→UTC conversion infallible — and it costs
+  nothing, because US DST transitions happen 02:00 Sunday, inside the
+  Friday-to-Sunday closure, so **no Globex session ever spans one**.
+  `bars_per_year(tf)` is open-seconds-per-year ÷ tf, precomputed over a fixed
+  reference span so it is O(1) and identical on every machine; `D1` counts
+  **trading days** instead, because a daily bar exists once per session however
+  long the session is. In `backtest` the precedence is explicit
+  `--bars-per-year` > calendar > D-0038's sample measurement, and when the
+  calendar and the sample disagree by more than 1 % **both are printed** — they
+  answer different questions (intervals a year *contains* vs intervals that
+  actually *traded*) and neither is wrong. On ESH4 January 2024 that is 354,319
+  vs 366,766 (+3.5 %). *Two things the table deliberately does not do:* it
+  describes only the current session era (`valid_from = 2015-09-21`; CME moved
+  the equity-index close on 2012-11-19 and again on 2015-09-21, and `qa` and
+  `backtest` warn when a span starts earlier), and it does **not** encode the
+  15:15–15:30 CT halt that CME's own contract-spec page lists — see D-0040.
+- **D-0040** (2026-07-28) — **The data-QA report is plain Rust, not `polars`**,
+  and §6 is amended again: `polars` leaves the blessed set rather than being
+  narrowed further. Why: every check is one ordered pass over a bar series
+  `ParquetBarFeed` already decodes, and `polars-core` depends on `rayon`
+  non-optionally, so adopting it would start a work-stealing threadpool inside
+  `crucible-data` — the exact thing §3 reserves for `crucible-funnel` and that
+  D-0037 refused for the feed path. A DataFrame buys nothing a `for` loop does
+  not here. *The report's most valuable check runs backwards:* bars whose
+  `ts_open` falls when the calendar says the exchange was closed. Real data is
+  the ground truth, so those indict the **calendar**, not the archive — and on
+  its first run against ESH4 January 2024 it found 315 of them: 15 minutes on
+  each of 21 trading days, all carrying nonzero volume, all inside the
+  15:15–15:30 CT window CME's contract-spec page calls a trading halt. The halt
+  came out of the table; coverage went 99.209 % → 99.957 % and out-of-session
+  bars 315 → 0. The same run confirmed the other half of the model: MLK Day
+  2024-01-15 stops at 12:00 CT exactly as CME's per-holiday grids say, which is
+  why the "holidays" are encoded as early halts rather than as the closures
+  CME's own trading-hours *landing page* claims. Findings exit 4, like `verify`:
+  a scheduled job that reads "coverage 61 %" as success is worse than no job.
+- **D-0041** (2026-07-28) — **The roll instant is the availability of the
+  deciding session, and the new contract is front only for bars whose
+  `avail_ts` is strictly greater.** `roll_ts = max(front.avail_ts(D),
+  next.avail_ts(D))` for the session `D` the rule fired on. Why: a roll decided
+  from day `D`'s volume cannot take effect before day `D`'s data is available,
+  and the bars whose availability *is* `roll_ts` are the bars the decision was
+  made from — consuming them is one bar of lookahead in the place it hides best,
+  because a contract switch is invisible on a chart of an adjusted series. The
+  strict comparison is deliberately the same one `replay.rs` step 1 makes when
+  filling orders, so the codebase has one rule, not two. Consequence: volume
+  buckets key on **`avail_ts`**, never `ts_open` — a bucket key is a join key
+  and §2.1 forbids joining on event time. *Amended the same day, after review:*
+  the bucket is the **calendar's trading day** where a calendar claims the root,
+  not the UTC civil day. 00:00 UTC falls in the middle of a Globex session, so a
+  five-session CME week produces six UTC-day buckets and the extra one holds
+  about an hour of Sunday-evening trade — the thinnest window of the week. A
+  crossover rule weighed that sliver as a full session, and `confirm_days = 2`
+  spanning a weekend could be half-satisfied by it, or reset by it. Both keys are
+  availability keys, so nothing about the no-lookahead argument changes; the
+  UTC-day fallback remains for roots no calendar claims, and `GatheredSeries`
+  records which was used.
+- **D-0042** (2026-07-28) — **Back-adjusted prices are a different TYPE, not a
+  different variable.** `continuous::AdjustedPrice` is a newtype with no
+  `From`/`Into`/`Deref`/`as_price()` and no escape hatch; its only exits are
+  `as_nanos() -> i64` and `as_points_f64()` (indicator space, §2.3).
+  `ContinuousBar` carries `tradeable: Bar` and `adjusted: AdjustedOhlc` side by
+  side so a consumer must *name* which one it wants. Why: `pnl_nano_usd` — the
+  workspace's only price→money conversion — takes `Price`, so an adjusted level
+  cannot reach it. PnL against a back-adjusted series is wrong by the cumulative
+  roll gap (hundreds of ES points over a decade) and leaves a perfectly
+  smooth-looking equity curve, which is exactly the silent corruption this
+  project exists to prevent. Enforced by a `compile_fail` doctest paired with a
+  compiling one, so the rejection is proven to be about the type rather than a
+  typo. Adjustment is applied **at load**, never baked into storage.
+- **D-0043** (2026-07-28) — **Additive back-adjustment only; `Ratio` is not a
+  variant.** The table stores per-roll gaps `close(to) − close(from)` at
+  `roll_ts` and the loader accumulates them, leaving the newest segment
+  untouched — every term an `i64` difference of `i64`s, exact to the nanopoint
+  with no `f64` in the price path (§2.3). Storing gaps rather than running
+  offsets means appending next month's roll does not rewrite every earlier row.
+  Ratio adjustment multiplies by a running product that must be rounded once per
+  roll, so a 2010 bar's adjusted value would depend on how many rolls happen
+  *after* it, and two backtests ending in different years would disagree about
+  the same historical bar. Deterministic schemes exist; each is its own design
+  with its own tests. A name that parses and quietly means something else is
+  worse than one that does not parse.
+- **D-0044** (2026-07-28) — **Open interest (`.n`) is not a `RollRule` variant
+  at all.** It needs the `statistics` schema's open-interest series, which M1
+  has not curated. A variant that existed and always failed would be a config
+  that typechecks and then dies at load; one that fell back to volume would be a
+  table labelled `.n` that is not one. It arrives with the data.
+- **D-0045** (2026-07-28) — **Roll tables live at
+  `curated/rolls/{root}/{tf}/{rule-slug}.json` and are not in the manifest.**
+  They are what D-0036 says curated data is — derived, disposable, rebuildable —
+  and `manifest.jsonl` records *acquisitions*, which nobody bought here. It is
+  the one curated artifact that cannot be named after its source window: a roll
+  is a statement about two contracts at once and a table spans a whole root. So
+  it is named after what determines its contents (root, interval, rule) and
+  records the manifest id of every curated file it read, keeping D-0013's
+  provenance chain intact with no second index. The table also records the
+  `ts_open` span it was built from, and `ContinuousFeed::open` **refuses** a
+  replay window reaching outside that span rather than quietly returning a
+  series with contracts missing.
+- **D-0046** (2026-07-28) — **Contract-symbol year rule, and the expiry
+  backstop.** Two-digit years are absolute (`yy` → `2000 + yy`); one-digit years
+  resolve to the year congruent mod 10 nearest a `DecadeAnchor`, ties to the
+  earlier year, with the anchor a pinned constant (never a clock — §2.2) and
+  recorded in every roll table so stored bytes always reparse to the same
+  contracts. *Amended the same day, once the real 16-year `definition` archive
+  existed:* a single anchor cannot work inside one file, because `ESM0` is both
+  June 2010 and June 2020 and the archive contains both — the constant made
+  them collide and `ExpiryConflict` refused every ES definition file. So
+  `expiries_from_definitions` resolves a one-digit year against **each record's
+  own expiration** rather than the constant, which separates them and is still
+  fully deterministic. It anchors on the expiry *year* rather than reading the
+  year straight off it, because some products expire the month before their
+  contract month (`CLF5` expires in December 2024 and must still be 2025). The
+  constant remains the fallback and remains what curated bar partitions parse
+  against, since those have no expiry to consult. Calendar spreads (`ESH4-ESM4`) fail to parse *by design* and are
+  reported-and-skipped, never refused — D-0033 legitimately keeps them in the
+  archive. The rule decides *when* to roll; expiry decides *that* you must: if
+  the rule never fires and the front stops trading first, the roll goes on the
+  last session both traded, the last instant the gap is observable without
+  inventing a price. A front contract still trading when the data ends has not
+  handed over — the data merely stopped — so the chain ends there, which is why
+  the real January-2024 ES archive yields a correct one-contract table instead
+  of a fictional roll on the 31st.
+- **D-0047** (2026-07-28) — **`keep_support_files` reports its failures through
+  `ExecuteReport` instead of swallowing them, and leaves `staging/` in place
+  when it could not move something.** Best-effort is right — the payload is
+  already archived and recorded by then — but best-effort is not the same as
+  silent: `condition.json` is what the data-QA report reads to tell a vendor
+  outage from a hole in our own pipeline, and an operator who is never told it
+  went missing finds out a milestone later. The library still never prints (§3);
+  the warnings ride the same route `dropped_symbols` already took and the CLI
+  renders them. Deleting staging after a failed rename would have destroyed the
+  very file being warned about.
+- **D-0048** (2026-07-28) — **The ban on reading the wall clock is a clippy
+  gate, not a comment.** `clippy.toml` disallows `SystemTime::now`,
+  `Instant::now`, `chrono::Utc::now` and `chrono::Local::now` workspace-wide,
+  and the one sanctioned site — `crucible-cli`'s `SystemClock` (D-0032) — carries
+  an `#[expect(clippy::disallowed_methods, reason = …)]` that names why. Why now:
+  D-0039 originally claimed that requesting `chrono` without its `clock` feature
+  made `Utc::now()` *not exist* in this build. Independent review falsified that
+  — `parquet` enables `chrono/clock`, Cargo unifies features across the graph,
+  and `Utc::now()` compiled fine. A comment asserting a guarantee that does not
+  hold is worse than no comment, so the claim is corrected everywhere it appeared
+  (Cargo.toml, the `calendar` module docs, CLAUDE.md §6, D-0039) **and** replaced
+  with something real. `expect` rather than `allow` throughout, per §5.6: an
+  exemption that stops being needed becomes a warning and gets deleted.
+- **D-0049** (2026-07-28) — **The archive layout is a checked contract, written
+  down in `docs/DATA_LAYOUT.md` and enforced by `crucible layout-check`.** Two
+  invariants: *no directory holds two instruments' data, and none holds two
+  kinds*. `raw/` is `{dataset}/{schema}/{symbol}/{window}` and `curated/` is
+  `{kind}/{instrument}/{grain}/{file}` — files exactly four components deep,
+  directories never more than three — with `{schema}` and `{kind}` closed sets,
+  because `ohclv-1m` is a transposition that looks plausible in a listing and
+  would hold paid-for data nothing ever reads. Seven violation classes, each
+  with a negative control that has been seen firing (§7); findings reported in full,
+  filesystem ones in walk order and manifest ones in record order, exit 4.
+  **The two trees nest in opposite orders on purpose** and the doc argues it at
+  length, because it reads like an inconsistency and the obvious "fix" destroys
+  something: `raw/` is keyed by the purchase tuple, which is what makes coverage
+  subtraction a directory listing and what a manifest `file_path` has to keep
+  meaning forever; `curated/` is keyed by the research question, and its
+  provenance lives in the file rather than the path precisely because derived
+  data can have several sources. What joins them is content identity — the raw
+  file's blake3 in every curated footer — not path shape, and that is why they
+  are free to differ. **No `--fix`, ever**: manifest paths name the bytes a
+  result read (D-0013/D-0014), so renaming an archived file retroactively and
+  silently breaks the provenance of every result that read it. A misplaced raw
+  file is corrected the way D-0017 corrects a corrupt one — a new acquisition at
+  a correct path — and curated data is simply deleted and rebuilt. Future shapes
+  are pinned now (`curated/trades/…`, `curated/book/…`,
+  `external/thetadata/options/{underlying}/{granularity}/…`, equities under
+  `raw/{equities-dataset}/…`) so the later work lands pre-separated. `external/`
+  keeps a **per-vendor inventory file, never merged into `manifest.jsonl`**:
+  the manifest's guarantee is "this tool fetched these bytes and hashed them
+  here", an inventory's is "a human says this came from there on that date", and
+  collapsing them would downgrade the first to the second for everything in it.
+- **D-0050** (2026-07-29) — ThetaData is adopted as a second vendor for US
+  equity/index **options** and US **equities**, landing under
+  `external/thetadata/` with its own append-only `inventory.jsonl`.
+  **Supersedes D-0010's** "no options/ThetaData" descope, which deferred them
+  post-M4 on scope grounds. Why now: the subscription is live and time-boxed,
+  so the acquisition window is the constraint, not the integration work — data
+  not pulled while subscribed is data that costs a new subscription to get.
+  Entitlements are whatever the running Terminal reports, never the published
+  tables: it logs `Stock: STANDARD  Options: PROFESSIONAL  Index: FREE` and
+  `Max concurrent requests: 8` (global, not per asset class), and the two
+  sources have been observed to disagree. Index endpoints answer 403, which
+  costs nothing, because the greeks endpoints carry `underlying_price` — a
+  1-minute index level for SPX/NDX/RUT/VIX arrives with the option data.
+- **D-0051** (2026-07-29) — `reqwest` is blessed for `crucible-data` under the
+  non-default `thetadata` feature, `default-features = false` (no TLS backend
+  at all). Why this crate and not another: it was **already in the dependency
+  graph** transitively under the `databento` feature, so this adds a direct
+  edge rather than a second HTTP stack to audit and compile; and the Theta
+  Terminal is a plaintext HTTP/1.1 server on `127.0.0.1`, so a TLS backend
+  would be dead weight. Cargo features are additive across the graph, so
+  asking for none here cannot weaken what the `databento` client resolves.
+  Same seam as D-0025: async lives in one module, behind a sync API, on a
+  private current-thread runtime, and `crucible-data` still starts no threads.
+  Retry-on-transport/429/5xx is unconditional here, unlike D-0035's carve-out
+  for Databento `submit`, because every call on this API is an idempotent
+  read — there is no submission analogue, and none may be invented.
+- **D-0052** (2026-07-29) — Eastern wall-clock timestamps that are
+  **ambiguous** (fall-back hour) are refused as corrupt, exactly like
+  **nonexistent** ones (spring-forward gap); neither is silently resolved.
+  Why: ThetaData stamps rows in local Eastern with no offset, so both
+  pathologies are reachable, and every such stamp becomes an `avail_ts` (§2.1).
+  Resolving an ambiguous stamp to the **earlier** candidate — the first
+  implementation, and wrong — asserts the information existed an hour before it
+  may have, making it visible to a strategy that could not have seen it: silent
+  lookahead, manufactured in the one module whose job is preventing it. Delay
+  is the conservative direction, since information withheld can only cost
+  measured performance, never fabricate knowledge. Both windows fall 01:00–03:00
+  on a **Sunday**, when no US equity or options session prints, so refusing is
+  free and surfaces corruption instead of absorbing it. If a future feed
+  genuinely trades through the ambiguous hour, the policy for a blind choice is
+  the **later** instant, never the earlier.
+- **D-0053** (2026-07-29) — The **canonical** greeks/IV surface for research is
+  the one we compute (parity forward + discount factor + Black-76 from `eod`
+  NBBO mids) over the whole 2012→now span. Vendor greeks are a **cross-check**
+  where they exist, never the feature input. Why: vendor greeks begin mid-sample
+  and at a different date per root — SPY ~2017, QQQ ~2013, NDX ~2026-06 — with
+  undocumented methodology, so a feature sourced from them silently changes
+  convention at each root's floor. That is a regime change baked into the data
+  and indistinguishable from a real one: the silent-wrong-results class this
+  project exists to prevent. One documented methodology across the full span,
+  validated against the vendor where available, is the reproducible choice
+  (§2.5), and it repairs the 2012–2017 greeks gap for free.
+- **D-0054** (2026-07-29) — ThetaData's `option/history/eod` returns **every
+  contract twice** in older eras: the vendor ran two post-close build passes and
+  serves both snapshots, so `rows = 2 × distinct(expiration, strike, right)`.
+  Measured vendor-wide (SPY, QQQ, SPX) and era-dependent: **duplicated through
+  at least 2021-12-15, clean from 2022-01-03**, the same boundary on SPY and
+  QQQ, so it is a vendor pipeline change at the 2021→2022 turn rather than
+  anything per-root. The number of build passes is **not** fixed at two —
+  2020-01-02 carries four distinct `created` values while every contract still
+  appears exactly twice, i.e. contracts are split across passes — so dedup
+  groups by contract key and never assumes a file-level count.
+  `option/history/open_interest` is **not** affected (ratio 1.000 on 2014,
+  2017, 2019 and 2024), so this is `eod`-specific, but the uniqueness gate
+  applies to every endpoint because the mechanism is a build-pipeline artefact
+  and nothing guarantees where it appears next. `greeks/eod` is already
+  deduplicated (ratio 1.000 wherever it exists). Consequences, all
+  merge-blocking: completeness accounting keys on **distinct contracts, never
+  raw rows** — an OI-weighted or GEX-style aggregate over raw `eod` rows would
+  silently double for affected eras, and this is worst below the greeks floor
+  where `eod` is the only source and has no `greeks/eod` to reconcile against.
+  Dedup groups by contract key and keeps `max(created)` — the final build, and
+  the conservative `avail_ts` direction per D-0052 — never assuming exactly two
+  builds. Pairs whose market fields are byte-equal are deduplicated silently
+  with a count recorded; pairs that **conflict** across builds are a revision
+  and are surfaced in the validation report as QA signal; the same
+  `(contract, created)` twice is a different bug and refuses the file. Dup rate
+  is recorded per file in the inventory as an era fingerprint. Note also that
+  column 5 is `created` (build-run time) in `eod` but `timestamp` (per-contract
+  update time) in `greeks/eod`: parsing is validated against a pinned header by
+  **name, never by position**, and the two land as separate `_ts` columns.
