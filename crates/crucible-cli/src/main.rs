@@ -24,6 +24,7 @@
 
 mod backtest;
 mod pull;
+mod rolls;
 mod transcode;
 
 use std::path::{Path, PathBuf};
@@ -90,6 +91,8 @@ enum Command {
     Transcode(transcode::TranscodeArgs),
     /// Replay curated bars through the reference strategy.
     Backtest(backtest::BacktestArgs),
+    /// Build a continuous-contract roll table from curated bars.
+    Rolls(rolls::RollsArgs),
 }
 
 fn main() {
@@ -112,6 +115,7 @@ fn main() {
         Some(Command::Verify) => pull::verify(),
         Some(Command::Transcode(args)) => transcode::run(&args),
         Some(Command::Backtest(args)) => backtest::run(&args),
+        Some(Command::Rolls(args)) => rolls::run(&args),
         // Bare `crucible` stays a zero-exit help screen: it is what a new
         // reader types first, and it has not failed at anything.
         None => {

@@ -54,5 +54,6 @@ pub mod transcode;
 mod testutil;
 
 pub use catalog::Catalog;
+pub use continuous::{AdjustedPrice, ContinuousBar, ContinuousFeed, RollTable};
 pub use curated::ParquetBarFeed;
 pub use synthetic::SyntheticFeed;
