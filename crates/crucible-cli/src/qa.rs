@@ -115,8 +115,11 @@ pub fn run(args: &QaArgs) -> i32 {
         }
     };
 
-    if let (Some(cal), Some(first)) = (calendar.as_ref(), report.first_ts_open) {
+    if let (Some(cal), Some(first), Some(last)) =
+        (calendar.as_ref(), report.first_ts_open, report.last_ts_open)
+    {
         warn_if_before_valid_from(cal, first);
+        note_era_boundaries(cal, first, last);
     }
     print!("{report}");
     if report.is_clean() {
@@ -147,6 +150,42 @@ fn warn_if_before_valid_from(calendar: &Calendar, first: crucible_core::types::T
              \x20        hours, so the coverage and gaps below are measured against the\n\
              \x20        wrong template.",
             calendar.id()
+        );
+    }
+}
+
+/// Names every session era the inspected span crosses.
+///
+/// Not a warning: crossing one is legal and the coverage numbers are right on
+/// both sides of it. It is printed because a *single* coverage percentage over
+/// a span containing two different exchanges is one number describing two
+/// things, and a reader who cannot see the boundary has no way to know that
+/// (D-0086).
+fn note_era_boundaries(
+    calendar: &Calendar,
+    first: crucible_core::types::Ts,
+    last: crucible_core::types::Ts,
+) {
+    use crucible_data::ingest::window::{date_of, days_from_civil};
+    let (from, to) = (
+        days_from_civil(date_of(first)),
+        days_from_civil(date_of(last)),
+    );
+    let crossed: Vec<String> = calendar
+        .era_starts()
+        .into_iter()
+        .filter(|start| {
+            let day = days_from_civil(*start);
+            day > from && day <= to
+        })
+        .map(|start| start.to_string())
+        .collect();
+    if !crossed.is_empty() {
+        println!(
+            "  note: this span crosses {} session era boundary/-ies ({}). The coverage\n\
+             \x20       figure below pools sessions of different lengths.",
+            crossed.len(),
+            crossed.join(", ")
         );
     }
 }

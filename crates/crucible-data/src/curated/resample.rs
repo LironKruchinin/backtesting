@@ -146,6 +146,8 @@ pub enum ResampleError {
     CalendarDeclaresHalts {
         /// Which calendar.
         calendar: String,
+        /// The trading day whose era declares the halt (D-0086).
+        trading_day: CivilDate,
     },
     /// No bundled calendar governs the instrument, so its sessions are unknown.
     NoCalendar {
@@ -209,12 +211,17 @@ impl core::fmt::Display for ResampleError {
                  {source} intervals, so a resampled bar would be built from a fraction of one \
                  and could become available before it"
             ),
-            ResampleError::CalendarDeclaresHalts { calendar } => write!(
+            ResampleError::CalendarDeclaresHalts {
+                calendar,
+                trading_day,
+            } => write!(
                 f,
-                "calendar {calendar} declares an intraday halt. A halt is a session boundary, and \
-                 this build anchors its bucket grid once per trading day — so a bucket could span \
-                 the break and the bar built from it would mix two sessions. Refusing rather than \
-                 producing that bar (D-0077)"
+                "calendar {calendar} declares an intraday halt for the era covering \
+                 {trading_day}. A halt is a session boundary, and this build anchors its bucket \
+                 grid once per trading day — so a bucket could span the break and the bar built \
+                 from it would mix two sessions. Refusing rather than producing that bar \
+                 (D-0077). The era, not the calendar, is what declares it (D-0086): a later era \
+                 of the same calendar may have no halt and resamples fine"
             ),
             ResampleError::NoCalendar { instrument } => write!(
                 f,
@@ -343,12 +350,6 @@ pub fn resample(
             target: target_tf,
         });
     }
-    if calendar.declares_halts() {
-        return Err(ResampleError::CalendarDeclaresHalts {
-            calendar: calendar.id().to_owned(),
-        });
-    }
-
     let mut out = BarColumns::default();
     let mut open_bucket: Option<Bucket> = None;
     // The anchor is recomputed only when the trading day changes, which for a
@@ -374,6 +375,19 @@ pub fn resample(
         let anchor = match anchored {
             Some((known, anchor)) if known == day => anchor,
             _ => {
+                // A halt is a session boundary, so a bucket anchored on the
+                // open could span one — refuse rather than emit a bar whose
+                // constituents sit either side of a break (D-0077). Asked PER
+                // TRADING DAY rather than per calendar since D-0086: CME equity
+                // index halted 15:15-15:30 CT through era 3a and stopped on
+                // 2021-06-28, so a calendar-wide answer would refuse every
+                // modern ES bar for a halt that ended years earlier.
+                if calendar.declares_halts_on(date) {
+                    return Err(ResampleError::CalendarDeclaresHalts {
+                        calendar: calendar.id().to_owned(),
+                        trading_day: date,
+                    });
+                }
                 let anchor = calendar.session_open(date).0;
                 if anchor.rem_euclid(source_ns) != 0 {
                     return Err(ResampleError::SessionOpenOffGrid {

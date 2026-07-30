@@ -70,8 +70,8 @@ pub use eastern::{EasternTimeError, eastern_wall_clock_to_ts};
 pub use error::CalendarError;
 
 use table::{
-    CalendarSpec, CalendarTable, Effect, LocalTime, SessionShape, TABLE_SCHEMA_VERSION, add_days,
-    is_weekday,
+    CalendarSpec, CalendarTable, Effect, LocalTime, SessionShape, SessionSpec,
+    TABLE_SCHEMA_VERSION, add_days, is_weekday,
 };
 
 /// Re-exported so callers need not reach into `ingest` for the date type the
@@ -86,6 +86,10 @@ const DAYS_PER_YEAR: f64 = 365.2425;
 /// The bundled calendar tables, compiled in rather than read from disk.
 const BUNDLED: &[(&str, &str)] = &[
     ("cme_globex.toml", include_str!("tables/cme_globex.toml")),
+    (
+        "cme_globex_commodities.toml",
+        include_str!("tables/cme_globex_commodities.toml"),
+    ),
     (
         "us_equity_options.toml",
         include_str!("tables/us_equity_options.toml"),
@@ -129,6 +133,21 @@ impl core::fmt::Display for SessionId {
         };
         write!(f, "{s}")
     }
+}
+
+/// The exchange's own wall clock at some instant.
+///
+/// Exists so that "what time was it *there*" can leave this module without a
+/// `chrono` type leaving with it. Every caller that wants to bucket bars by
+/// local time-of-day — the session-structure evidence in `docs/SESSION_ERAS.md`
+/// is the reason it was added — would otherwise have to name a timezone, and
+/// naming a timezone outside this module is what CLAUDE.md §4 forbids.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LocalReading {
+    /// Local civil date at that instant.
+    pub date: CivilDate,
+    /// Seconds since local midnight, in `0..86_400`.
+    pub seconds_of_day: i64,
 }
 
 /// Where a completed bar sits inside its trading session.
@@ -252,6 +271,27 @@ impl TradingDayCalendar {
 /// is cheap and happens per call — there is no global cache, deliberately:
 /// shared mutable state is exactly what §2.2 does not want between a config
 /// and a number.
+/// One session template and the first trading day it describes.
+///
+/// A calendar holds these sorted ascending and picks the last one that starts
+/// at or before the date being asked about. There is always at least one, and
+/// its `from` is the calendar's `valid_from`, so the lookup is total — which is
+/// what lets [`Calendar::open_intervals`] stay infallible (§ "Answering cannot
+/// fail").
+#[derive(Debug, Clone)]
+struct Era {
+    /// Days from the Unix epoch of the first trading day this template covers.
+    from_days: i64,
+    /// The date form of `from_days`, for messages.
+    from: CivilDate,
+    shape: SessionShape,
+    open_local: LocalTime,
+    close_local: LocalTime,
+    halts_local: Vec<(LocalTime, LocalTime)>,
+    rth_open_local: LocalTime,
+    rth_close_local: LocalTime,
+}
+
 #[derive(Debug, Clone)]
 pub struct Calendar {
     id: String,
@@ -259,12 +299,8 @@ pub struct Calendar {
     tz: chrono_tz::Tz,
     roots: Vec<String>,
     day_level_roots: Vec<String>,
-    shape: SessionShape,
-    open_local: LocalTime,
-    close_local: LocalTime,
-    halts_local: Vec<(LocalTime, LocalTime)>,
-    rth_open_local: LocalTime,
-    rth_close_local: LocalTime,
+    /// Session templates, ascending by start date. Never empty.
+    eras: Vec<Era>,
     valid_from: CivilDate,
     reference_start: CivilDate,
     reference_end: CivilDate,
@@ -360,6 +396,32 @@ impl Calendar {
     #[must_use]
     pub fn reference_rationale(&self) -> &str {
         &self.reference_rationale
+    }
+
+    /// The first trading day of each session era this calendar models,
+    /// ascending. Always at least one; the first is [`Calendar::valid_from`].
+    ///
+    /// Exposed so a report can say *which* era a span sits in rather than only
+    /// whether it starts before the table begins — a run spanning 2021-06-28
+    /// crosses a real session change, and a reader who cannot see that has to
+    /// take the annualization factor on faith.
+    #[must_use]
+    pub fn era_starts(&self) -> Vec<CivilDate> {
+        self.eras.iter().map(|era| era.from).collect()
+    }
+
+    /// The session template governing `date`.
+    ///
+    /// Total: dates before the oldest era get the oldest era, because the
+    /// alternative is a `Result` inside replay and there is nowhere to put one.
+    fn era_of(&self, date: CivilDate) -> &Era {
+        let days = days_from_civil(date);
+        self.eras
+            .iter()
+            .rev()
+            .find(|era| era.from_days <= days)
+            .or_else(|| self.eras.first())
+            .expect("INVARIANT: the loader refuses a calendar with no session template")
     }
 
     /// The recurring holiday rules, as `(name, source)`, in table order.
@@ -458,23 +520,45 @@ impl Calendar {
     /// before treating the answer as a session.
     #[must_use]
     pub fn trading_day(&self, ts: Ts) -> CivilDate {
-        let local = self.local_of(ts);
-        let date = CivilDate {
-            year: i64::from(local.year()),
-            month: local.month(),
-            day: local.day(),
-        };
-        let seconds = i64::from(local.hour()) * 3600
-            + i64::from(local.minute()) * 60
-            + i64::from(local.second());
+        let reading = self.local_reading(ts);
+        let date = reading.date;
+        // The era is chosen from the calendar date the instant falls on, not
+        // from the trading day, because the trading day is what is being
+        // computed. On an era boundary that can differ by one evening — a cost
+        // of at most one session, paid once per era, against a recursion that
+        // has no base case.
+        let era = self.era_of(date);
         // Only an overnight market attributes the evening to tomorrow. A
         // same-day market's trade date is simply the calendar date — rolling
         // it forward at 09:30 would label an entire session with the next
         // day's date.
-        if self.shape == SessionShape::Overnight && seconds >= self.open_local.seconds_of_day() {
+        if era.shape == SessionShape::Overnight
+            && reading.seconds_of_day >= era.open_local.seconds_of_day()
+        {
             add_days(date, 1)
         } else {
             date
+        }
+    }
+
+    /// The exchange's own wall clock at `ts`.
+    ///
+    /// Unlike [`Calendar::trading_day`] this makes no claim about which session
+    /// `ts` belongs to — it is the raw local reading, which is what evidence
+    /// gathering needs: bucketing bars by local time-of-day to *derive* a
+    /// session template cannot use a session template to do it.
+    #[must_use]
+    pub fn local_reading(&self, ts: Ts) -> LocalReading {
+        let local = self.local_of(ts);
+        LocalReading {
+            date: CivilDate {
+                year: i64::from(local.year()),
+                month: local.month(),
+                day: local.day(),
+            },
+            seconds_of_day: i64::from(local.hour()) * 3600
+                + i64::from(local.minute()) * 60
+                + i64::from(local.second()),
         }
     }
 
@@ -530,19 +614,28 @@ impl Calendar {
         if !self.is_trading_day(date) {
             return Vec::new();
         }
-        // The same two instants [`Calendar::session_open`] and
-        // [`Calendar::session_close`] answer with, so a bucket grid anchored on
-        // the open can never disagree with the intervals a coverage check walks
-        // (D-0077 — one definition, per D-0071's argument).
-        let start = self.session_open(date);
-        let end = self.session_close(date);
+        let era = self.era_of(date);
+        let close = match self.day_effect(date) {
+            DayEffect::EarlyClose { close_local, .. } => {
+                // Validated at load, so this cannot fail; parsing again is
+                // cheaper than carrying a second representation around.
+                LocalTime::parse(&close_local, &self.id, "close_local").unwrap_or(era.close_local)
+            }
+            _ => era.close_local,
+        };
+        let open_date = match era.shape {
+            SessionShape::Overnight => add_days(date, -1),
+            SessionShape::SameDay => date,
+        };
+        let start = self.instant(open_date, era.open_local);
+        let end = self.instant(date, close);
         if end <= start {
             return Vec::new();
         }
 
-        let mut intervals = Vec::with_capacity(self.halts_local.len() + 1);
+        let mut intervals = Vec::with_capacity(era.halts_local.len() + 1);
         let mut cursor = start;
-        for (from, to) in &self.halts_local {
+        for (from, to) in &era.halts_local {
             let halt_from = self.instant(date, *from);
             let halt_to = self.instant(date, *to);
             if halt_to <= cursor || halt_from >= end {
@@ -576,11 +669,12 @@ impl Calendar {
     /// [`Calendar::is_trading_day`] if the distinction matters.
     #[must_use]
     pub fn session_open(&self, date: CivilDate) -> Ts {
-        let open_date = match self.shape {
+        let era = self.era_of(date);
+        let open_date = match era.shape {
             SessionShape::Overnight => add_days(date, -1),
             SessionShape::SameDay => date,
         };
-        self.instant(open_date, self.open_local)
+        self.instant(open_date, era.open_local)
     }
 
     /// The instant trading day `date`'s session **closes**, honouring an early
@@ -595,9 +689,10 @@ impl Calendar {
             // Validated at load, so this cannot fail; parsing again is cheaper
             // than carrying a second representation around.
             DayEffect::EarlyClose { close_local, .. } => {
-                LocalTime::parse(&close_local, &self.id, "close_local").unwrap_or(self.close_local)
+                LocalTime::parse(&close_local, &self.id, "close_local")
+                    .unwrap_or(self.era_of(date).close_local)
             }
-            _ => self.close_local,
+            _ => self.era_of(date).close_local,
         };
         self.instant(date, close)
     }
@@ -612,9 +707,10 @@ impl Calendar {
     /// "was the exchange still open" is [`Calendar::session_close`].
     #[must_use]
     pub fn regular_hours(&self, date: CivilDate) -> (Ts, Ts) {
+        let era = self.era_of(date);
         (
-            self.instant(date, self.rth_open_local),
-            self.instant(date, self.rth_close_local),
+            self.instant(date, era.rth_open_local),
+            self.instant(date, era.rth_close_local),
         )
     }
 
@@ -654,16 +750,31 @@ impl Calendar {
 
     /// True when this calendar declares an intraday halt.
     ///
-    /// Neither bundled table does (D-0040 removed the 15:15–15:30 CT one the
-    /// CME contract-spec page claims, because our own archive falsifies it for
-    /// the current era). Exposed because a halt is a session boundary, and code
-    /// that anchors a bucket grid on the session open would silently let a
-    /// bucket span one — so [`resample`](crate::curated::resample) refuses a
-    /// calendar that declares halts rather than producing a bar whose
-    /// constituents sit either side of a break (D-0077).
+    /// **Any** era of this calendar, which is the conservative question.
+    ///
+    /// A halt is a session boundary, and code that anchors a bucket grid on the
+    /// session open would silently let a bucket span one — so
+    /// [`resample`](crate::curated::resample) refuses rather than producing a
+    /// bar whose constituents sit either side of a break (D-0077).
+    ///
+    /// Since D-0086 a calendar holds several eras and they need not agree: CME
+    /// equity index halted 15:15–15:30 CT through era 3a and stopped on
+    /// 2021-06-28. So this calendar-wide answer is **too coarse to gate a
+    /// resample with** — it would refuse every modern ES bar for a halt that
+    /// ended years earlier. Ask [`Calendar::declares_halts_on`] for a date.
     #[must_use]
     pub fn declares_halts(&self) -> bool {
-        !self.halts_local.is_empty()
+        self.eras.iter().any(|e| !e.halts_local.is_empty())
+    }
+
+    /// Whether the era covering `date` declares an intraday halt (D-0086).
+    ///
+    /// This is the question a bucket grid actually has, because the grid is
+    /// anchored once per trading day: a day in an era with no halt is safe to
+    /// resample even when an older era of the same calendar had one.
+    #[must_use]
+    pub fn declares_halts_on(&self, date: CivilDate) -> bool {
+        !self.era_of(date).halts_local.is_empty()
     }
 
     /// Which session `ts` falls in.
@@ -677,8 +788,9 @@ impl Calendar {
         {
             return SessionId::Closed;
         }
-        let rth_open = self.instant(day, self.rth_open_local);
-        let rth_close = self.instant(day, self.rth_close_local);
+        let era = self.era_of(day);
+        let rth_open = self.instant(day, era.rth_open_local);
+        let rth_close = self.instant(day, era.rth_close_local);
         if ts < rth_open {
             SessionId::Overnight
         } else if ts < rth_close {
@@ -844,20 +956,6 @@ impl Calendar {
             ));
         }
 
-        let open_local =
-            LocalTime::parse(&spec.session.open_local, &spec.id, "session.open_local")?;
-        let close_local =
-            LocalTime::parse(&spec.session.close_local, &spec.id, "session.close_local")?;
-        let rth_open_local = LocalTime::parse(
-            &spec.session.rth_open_local,
-            &spec.id,
-            "session.rth_open_local",
-        )?;
-        let rth_close_local = LocalTime::parse(
-            &spec.session.rth_close_local,
-            &spec.id,
-            "session.rth_close_local",
-        )?;
         // A day-level claim is a claim about an exchange this table does not
         // otherwise describe, so it must carry its own citation. Enforced at
         // load rather than trusted, because the whole value of `day_level_roots`
@@ -877,49 +975,6 @@ impl Calendar {
                 "root {both} appears in both roots and day_level_roots; hour-level \
                  already implies day-level"
             )));
-        }
-
-        match spec.session.shape {
-            SessionShape::Overnight if close_local >= open_local => {
-                return Err(invalid(format!(
-                    "the session closes at {}:{:02} and opens at {}:{:02}; an `overnight` trading \
-                     day must open on the previous calendar day and close on its own. If this \
-                     market opens and closes on the same day, say `shape = \"same_day\"`",
-                    close_local.hour, close_local.minute, open_local.hour, open_local.minute
-                )));
-            }
-            SessionShape::SameDay if close_local <= open_local => {
-                return Err(invalid(format!(
-                    "the session opens at {}:{:02} and closes at {}:{:02}; a `same_day` trading \
-                     day must close after it opens",
-                    open_local.hour, open_local.minute, close_local.hour, close_local.minute
-                )));
-            }
-            _ => {}
-        }
-        if rth_close_local <= rth_open_local {
-            return Err(invalid(
-                "the regular-hours window ends no later than it starts".to_owned(),
-            ));
-        }
-
-        let mut halts_local = Vec::with_capacity(spec.session.halt_local.len());
-        for pair in &spec.session.halt_local {
-            let from = LocalTime::parse(&pair[0], &spec.id, "session.halt_local")?;
-            let to = LocalTime::parse(&pair[1], &spec.id, "session.halt_local")?;
-            if to <= from {
-                return Err(invalid(format!(
-                    "halt {}:{:02}-{}:{:02} ends no later than it starts",
-                    from.hour, from.minute, to.hour, to.minute
-                )));
-            }
-            halts_local.push((from, to));
-        }
-        halts_local.sort();
-        for pair in halts_local.windows(2) {
-            if pair[1].0 < pair[0].1 {
-                return Err(invalid("two halts overlap".to_owned()));
-            }
         }
 
         let valid_from = parse_date(&spec.valid_from)
@@ -952,9 +1007,85 @@ impl Calendar {
         // Every citation in the file ends up in one list, so `sources()` is a
         // complete answer to "on what authority does this calendar say that".
         let mut sources = spec.sources;
-        sources.push(spec.session.source);
 
-        let close_local_normal = close_local;
+        // --- session eras -------------------------------------------------
+        //
+        // The current template plus every earlier one, each resolved to the
+        // first trading day it describes.
+        let has_eras = !spec.era.is_empty();
+        let mut templates: Vec<(CivilDate, SessionSpec)> = Vec::with_capacity(spec.era.len() + 1);
+        for earlier in spec.era {
+            let from = earlier.from.as_ref().ok_or_else(|| {
+                invalid(
+                    "an [[calendar.era]] entry has no `from`; an era that does not say when it \
+                     began cannot be ordered against its neighbours"
+                        .to_owned(),
+                )
+            })?;
+            let from = parse_date(from)
+                .ok_or_else(|| invalid(format!("era.from {from:?} is not a date")))?;
+            templates.push((from, earlier));
+        }
+        let current_from = match (&spec.session.from, has_eras) {
+            (Some(text), _) => parse_date(text)
+                .ok_or_else(|| invalid(format!("session.from {text:?} is not a date")))?,
+            (None, false) => valid_from,
+            (None, true) => {
+                return Err(invalid(
+                    "[calendar.session] has no `from` although the calendar declares earlier \
+                     eras. The era list says where each earlier template began; something has \
+                     to say where the current one did"
+                        .to_owned(),
+                ));
+            }
+        };
+        templates.push((current_from, spec.session));
+        templates.sort_by_key(|(from, _)| days_from_civil(*from));
+        // The newest template must be the current one, or `session` is not the
+        // session and a reader would have to check the dates to find out.
+        if templates
+            .last()
+            .is_some_and(|(from, _)| days_from_civil(*from) != days_from_civil(current_from))
+        {
+            return Err(invalid(
+                "an [[calendar.era]] entry starts after [calendar.session]; `session` is the \
+                 current era by definition"
+                    .to_owned(),
+            ));
+        }
+        if days_from_civil(templates[0].0) != days_from_civil(valid_from) {
+            return Err(invalid(format!(
+                "the oldest session template starts {}, but valid_from is {valid_from}. Every \
+                 date the calendar claims to describe must have a template describing it",
+                templates[0].0
+            )));
+        }
+
+        let mut eras: Vec<Era> = Vec::with_capacity(templates.len());
+        for (from, session) in templates {
+            let era = Self::era_from_spec(&spec.id, from, &session, &invalid)?;
+            if eras
+                .last()
+                .is_some_and(|previous| previous.from_days == era.from_days)
+            {
+                return Err(invalid(format!(
+                    "two session templates both start {from}; which one wins would depend on \
+                     file order"
+                )));
+            }
+            sources.push(session.source);
+            eras.push(era);
+        }
+
+        // An "early" close must be early in *every* era, so it is checked
+        // against the earliest normal close the calendar knows. Checking only
+        // the current one would let a 16:05 close through as valid for the era
+        // that shut at 16:15 and silently lengthen the era that shut at 16:00.
+        let close_local_normal = eras
+            .iter()
+            .map(|era| era.close_local)
+            .min()
+            .expect("INVARIANT: templates always contains [calendar.session]");
         let mut holidays = Vec::with_capacity(spec.holiday.len());
         for holiday in spec.holiday {
             if holiday.source.trim().is_empty() {
@@ -1030,12 +1161,7 @@ impl Calendar {
             tz,
             roots: spec.roots,
             day_level_roots: spec.day_level_roots,
-            shape: spec.session.shape,
-            open_local,
-            close_local,
-            halts_local,
-            rth_open_local,
-            rth_close_local,
+            eras,
             valid_from,
             reference_start,
             reference_end,
@@ -1047,12 +1173,112 @@ impl Calendar {
             trading_days_in_span: 0,
         };
 
+        // A reference span crossing an era boundary averages two different
+        // exchanges together and produces a `bars_per_year` describing neither.
+        // D-0039 stated this as a rationale in prose; D-0086 makes it a check,
+        // because the prose was true when it was written and became false the
+        // moment era 3 turned out to be two eras.
+        if let Some(crossed) = calendar.eras.iter().find(|era| {
+            era.from_days > days_from_civil(reference_start)
+                && era.from_days < days_from_civil(reference_end)
+        }) {
+            return Err(CalendarError::Invalid {
+                table,
+                calendar: calendar.id.clone(),
+                reason: format!(
+                    "reference_span {reference_start}..{reference_end} crosses the session era \
+                     starting {}; bars_per_year would average two different exchanges and \
+                     describe neither",
+                    crossed.from
+                ),
+            });
+        }
+
         // Walk the reference span once, now, so `bars_per_year` is O(1) and a
         // table that cannot be walked fails here rather than mid-backtest.
         let (seconds, days) = calendar.walk_reference_span(table)?;
         calendar.open_seconds_in_span = seconds;
         calendar.trading_days_in_span = days;
         Ok(calendar)
+    }
+
+    /// Validates one session template into an [`Era`].
+    ///
+    /// Every check the single-template loader used to make, now made once per
+    /// era — because an era is a session template and a template that only the
+    /// current one is checked against is a template nobody checked.
+    fn era_from_spec(
+        calendar: &str,
+        from: CivilDate,
+        session: &table::SessionSpec,
+        invalid: &impl Fn(String) -> CalendarError,
+    ) -> Result<Era, CalendarError> {
+        let open_local = LocalTime::parse(&session.open_local, calendar, "session.open_local")?;
+        let close_local = LocalTime::parse(&session.close_local, calendar, "session.close_local")?;
+        let rth_open_local =
+            LocalTime::parse(&session.rth_open_local, calendar, "session.rth_open_local")?;
+        let rth_close_local = LocalTime::parse(
+            &session.rth_close_local,
+            calendar,
+            "session.rth_close_local",
+        )?;
+
+        match session.shape {
+            SessionShape::Overnight if close_local >= open_local => {
+                return Err(invalid(format!(
+                    "the session from {from} closes at {}:{:02} and opens at {}:{:02}; an \
+                     `overnight` trading day must open on the previous calendar day and close on \
+                     its own. If this market opens and closes on the same day, say \
+                     `shape = \"same_day\"`",
+                    close_local.hour, close_local.minute, open_local.hour, open_local.minute
+                )));
+            }
+            SessionShape::SameDay if close_local <= open_local => {
+                return Err(invalid(format!(
+                    "the session from {from} opens at {}:{:02} and closes at {}:{:02}; a \
+                     `same_day` trading day must close after it opens",
+                    open_local.hour, open_local.minute, close_local.hour, close_local.minute
+                )));
+            }
+            _ => {}
+        }
+        if rth_close_local <= rth_open_local {
+            return Err(invalid(format!(
+                "the regular-hours window of the session from {from} ends no later than it starts"
+            )));
+        }
+
+        let mut halts_local = Vec::with_capacity(session.halt_local.len());
+        for pair in &session.halt_local {
+            let halt_from = LocalTime::parse(&pair[0], calendar, "session.halt_local")?;
+            let halt_to = LocalTime::parse(&pair[1], calendar, "session.halt_local")?;
+            if halt_to <= halt_from {
+                return Err(invalid(format!(
+                    "halt {}:{:02}-{}:{:02} in the session from {from} ends no later than it starts",
+                    halt_from.hour, halt_from.minute, halt_to.hour, halt_to.minute
+                )));
+            }
+            halts_local.push((halt_from, halt_to));
+        }
+        halts_local.sort();
+        for pair in halts_local.windows(2) {
+            if pair[1].0 < pair[0].1 {
+                return Err(invalid(format!(
+                    "two halts overlap in the session from {from}"
+                )));
+            }
+        }
+
+        Ok(Era {
+            from_days: days_from_civil(from),
+            from,
+            shape: session.shape,
+            open_local,
+            close_local,
+            halts_local,
+            rth_open_local,
+            rth_close_local,
+        })
     }
 
     fn walk_reference_span(&self, table: &'static str) -> Result<(i64, i64), CalendarError> {
@@ -1062,7 +1288,7 @@ impl Calendar {
         let mut days = 0i64;
         for offset in first..last {
             let date = crate::ingest::window::civil_from_days(offset);
-            if naive_datetime(date, self.open_local).is_none() {
+            if naive_datetime(date, self.era_of(date).open_local).is_none() {
                 return Err(CalendarError::Invalid {
                     table,
                     calendar: self.id.clone(),

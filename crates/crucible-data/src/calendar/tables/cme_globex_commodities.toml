@@ -1,0 +1,766 @@
+# CME Globex session calendars for energy, metals, FX and interest rates.
+#
+# Four products, four calendars, and they are four because the archive says the
+# four differ — not because four exchanges happen to be named. Everything below
+# was measured with `crates/crucible-data/examples/session_profile.rs` over
+# 2010-06-06..2026-07-28 of this project's own `ohlcv-1m` archive (CL 247
+# contracts / 29.5 M bars, GC 221 / 10.3 M, 6E 149 / 7.0 M, ZN 68 / 6.1 M) and
+# then cross-checked against CME's published hours. `docs/SESSION_ERAS.md` is
+# the workbook. Where the two disagree the archive wins and the disagreement is
+# written down here.
+#
+# ## What is the same across all four
+#
+# Sunday 17:00 CT through Friday 16:00 CT, with a 16:00-17:00 CT no-trade window
+# each day, and **no intraday halt**. The 15:15-15:30 CT halt that equity index
+# carried until 2021-06-28 never existed for any of these four: the window
+# traded on essentially every session of the archive for CL, GC, 6E and ZN.
+# CME's published Globex hours agree ("Sunday - Friday 5:00 p.m. - 4:00 p.m. CT
+# with a 60-minute break each day beginning at 4:00 p.m. CT").
+#
+# ## What is different, and how it was found
+#
+# * **CL, GC — the close moved 16:15 -> 16:00 CT on 2015-09-21**, the same date
+#   and the same advisory as equity index. The 16:00-16:15 CT window traded on
+#   all 78 Mon-Fri dates from 2015-06-01 to 2015-09-18 and on none of the 200
+#   from 2015-09-21 to 2016-06-29, for both roots. `valid_from` starts there.
+# * **6E — no era change at all.** Open 17:00, close 16:00 for every one of the
+#   sixteen years. The 2015-09-21 advisory did not touch it, and the archive
+#   shows the 16:00-16:15 window silent on all 280 Mon-Fri dates spanning it.
+# * **ZN — the open moved 17:30 -> 17:00 CT on Sunday 2011-10-02.** Sunday
+#   evenings first traded at 17:30 through 2011-09-25 and at 17:00 from
+#   2011-10-02, with no mixed week. The close was 16:00 CT throughout. No CME
+#   document for this change could be retrieved, so the boundary rests on the
+#   archive alone; `valid_from` is the first trading day after it.
+#
+# ## Holiday behaviour: three different schedules, none of them equity index's
+#
+# On the recurring US holidays (MLK, Presidents' Day, Memorial Day, Juneteenth,
+# Independence Day, Labor Day, Thanksgiving), measured as the last traded minute
+# before 17:00 CT:
+#
+#   equity index (for comparison)   12:00 CT
+#   CL, GC   2014-05-26 .. 2021     12:00 CT
+#   CL, GC   2022 ..                13:30 CT
+#   ZN       throughout             12:00 CT
+#   6E       .. 2021                12:00 CT
+#   6E       2022 ..                NO early close — the full session runs
+#
+# CME's own summary agrees with the modern half: "For Monday holidays, energy
+# and metals futures at CME NYMEX and COMEX close early at 1:30 PM CT, while
+# interest-rate and equity futures halt at 12:00 PM CT (noon)." It says nothing
+# about FX, and the archive does: MLK 2022-01-17 traded 6E to 15:58 CT while ES
+# stopped at 12:00, GC and CL at 13:30 and ZN at 12:00. Four products, four
+# answers, on one date — which is the whole reason these are four tables.
+#
+# Good Friday is a full closure for all four in a normal year. In the six years
+# the Employment Situation release landed on Good Friday the products diverge
+# again, and the archive is unambiguous about it:
+#
+#   2015-04-03 / 2021-04-02 / 2023-04-07 / 2026-04-03
+#     ES  abbreviated to 08:15 CT      6E, ZN  abbreviated to 10:15 CT
+#     CL, GC  fully closed — no day session and no evening session
+#
+# ## Known gaps, all of them listed
+#
+# - **The Friday before a Monday holiday closed at 15:15 CT for 6E and ZN, on
+#   sixteen dates between 2012-01-13 and 2015-05-22** (2012-01-13, 2012-02-17,
+#   2012-05-25, 2012-08-31, 2012-10-05, 2013-01-18, 2013-02-15, 2013-05-24,
+#   2013-08-30, 2014-01-17, 2014-02-14, 2014-05-23, 2014-08-29, 2015-01-16,
+#   2015-02-13, 2015-05-22 — identical date sets for both roots, and absent for
+#   ES, CL and GC). The pattern stops after 2015-05-22 and includes the Friday
+#   before Columbus Day in 2012 only, so no rule fits it and no CME document
+#   explaining it could be retrieved. NOT encoded: 45 minutes on sixteen dates,
+#   all before the 6E table's `valid_from` and inside the ZN table's, where they
+#   will show up as gaps in `crucible qa`. Refusing to guess a rule from a
+#   pattern with one exception in it is the cheaper error.
+# - **The day-after-Thanksgiving close moved 12:45 -> 13:45 CT for CL and GC and
+#   12:15 -> 13:45 CT for 6E, apparently in 2024.** The evidence is two years
+#   (2024-11-29 and 2025-11-28) against twelve at the older time, and 2025-11-28
+#   is also the Globex-outage date, so it is really one clean observation and
+#   one contaminated one. Encoded with `first_year = 2024` and this sentence,
+#   because a table that is wrong for the last two years is worse than one whose
+#   newest rule rests on a thin sample and says so.
+# - **Christmas Eve for 6E moved 12:15 -> 12:45 CT on the same two-year
+#   evidence** (2024-12-24, 2025-12-24 at 12:45; 2019-12-24 and 2020-12-24 at
+#   12:15; the years between fall on weekends or inside the 2021 closure).
+# - **On a Friday holiday CL and GC close at 12:00 CT rather than 13:30**
+#   (2025-07-04, 2026-06-19, 2026-07-03 — three for three). The effect kind
+#   carries one close time and cannot say "13:30 unless the holiday is a
+#   Friday", so 13:30 is encoded and the three dates are 90 minutes long in this
+#   table. Listed rather than carried silently, and listed rather than
+#   special-cased as one-offs, because the next Friday holiday would need
+#   another one.
+# - **2010-12-31 closed at 12:15 CT for 6E and ZN** and traded in full for ES,
+#   CL and GC. A single New Year's Eve — no other year in the archive shows it —
+#   so it is recorded here and not encoded. Outside both tables' `valid_from`.
+# - **The 2025-11-28 Globex outage is not encoded** for any root: the archive
+#   shows all seven roots opening at 07:30 CT instead of 00:00 that morning, and
+#   no CME-published notice could be retrieved.
+# - **`rth_open_local` / `rth_close_local` are the one thing here NOT measured
+#   from the archive.** They are the open-outcry floor hours these products
+#   inherited, and open outcry ended for CL and GC on 2016-12-30; CME no longer
+#   publishes a "regular trading hours" window for any of them. They are a
+#   convention, cited below, and they are used only by `Calendar::session_of` to
+#   label an instant `regular` or `overnight`. Nothing in `open_intervals`,
+#   `is_open`, `is_trading_day` or `bars_per_year` reads them.
+
+schema_version = 1
+
+# =========================================================================
+# NYMEX energy
+# =========================================================================
+
+[[calendar]]
+id = "cme_globex_energy"
+description = "CME Globex NYMEX energy futures (CL and its micro)"
+timezone = "America/Chicago"
+roots = ["CL", "MCL"]
+valid_from = "2015-09-21"
+sources = [
+  "https://www.cmegroup.com/markets/energy/crude-oil/light-sweet-crude.contractSpecs.html",
+  "https://www.cmegroup.com/tools-information/lookups/advisories/electronic-trading/20150914.html",
+  "https://www.cmegroup.com/trading-hours.html",
+]
+
+[calendar.session]
+# Sunday 17:00 CT to Friday 16:00 CT, 16:00-17:00 CT break daily, no halt.
+# Verified in the archive on all 16 years: the only closed window inside the
+# week is 16:00-17:00 CT (16:15-17:00 before 2015-09-21, which is outside
+# valid_from).
+open_local = "17:00"
+close_local = "16:00"
+rth_open_local = "08:00"
+rth_close_local = "13:30"
+source = "https://www.cmegroup.com/markets/energy/crude-oil/light-sweet-crude.contractSpecs.html"
+
+[calendar.reference_span]
+start = "2016-01-01"
+end = "2026-01-01"
+rationale = """
+Ten whole calendar years, entirely inside the one session era this table \
+describes, fixed forever so bars_per_year is reproducible on every machine. It \
+starts after valid_from so no 16:15-close session is averaged in, and both ends \
+are year boundaries so leap years and weekday drift average out. The 2022 \
+holiday-close change moves session *length* on nine days a year and does not \
+change the session template, so it is not an era and the span may cross it."""
+
+[[calendar.holiday]]
+name = "New Year's Day"
+rule = { kind = "fixed_date", month = 1, day = 1, observance = "sunday_to_monday" }
+effect = { kind = "closed" }
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Good Friday"
+# Fully closed even in the years the Employment Situation release lands on it —
+# 2023-04-07 and 2026-04-03 both have no day session and no evening session in
+# the archive, where ES ran to 08:15 CT and ZN to 10:15 CT.
+rule = { kind = "good_friday" }
+effect = { kind = "closed" }
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Christmas Day"
+rule = { kind = "fixed_date", month = 12, day = 25, observance = "nearest_weekday" }
+effect = { kind = "closed" }
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Martin Luther King Jr. Day"
+rule = { kind = "nth_weekday", month = 1, weekday = "monday", nth = 3 }
+effect = { kind = "early_close", close_local = "13:30" }
+first_year = 2022
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Martin Luther King Jr. Day (noon era)"
+rule = { kind = "nth_weekday", month = 1, weekday = "monday", nth = 3 }
+effect = { kind = "early_close", close_local = "12:00" }
+last_year = 2021
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Presidents' Day"
+rule = { kind = "nth_weekday", month = 2, weekday = "monday", nth = 3 }
+effect = { kind = "early_close", close_local = "13:30" }
+first_year = 2022
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Presidents' Day (noon era)"
+rule = { kind = "nth_weekday", month = 2, weekday = "monday", nth = 3 }
+effect = { kind = "early_close", close_local = "12:00" }
+last_year = 2021
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Memorial Day"
+rule = { kind = "nth_weekday", month = 5, weekday = "monday", nth = -1 }
+effect = { kind = "early_close", close_local = "13:30" }
+first_year = 2022
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Memorial Day (noon era)"
+rule = { kind = "nth_weekday", month = 5, weekday = "monday", nth = -1 }
+effect = { kind = "early_close", close_local = "12:00" }
+last_year = 2021
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Juneteenth"
+rule = { kind = "fixed_date", month = 6, day = 19, observance = "sunday_to_monday" }
+effect = { kind = "early_close", close_local = "13:30" }
+first_year = 2022
+source = "https://www.cmegroup.com/notices/ser/2021/12/SER-8887.pdf"
+
+[[calendar.holiday]]
+name = "Independence Day"
+rule = { kind = "fixed_date", month = 7, day = 4, observance = "nearest_weekday" }
+effect = { kind = "early_close", close_local = "13:30" }
+first_year = 2022
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Independence Day (noon era)"
+rule = { kind = "fixed_date", month = 7, day = 4, observance = "nearest_weekday" }
+effect = { kind = "early_close", close_local = "12:00" }
+last_year = 2021
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Labor Day"
+rule = { kind = "nth_weekday", month = 9, weekday = "monday", nth = 1 }
+effect = { kind = "early_close", close_local = "13:30" }
+first_year = 2022
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Labor Day (noon era)"
+rule = { kind = "nth_weekday", month = 9, weekday = "monday", nth = 1 }
+effect = { kind = "early_close", close_local = "12:00" }
+last_year = 2021
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Thanksgiving Day"
+rule = { kind = "nth_weekday", month = 11, weekday = "thursday", nth = 4 }
+effect = { kind = "early_close", close_local = "13:30" }
+first_year = 2022
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Thanksgiving Day (noon era)"
+rule = { kind = "nth_weekday", month = 11, weekday = "thursday", nth = 4 }
+effect = { kind = "early_close", close_local = "12:00" }
+last_year = 2021
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Day after Thanksgiving"
+# 13:45 CT since 2024 on two observations; 12:45 CT on the twelve before it.
+rule = { kind = "day_after_nth_weekday", month = 11, weekday = "thursday", nth = 4 }
+effect = { kind = "early_close", close_local = "13:45" }
+first_year = 2024
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Day after Thanksgiving (12:45 era)"
+rule = { kind = "day_after_nth_weekday", month = 11, weekday = "thursday", nth = 4 }
+effect = { kind = "early_close", close_local = "12:45" }
+last_year = 2023
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Christmas Eve"
+rule = { kind = "fixed_date", month = 12, day = 24, observance = "actual" }
+effect = { kind = "early_close", close_local = "12:45" }
+source = "https://www.cmegroup.com/trading-hours.html"
+
+# =========================================================================
+# COMEX metals
+# =========================================================================
+
+[[calendar]]
+id = "cme_globex_metals"
+description = "CME Globex COMEX metals futures (GC and its micro)"
+timezone = "America/Chicago"
+roots = ["GC", "MGC"]
+valid_from = "2015-09-21"
+sources = [
+  "https://www.cmegroup.com/markets/metals/precious/gold.contractSpecs.html",
+  "https://www.cmegroup.com/tools-information/lookups/advisories/electronic-trading/20150914.html",
+  "https://www.cmegroup.com/trading-hours.html",
+]
+
+[calendar.session]
+# Identical to energy in every measured respect — the two roots agree date for
+# date across sixteen years of the archive, on every session boundary and every
+# holiday. They are two calendars rather than one because their regular-hours
+# windows differ (COMEX gold's floor ran 07:20-12:30 CT, NYMEX crude's
+# 08:00-13:30 CT), and one shared table would have to be wrong about one of
+# them.
+open_local = "17:00"
+close_local = "16:00"
+rth_open_local = "07:20"
+rth_close_local = "12:30"
+source = "https://www.cmegroup.com/markets/metals/precious/gold.contractSpecs.html"
+
+[calendar.reference_span]
+start = "2016-01-01"
+end = "2026-01-01"
+rationale = """
+Ten whole calendar years, entirely inside the one session era this table \
+describes. Same reasoning as the energy calendar above, and deliberately the \
+same span so the two annualization factors differ only where the exchanges \
+do."""
+
+[[calendar.holiday]]
+name = "New Year's Day"
+rule = { kind = "fixed_date", month = 1, day = 1, observance = "sunday_to_monday" }
+effect = { kind = "closed" }
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Good Friday"
+rule = { kind = "good_friday" }
+effect = { kind = "closed" }
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Christmas Day"
+rule = { kind = "fixed_date", month = 12, day = 25, observance = "nearest_weekday" }
+effect = { kind = "closed" }
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Martin Luther King Jr. Day"
+rule = { kind = "nth_weekday", month = 1, weekday = "monday", nth = 3 }
+effect = { kind = "early_close", close_local = "13:30" }
+first_year = 2022
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Martin Luther King Jr. Day (noon era)"
+rule = { kind = "nth_weekday", month = 1, weekday = "monday", nth = 3 }
+effect = { kind = "early_close", close_local = "12:00" }
+last_year = 2021
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Presidents' Day"
+rule = { kind = "nth_weekday", month = 2, weekday = "monday", nth = 3 }
+effect = { kind = "early_close", close_local = "13:30" }
+first_year = 2022
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Presidents' Day (noon era)"
+rule = { kind = "nth_weekday", month = 2, weekday = "monday", nth = 3 }
+effect = { kind = "early_close", close_local = "12:00" }
+last_year = 2021
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Memorial Day"
+rule = { kind = "nth_weekday", month = 5, weekday = "monday", nth = -1 }
+effect = { kind = "early_close", close_local = "13:30" }
+first_year = 2022
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Memorial Day (noon era)"
+rule = { kind = "nth_weekday", month = 5, weekday = "monday", nth = -1 }
+effect = { kind = "early_close", close_local = "12:00" }
+last_year = 2021
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Juneteenth"
+rule = { kind = "fixed_date", month = 6, day = 19, observance = "sunday_to_monday" }
+effect = { kind = "early_close", close_local = "13:30" }
+first_year = 2022
+source = "https://www.cmegroup.com/notices/ser/2021/12/SER-8887.pdf"
+
+[[calendar.holiday]]
+name = "Independence Day"
+rule = { kind = "fixed_date", month = 7, day = 4, observance = "nearest_weekday" }
+effect = { kind = "early_close", close_local = "13:30" }
+first_year = 2022
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Independence Day (noon era)"
+rule = { kind = "fixed_date", month = 7, day = 4, observance = "nearest_weekday" }
+effect = { kind = "early_close", close_local = "12:00" }
+last_year = 2021
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Labor Day"
+rule = { kind = "nth_weekday", month = 9, weekday = "monday", nth = 1 }
+effect = { kind = "early_close", close_local = "13:30" }
+first_year = 2022
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Labor Day (noon era)"
+rule = { kind = "nth_weekday", month = 9, weekday = "monday", nth = 1 }
+effect = { kind = "early_close", close_local = "12:00" }
+last_year = 2021
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Thanksgiving Day"
+rule = { kind = "nth_weekday", month = 11, weekday = "thursday", nth = 4 }
+effect = { kind = "early_close", close_local = "13:30" }
+first_year = 2022
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Thanksgiving Day (noon era)"
+rule = { kind = "nth_weekday", month = 11, weekday = "thursday", nth = 4 }
+effect = { kind = "early_close", close_local = "12:00" }
+last_year = 2021
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Day after Thanksgiving"
+rule = { kind = "day_after_nth_weekday", month = 11, weekday = "thursday", nth = 4 }
+effect = { kind = "early_close", close_local = "13:45" }
+first_year = 2024
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Day after Thanksgiving (12:45 era)"
+rule = { kind = "day_after_nth_weekday", month = 11, weekday = "thursday", nth = 4 }
+effect = { kind = "early_close", close_local = "12:45" }
+last_year = 2023
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Christmas Eve"
+rule = { kind = "fixed_date", month = 12, day = 24, observance = "actual" }
+effect = { kind = "early_close", close_local = "12:45" }
+source = "https://www.cmegroup.com/trading-hours.html"
+
+# =========================================================================
+# CME FX
+# =========================================================================
+
+[[calendar]]
+id = "cme_globex_fx"
+description = "CME Globex FX futures (6E and its micro)"
+timezone = "America/Chicago"
+roots = ["6E", "M6E"]
+# The session template is unchanged across the whole archive, so valid_from
+# could go back to 2010-06-06. It does not, because the holiday schedule this
+# table encodes was measured from 2015 onwards and the 2012-2015 Friday-before-
+# a-Monday-holiday 15:15 CT closes (listed in the header) have no rule. Claiming
+# 2010 would be claiming a holiday set that is known to be incomplete there.
+valid_from = "2015-09-21"
+sources = [
+  "https://www.cmegroup.com/markets/fx/g10/euro-fx.contractSpecs.html",
+  "https://www.cmegroup.com/trading-hours.html",
+]
+
+[calendar.session]
+open_local = "17:00"
+close_local = "16:00"
+rth_open_local = "07:20"
+rth_close_local = "14:00"
+source = "https://www.cmegroup.com/markets/fx/g10/euro-fx.contractSpecs.html"
+
+[calendar.reference_span]
+start = "2016-01-01"
+end = "2026-01-01"
+rationale = """
+Ten whole calendar years, entirely inside the only session era this product \
+has had in the archive. The 2022 disappearance of the US-holiday early close \
+moves session length on seven days a year and does not change the template, so \
+it is not an era and the span may cross it."""
+
+[[calendar.holiday]]
+name = "New Year's Day"
+rule = { kind = "fixed_date", month = 1, day = 1, observance = "sunday_to_monday" }
+effect = { kind = "closed" }
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Good Friday"
+# Closed in a normal year; the Employment-Situation years ran to 10:15 CT and
+# are dated one-offs below, which take precedence.
+rule = { kind = "good_friday" }
+effect = { kind = "closed" }
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Christmas Day"
+rule = { kind = "fixed_date", month = 12, day = 25, observance = "nearest_weekday" }
+effect = { kind = "closed" }
+source = "https://www.cmegroup.com/trading-hours.html"
+
+# The seven US holidays, which stopped being early closes for FX in 2022. MLK
+# 2022-01-17 traded to 15:58 CT — a full session — on a day ES stopped at 12:00.
+# `last_year` is what says so; there is no `first_year = 2022` counterpart,
+# because after 2021 there is nothing to encode.
+
+[[calendar.holiday]]
+name = "Martin Luther King Jr. Day"
+rule = { kind = "nth_weekday", month = 1, weekday = "monday", nth = 3 }
+effect = { kind = "early_close", close_local = "12:00" }
+last_year = 2021
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Presidents' Day"
+rule = { kind = "nth_weekday", month = 2, weekday = "monday", nth = 3 }
+effect = { kind = "early_close", close_local = "12:00" }
+last_year = 2021
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Memorial Day"
+rule = { kind = "nth_weekday", month = 5, weekday = "monday", nth = -1 }
+effect = { kind = "early_close", close_local = "12:00" }
+last_year = 2021
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Independence Day"
+rule = { kind = "fixed_date", month = 7, day = 4, observance = "nearest_weekday" }
+effect = { kind = "early_close", close_local = "12:00" }
+last_year = 2021
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Labor Day"
+rule = { kind = "nth_weekday", month = 9, weekday = "monday", nth = 1 }
+effect = { kind = "early_close", close_local = "12:00" }
+last_year = 2021
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Thanksgiving Day"
+rule = { kind = "nth_weekday", month = 11, weekday = "thursday", nth = 4 }
+effect = { kind = "early_close", close_local = "12:00" }
+last_year = 2021
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Day after Thanksgiving"
+rule = { kind = "day_after_nth_weekday", month = 11, weekday = "thursday", nth = 4 }
+effect = { kind = "early_close", close_local = "13:45" }
+first_year = 2024
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Day after Thanksgiving (12:15 era)"
+rule = { kind = "day_after_nth_weekday", month = 11, weekday = "thursday", nth = 4 }
+effect = { kind = "early_close", close_local = "12:15" }
+last_year = 2023
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Christmas Eve"
+rule = { kind = "fixed_date", month = 12, day = 24, observance = "actual" }
+effect = { kind = "early_close", close_local = "12:45" }
+first_year = 2024
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Christmas Eve (12:15 era)"
+rule = { kind = "fixed_date", month = 12, day = 24, observance = "actual" }
+effect = { kind = "early_close", close_local = "12:15" }
+last_year = 2023
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.one_off]]
+date = "2015-04-03"
+name = "Good Friday with Nonfarm Payrolls"
+effect = { kind = "early_close", close_local = "10:15" }
+source = "https://www.cmegroup.com/tools-information/holiday-calendar/files/2015-good-friday-holiday-schedule.pdf"
+
+[[calendar.one_off]]
+date = "2021-04-02"
+name = "Good Friday with Nonfarm Payrolls"
+effect = { kind = "early_close", close_local = "10:15" }
+source = "https://www.cmegroup.com/tools-information/holiday-calendar/files/2021-good-friday-holiday-schedule.xls"
+
+[[calendar.one_off]]
+date = "2023-04-07"
+name = "Good Friday with Nonfarm Payrolls"
+effect = { kind = "early_close", close_local = "10:15" }
+source = "https://www.cmegroup.com/files/good-friday.pdf"
+
+[[calendar.one_off]]
+date = "2026-04-03"
+name = "Good Friday with Nonfarm Payrolls"
+effect = { kind = "early_close", close_local = "10:15" }
+source = "https://www.cmegroup.com/tools-information/holiday-calendar/files/2026/2026-good-friday-clearing-advisory.pdf"
+
+# =========================================================================
+# CBOT interest rates
+# =========================================================================
+
+[[calendar]]
+id = "cme_globex_rates"
+description = "CME Globex CBOT US Treasury futures (ZN)"
+timezone = "America/Chicago"
+roots = ["ZN"]
+# The 17:00 CT open starts here. Sunday evenings traded from 17:30 CT through
+# 2011-09-25 and from 17:00 CT on 2011-10-02, which makes Monday 2011-10-03 the
+# first trading day this template describes.
+valid_from = "2011-10-03"
+sources = [
+  "https://www.cmegroup.com/markets/interest-rates/us-treasury/10-year-us-treasury-note.contractSpecs.html",
+  "https://www.cmegroup.com/trading-hours.html",
+]
+
+[calendar.session]
+open_local = "17:00"
+close_local = "16:00"
+rth_open_local = "07:20"
+rth_close_local = "14:00"
+source = "https://www.cmegroup.com/markets/interest-rates/us-treasury/10-year-us-treasury-note.contractSpecs.html"
+
+[calendar.reference_span]
+start = "2016-01-01"
+end = "2026-01-01"
+rationale = """
+Ten whole calendar years, well inside the single session era this table \
+describes and after the 2012-2015 Friday-before-a-holiday 15:15 CT closes the \
+header lists, so none of those unencoded 45-minute days is averaged in."""
+
+[[calendar.holiday]]
+name = "New Year's Day"
+rule = { kind = "fixed_date", month = 1, day = 1, observance = "sunday_to_monday" }
+effect = { kind = "closed" }
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Good Friday"
+rule = { kind = "good_friday" }
+effect = { kind = "closed" }
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Christmas Day"
+rule = { kind = "fixed_date", month = 12, day = 25, observance = "nearest_weekday" }
+effect = { kind = "closed" }
+source = "https://www.cmegroup.com/trading-hours.html"
+
+# Neither Columbus Day nor Veterans Day appears here, and their absence is a
+# measurement rather than an oversight. The cash Treasury market observes both
+# (SIFMA recommends a full close), and `docs/THETADATA_PLAN.md` §8.1 records
+# Veterans Day as a day the NYSE trades and the bond market does not — but CBOT
+# Treasury *futures* on Globex traded a full session on every Columbus Day and
+# every Veterans Day in the archive. Cash and futures are different markets and
+# this table is about the futures.
+
+[[calendar.holiday]]
+name = "Martin Luther King Jr. Day"
+rule = { kind = "nth_weekday", month = 1, weekday = "monday", nth = 3 }
+effect = { kind = "early_close", close_local = "12:00" }
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Presidents' Day"
+rule = { kind = "nth_weekday", month = 2, weekday = "monday", nth = 3 }
+effect = { kind = "early_close", close_local = "12:00" }
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Memorial Day"
+rule = { kind = "nth_weekday", month = 5, weekday = "monday", nth = -1 }
+effect = { kind = "early_close", close_local = "12:00" }
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Juneteenth"
+rule = { kind = "fixed_date", month = 6, day = 19, observance = "sunday_to_monday" }
+effect = { kind = "early_close", close_local = "12:00" }
+first_year = 2022
+source = "https://www.cmegroup.com/notices/ser/2021/12/SER-8887.pdf"
+
+[[calendar.holiday]]
+name = "Independence Day"
+rule = { kind = "fixed_date", month = 7, day = 4, observance = "nearest_weekday" }
+effect = { kind = "early_close", close_local = "12:00" }
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Labor Day"
+rule = { kind = "nth_weekday", month = 9, weekday = "monday", nth = 1 }
+effect = { kind = "early_close", close_local = "12:00" }
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Thanksgiving Day"
+rule = { kind = "nth_weekday", month = 11, weekday = "thursday", nth = 4 }
+effect = { kind = "early_close", close_local = "12:00" }
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Day after Thanksgiving"
+rule = { kind = "day_after_nth_weekday", month = 11, weekday = "thursday", nth = 4 }
+effect = { kind = "early_close", close_local = "12:15" }
+source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Christmas Eve"
+rule = { kind = "fixed_date", month = 12, day = 24, observance = "actual" }
+effect = { kind = "early_close", close_local = "12:15" }
+source = "https://www.cmegroup.com/trading-hours.html"
+
+# There is no "day before Independence Day" rule here, and that is measured:
+# ES closed at 12:15 CT on 2013-07-03, 2014-07-03, 2017-07-03, 2018-07-03,
+# 2019-07-03, 2023-07-03, 2024-07-03 and 2025-07-03, and ZN traded to 16:00 CT
+# on every one of them.
+
+[[calendar.one_off]]
+date = "2012-10-29"
+name = "Hurricane Sandy — abbreviated session"
+# ES stopped at 08:15 CT and ZN at 11:00 CT; 2012-10-30 closed the equity
+# market and ZN traded a full session, so there is no ZN entry for it.
+effect = { kind = "early_close", close_local = "11:00" }
+source = "https://www.cftc.gov/sites/default/files/stellent/groups/public/@rulesandproducts/documents/ifdocs/rul102912cmecbotnymexandcomex1.pdf"
+
+[[calendar.one_off]]
+date = "2015-04-03"
+name = "Good Friday with Nonfarm Payrolls"
+effect = { kind = "early_close", close_local = "10:15" }
+source = "https://www.cmegroup.com/tools-information/holiday-calendar/files/2015-good-friday-holiday-schedule.pdf"
+
+[[calendar.one_off]]
+date = "2018-12-05"
+name = "National Day of Mourning — George H. W. Bush"
+# Fully closed for rates, where the equity market ran to 08:30 CT.
+effect = { kind = "closed" }
+source = "https://www.cmegroup.com/notices/ser/2018/12/SER-8289.pdf"
+
+[[calendar.one_off]]
+date = "2021-04-02"
+name = "Good Friday with Nonfarm Payrolls"
+effect = { kind = "early_close", close_local = "10:15" }
+source = "https://www.cmegroup.com/tools-information/holiday-calendar/files/2021-good-friday-holiday-schedule.xls"
+
+[[calendar.one_off]]
+date = "2023-04-07"
+name = "Good Friday with Nonfarm Payrolls"
+effect = { kind = "early_close", close_local = "10:15" }
+source = "https://www.cmegroup.com/files/good-friday.pdf"
+
+[[calendar.one_off]]
+date = "2025-01-09"
+name = "National Day of Mourning — Jimmy Carter"
+# 12:15 CT for rates, where the equity market ran to 08:30 CT.
+effect = { kind = "early_close", close_local = "12:15" }
+source = "https://www.cmegroup.com/content/dam/cmegroup/trading-hours/files/day-of-mourning-january-9-2024.pdf"
+
+[[calendar.one_off]]
+date = "2026-04-03"
+name = "Good Friday with Nonfarm Payrolls"
+effect = { kind = "early_close", close_local = "10:15" }
+source = "https://www.cmegroup.com/tools-information/holiday-calendar/files/2026/2026-good-friday-clearing-advisory.pdf"

@@ -53,13 +53,31 @@ pub(super) struct CalendarSpec {
     pub timezone: String,
     /// Root symbols governed by this calendar, e.g. `["ES", "NQ", "RTY"]`.
     pub roots: Vec<String>,
-    /// First date this session template actually describes the exchange,
-    /// `YYYY-MM-DD`. Exchanges restructure their sessions; answering about an
-    /// earlier date with these hours is wrong, so the boundary is recorded and
-    /// callers are told when they cross it.
+    /// First date this calendar describes the exchange at all, `YYYY-MM-DD`.
+    ///
+    /// With eras this is the start of the **oldest** one, and the loader
+    /// checks that: a `valid_from` earlier than every era would leave dates the
+    /// calendar claims to describe with no template to describe them with.
+    /// Answering about an earlier date still returns something — the functions
+    /// are total — but it is a later era's answer to an earlier era's question,
+    /// and `crucible qa` and `crucible backtest` say so.
     pub valid_from: String,
-    /// The weekly session template.
+    /// The **current** weekly session template — the newest era.
+    ///
+    /// Kept as its own field rather than as the last element of [`Self::era`]
+    /// because every table that predates eras means exactly this, and because
+    /// the common case (an exchange that has not restructured) should not have
+    /// to say the word "era" at all.
     pub session: SessionSpec,
+    /// Session templates for eras that have **ended**, each carrying the first
+    /// trading day it describes.
+    ///
+    /// A single-template calendar is a claim that the exchange has always run
+    /// these hours, and for CME equity index that claim was false by 45
+    /// minutes a day for three of the sixteen years this archive holds
+    /// (D-0086). Order does not matter; the loader sorts and checks.
+    #[serde(default)]
+    pub era: Vec<SessionSpec>,
     /// Span over which `bars_per_year` averages. Constant, so the number is
     /// the same on every machine forever.
     pub reference_span: ReferenceSpan,
@@ -121,6 +139,15 @@ pub(super) enum SessionShape {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct SessionSpec {
+    /// First trading day this template describes, `YYYY-MM-DD`.
+    ///
+    /// Required on every `[[calendar.era]]` entry, and required on
+    /// `[calendar.session]` too as soon as one era exists — an era list says
+    /// where each *earlier* template started, and something still has to say
+    /// where the current one did. Omitted on a single-template calendar, where
+    /// it can only be `valid_from`.
+    #[serde(default)]
+    pub from: Option<String>,
     /// Whether the session starts the calendar day before the trading day.
     #[serde(default)]
     pub shape: SessionShape,
@@ -219,6 +246,18 @@ pub(super) enum HolidayRule {
         day: u32,
         /// How the anchor's weekend landing is observed before stepping back.
         observance: Observance,
+        /// Weekdays the **unobserved** anchor may fall on for this rule to
+        /// fire at all. Empty means every weekday, which is the old behaviour.
+        ///
+        /// This exists because the early close before Independence Day happens
+        /// only when 4 July falls Tuesday–Friday, and a rule that could not say
+        /// so produced a confident early close on six dates the exchange traded
+        /// in full (D-0059 recorded the defect and could not fix it; D-0086
+        /// does). The condition is on the anchor rather than on the result
+        /// because that is how the exchange states it: it is about which
+        /// weekday the holiday lands on, not which weekday precedes it.
+        #[serde(default)]
+        anchor_weekday: Vec<Weekday>,
     },
     /// The day after an nth-weekday holiday — "the Friday after Thanksgiving".
     DayAfterNthWeekday {
@@ -424,15 +463,17 @@ impl HolidayRule {
                 month,
                 day,
                 observance,
+                anchor_weekday,
             } => {
-                let anchor = observed(
-                    CivilDate {
-                        year,
-                        month: *month,
-                        day: *day,
-                    },
-                    *observance,
-                );
+                let unobserved = CivilDate {
+                    year,
+                    month: *month,
+                    day: *day,
+                };
+                if !anchor_weekday.is_empty() && !anchor_weekday.contains(&weekday_of(unobserved)) {
+                    return None;
+                }
+                let anchor = observed(unobserved, *observance);
                 let mut candidate = add_days(anchor, -1);
                 // Step back to the last weekday. Bounded by construction: at
                 // most two steps reach a Friday from any Sunday.
@@ -626,6 +667,7 @@ mod tests {
                 month: 7,
                 day: 4,
                 observance: Observance::Actual,
+                anchor_weekday: Vec::new(),
             }
             .date_in_year(2026),
             Some(d(2026, 7, 3))
@@ -635,10 +677,38 @@ mod tests {
                 month: 7,
                 day: 4,
                 observance: Observance::NearestWeekday,
+                anchor_weekday: Vec::new(),
             }
             .date_in_year(2027),
             Some(d(2027, 7, 2))
         );
+    }
+
+    // The condition CME actually states: the early close before Independence
+    // Day happens only when 4 July falls Tuesday-Friday. 2024-07-04 is a
+    // Thursday, so 2024-07-03 qualifies; 2026-07-04 is a Saturday and
+    // 2021-07-04 a Sunday, so neither produces a date at all — where the
+    // unconditional rule produced 2026-07-03 and 2021-07-02, both of which the
+    // archive shows trading in full (D-0059's recorded defect, D-0086's fix).
+    #[test]
+    fn an_anchor_weekday_condition_suppresses_the_rule_entirely() {
+        let rule = HolidayRule::WeekdayBefore {
+            month: 7,
+            day: 4,
+            observance: Observance::Actual,
+            anchor_weekday: vec![
+                Weekday::Tuesday,
+                Weekday::Wednesday,
+                Weekday::Thursday,
+                Weekday::Friday,
+            ],
+        };
+        assert_eq!(rule.date_in_year(2024), Some(d(2024, 7, 3)));
+        assert_eq!(rule.date_in_year(2019), Some(d(2019, 7, 3)));
+        // 2026-07-04 Saturday, 2021-07-04 Sunday, 2022-07-04 Monday.
+        assert_eq!(rule.date_in_year(2026), None);
+        assert_eq!(rule.date_in_year(2021), None);
+        assert_eq!(rule.date_in_year(2022), None);
     }
 
     // The Friday after Thanksgiving 2024 is 2024-11-29.

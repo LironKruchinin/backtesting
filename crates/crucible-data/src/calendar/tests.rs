@@ -856,32 +856,25 @@ rationale = "fixture"
     ));
 }
 
-// DEFERRED DEFECT, asserted as it currently behaves — WRONGLY — on purpose.
+// The defect D-0059 recorded and deferred, now closed (D-0086) — same six
+// dates, opposite assertion.
 //
 // These six dates are NOT early closes at the real exchange. The NYSE (and
 // Cboe, whose 2026 schedule confirms it) closes early on 3 July only when
 // 4 July falls Tuesday-Friday; when it lands on a weekend or a Monday there is
-// no early close at all. `HolidayRule::WeekdayBefore` has no way to express
-// that condition, so the table fires anyway.
+// no early close at all. `HolidayRule::WeekdayBefore` had no way to express
+// that condition, so the table fired anyway, and this test asserted the wrong
+// behaviour on purpose so that whoever fixed it would have to flip it
+// deliberately. `anchor_weekday` is that fix, and this is that flip.
 //
-// **The fix is a rule-engine extension**: a `WeekdayBefore` variant carrying an
-// anchor-weekday predicate — roughly `only_when_anchor_weekday_in = ["tuesday",
-// "wednesday", "thursday", "friday"]` — applied before the step-back. Whoever
-// lands it must consciously flip this test, which is the entire point of
-// asserting the wrong behaviour rather than skipping the dates: a defect nobody
-// is forced to look at is a defect that survives.
-//
-// **Scope of the deferral.** This touches only the HOURS layer. It changes
-// `open_intervals`, `day_effect` and therefore `bars_per_year`; it does not
-// touch `is_trading_day`, so day-level coverage and every ThetaData
-// reconciliation edge are unaffected and T0 is unaffected. The gate ledger
-// carries it as an open defect **blocking the session-hours layer**: equity
-// `bars_per_year` and T1's intraday minute grids do not run over a table with
-// six known phantom early closes (D-0059).
+// The condition is checked against the **unobserved** anchor, which is why a
+// Saturday 4 July (2015, 2020, 2026) suppresses the rule even though the
+// observed holiday lands on Friday 3 July: the question is which weekday the
+// holiday falls on, not which weekday precedes it.
 #[test]
-fn the_known_spurious_july_early_closes_are_exactly_these_six() {
+fn the_six_july_early_closes_that_were_phantoms_are_ordinary_sessions() {
     let cal = us();
-    let expected = [
+    let phantoms = [
         (2015, 7, 2),
         (2016, 7, 1),
         (2020, 7, 2),
@@ -889,20 +882,18 @@ fn the_known_spurious_july_early_closes_are_exactly_these_six() {
         (2022, 7, 1),
         (2026, 7, 2),
     ];
-    for (year, month, day) in expected {
+    for (year, month, day) in phantoms {
         let date = CivilDate { year, month, day };
-        assert!(
-            matches!(cal.day_effect(date), DayEffect::EarlyClose { .. }),
-            "{year}-{month:02}-{day:02} is a known spurious early close; if this \
-             stopped firing the rule vocabulary improved and the doc gap should go"
+        assert_eq!(
+            cal.day_effect(date),
+            DayEffect::Normal,
+            "{year}-{month:02}-{day:02} is a full session at the real exchange"
         );
-        assert!(
-            cal.is_trading_day(date),
-            "it is still a trading day — only the close time is wrong"
-        );
+        assert!(cal.is_trading_day(date));
     }
     // And the genuine case still fires: 4 July 2024 was a Thursday, so
-    // Wednesday 3 July really was a 13:00 close.
+    // Wednesday 3 July really was a 13:00 close. Two-sided, because a rule
+    // that suppressed everything would also pass the loop above.
     assert!(matches!(
         cal.day_effect(CivilDate {
             year: 2024,
@@ -911,6 +902,470 @@ fn the_known_spurious_july_early_closes_are_exactly_these_six() {
         }),
         DayEffect::EarlyClose { .. }
     ));
+    // 2019-07-04 was a Thursday too, and 2013-07-04 a Thursday: both keep it.
+    assert!(matches!(
+        cal.day_effect(CivilDate {
+            year: 2019,
+            month: 7,
+            day: 3
+        }),
+        DayEffect::EarlyClose { .. }
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// Session eras (D-0086)
+// ---------------------------------------------------------------------------
+
+/// Two eras with different closes and a halt that exists in only one of them —
+/// the exact shape CME equity index had, reduced to arithmetic that fits in a
+/// comment.
+const ERAS: &str = r#"
+schema_version = 1
+
+[[calendar]]
+id = "test_eras"
+description = "two session eras, one with a halt"
+timezone = "America/Chicago"
+roots = ["YY"]
+valid_from = "2020-01-01"
+sources = ["hand-written test fixture"]
+
+[[calendar.era]]
+from = "2020-01-01"
+open_local = "17:00"
+close_local = "16:15"
+halt_local = [["15:15", "15:30"]]
+rth_open_local = "08:30"
+rth_close_local = "15:00"
+source = "hand-written test fixture"
+
+[calendar.session]
+from = "2024-06-03"
+open_local = "17:00"
+close_local = "16:00"
+rth_open_local = "08:30"
+rth_close_local = "15:00"
+source = "hand-written test fixture"
+
+[calendar.reference_span]
+start = "2025-01-01"
+end = "2026-01-01"
+rationale = "one calendar year, entirely inside the current era"
+"#;
+
+fn eras() -> Calendar {
+    let mut all = Calendar::parse_table("fixture", ERAS).expect("fixture parses");
+    all.pop().expect("fixture has one calendar")
+}
+
+// Tuesday 2024-05-28 is in era 1: 17:00 -> 15:15 (22h15m = 80,100 s) plus
+// 15:30 -> 16:15 (45m = 2,700 s) = 82,800 s = 23 h. Tuesday 2024-06-04 is in
+// era 2: 17:00 -> 16:00 = 82,800 s in one interval. Same total length,
+// different shape — which is exactly why a single-template calendar looks right
+// until you ask where the bars are.
+#[test]
+fn each_era_answers_with_its_own_session_template() {
+    let cal = eras();
+
+    let before = cal.open_intervals(d(2024, 5, 28));
+    assert_eq!(before.len(), 2, "era 1 has a halt");
+    assert_eq!(before[0].1.0 - before[0].0.0, 80_100 * 1_000_000_000);
+    assert_eq!(before[1].1.0 - before[1].0.0, 2_700 * 1_000_000_000);
+
+    let after = cal.open_intervals(d(2024, 6, 4));
+    assert_eq!(after.len(), 1, "era 2 has none");
+    assert_eq!(after[0].1.0 - after[0].0.0, 82_800 * 1_000_000_000);
+
+    assert_eq!(cal.era_starts(), vec![d(2020, 1, 1), d(2024, 6, 3)]);
+}
+
+// The boundary is a trading day, not a moment inside one: 2024-06-03 is the
+// first day answered by the new template and 2024-05-31 the last answered by
+// the old one.
+#[test]
+fn the_era_boundary_is_exact_to_the_trading_day() {
+    let cal = eras();
+    assert_eq!(cal.open_intervals(d(2024, 5, 31)).len(), 2);
+    assert_eq!(cal.open_intervals(d(2024, 6, 3)).len(), 1);
+}
+
+// A date before every era still gets an answer, because `open_intervals` is
+// total and there is nowhere to put a `Result` inside replay. It gets the
+// OLDEST era's answer — a later era's hours would be a bigger lie about an
+// earlier exchange.
+#[test]
+fn a_date_before_the_oldest_era_gets_the_oldest_eras_answer() {
+    let cal = eras();
+    assert_eq!(cal.open_intervals(d(2015, 6, 3)).len(), 2);
+}
+
+// The `\n` anchor matters: without it the pattern also matches inside
+// `valid_from = "2020-01-01"` and the mutation becomes a TOML syntax error,
+// which the test would happily accept for the wrong reason.
+#[test]
+fn an_era_without_a_from_is_refused() {
+    let bad = ERAS.replace("\nfrom = \"2020-01-01\"\n", "\n");
+    assert!(matches!(
+        Calendar::parse_table("fixture", &bad),
+        Err(CalendarError::Invalid { .. })
+    ));
+}
+
+#[test]
+fn a_session_without_a_from_beside_eras_is_refused() {
+    let bad = ERAS.replace("from = \"2024-06-03\"\n", "");
+    assert!(matches!(
+        Calendar::parse_table("fixture", &bad),
+        Err(CalendarError::Invalid { .. })
+    ));
+}
+
+// `session` is the current era by definition. A table whose `era` entry starts
+// later would silently make `session` describe the middle of history.
+#[test]
+fn an_era_newer_than_the_session_is_refused() {
+    let bad = ERAS.replace("\nfrom = \"2020-01-01\"\n", "\nfrom = \"2025-06-03\"\n");
+    assert!(matches!(
+        Calendar::parse_table("fixture", &bad),
+        Err(CalendarError::Invalid { .. })
+    ));
+}
+
+// A `valid_from` earlier than every template is a claim with nothing behind it.
+#[test]
+fn a_valid_from_before_the_oldest_era_is_refused() {
+    let bad = ERAS.replace("valid_from = \"2020-01-01\"", "valid_from = \"2019-01-01\"");
+    assert!(matches!(
+        Calendar::parse_table("fixture", &bad),
+        Err(CalendarError::Invalid { .. })
+    ));
+}
+
+#[test]
+fn two_templates_starting_on_the_same_day_are_refused() {
+    let bad = ERAS.replace("from = \"2024-06-03\"", "from = \"2020-01-01\"");
+    assert!(matches!(
+        Calendar::parse_table("fixture", &bad),
+        Err(CalendarError::Invalid { .. })
+    ));
+}
+
+// The check D-0039 stated as prose and D-0086 made binding: a reference span
+// that crosses an era boundary averages two exchanges and describes neither.
+#[test]
+fn a_reference_span_crossing_an_era_boundary_is_refused() {
+    let bad = ERAS.replace("start = \"2025-01-01\"", "start = \"2023-01-01\"");
+    let err = Calendar::parse_table("fixture", &bad).expect_err("must refuse");
+    match err {
+        CalendarError::Invalid { reason, .. } => {
+            assert!(
+                reason.contains("era"),
+                "the message must name the cause: {reason}"
+            );
+        }
+        other => panic!("wrong error: {other}"),
+    }
+}
+
+// An early close must be early in EVERY era, so it is checked against the
+// earliest normal close. 16:05 is before era 1's 16:15 and after era 2's 16:00.
+#[test]
+fn an_early_close_valid_in_one_era_only_is_refused() {
+    let bad = ERAS.replace(
+        "[calendar.reference_span]",
+        "[[calendar.holiday]]\n\
+         name = \"Plausible typo\"\n\
+         rule = { kind = \"fixed_date\", month = 3, day = 3, observance = \"actual\" }\n\
+         effect = { kind = \"early_close\", close_local = \"16:05\" }\n\
+         source = \"hand-written test fixture\"\n\n\
+         [calendar.reference_span]",
+    );
+    assert!(matches!(
+        Calendar::parse_table("fixture", &bad),
+        Err(CalendarError::Invalid { .. })
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// The bundled CME equity-index table, against the archive it was measured from
+// ---------------------------------------------------------------------------
+
+fn cme() -> Calendar {
+    Calendar::by_id("cme_globex_equity_index").expect("the bundled table must parse")
+}
+
+/// The instant of a local Chicago wall-clock time, derived by hand from the
+/// UTC offset the caller states. CST is UTC−6, CDT is UTC−5.
+fn chicago(date: CivilDate, hour: i64, minute: i64, utc_offset_hours: i64) -> Ts {
+    Ts((crate::ingest::window::days_from_civil(date) * 86_400
+        + (hour + utc_offset_hours) * 3600
+        + minute * 60)
+        * 1_000_000_000)
+}
+
+// THE D-0040 CORRECTION, CORRECTED (D-0086).
+//
+// The 15:15-15:30 CT halt was real until 2021-06-25 and gone from 2021-06-28.
+// The archive says so with 2,018 silent trading dates before and 1,344 fully
+// traded ones after; CME's SER-8788R says so too. A table with one session
+// template cannot hold both answers, and the one it held was right for January
+// 2024 and wrong for the five and a half years before it.
+#[test]
+fn the_afternoon_halt_exists_in_era_3a_and_not_in_era_3b() {
+    let cal = cme();
+    // Tuesday 2018-05-08, 15:20 CDT (UTC-5) = 20:20 UTC.
+    assert!(
+        !cal.is_open(chicago(d(2018, 5, 8), 15, 20, 5)),
+        "the halt was real in 2018"
+    );
+    // Wednesday 2024-05-08, same wall clock.
+    assert!(
+        cal.is_open(chicago(d(2024, 5, 8), 15, 20, 5)),
+        "and gone in 2024"
+    );
+    // The last era-3a session and the first era-3b one, to the day.
+    assert!(!cal.is_open(chicago(d(2021, 6, 25), 15, 20, 5)));
+    assert!(cal.is_open(chicago(d(2021, 6, 28), 15, 20, 5)));
+}
+
+// Era 2 closed at 16:15 CT and era 3 at 16:00. Friday 2014-05-16 at 16:05 CDT
+// was trading; Friday 2016-05-20 at the same wall clock was not.
+#[test]
+fn the_close_moved_from_sixteen_fifteen_to_sixteen_hundred_in_2015() {
+    let cal = cme();
+    assert!(cal.is_open(chicago(d(2014, 5, 16), 16, 5, 5)));
+    assert!(!cal.is_open(chicago(d(2016, 5, 20), 16, 5, 5)));
+    assert_eq!(
+        cal.era_starts(),
+        vec![d(2012, 11, 19), d(2015, 9, 21), d(2021, 6, 28)]
+    );
+    assert_eq!(cal.valid_from(), d(2012, 11, 19));
+}
+
+// Christmas landing on a Saturday closes the Friday before; New Year's Day
+// landing on a Saturday does not. Both are measured: 2021-12-24 has no session
+// at all in the archive and 2021-12-31 is a full one.
+#[test]
+fn a_saturday_christmas_closes_the_friday_and_a_saturday_new_year_does_not() {
+    let cal = cme();
+    assert!(!cal.is_trading_day(d(2021, 12, 24)));
+    assert_eq!(cal.open_intervals(d(2021, 12, 24)), Vec::new());
+    assert!(cal.is_trading_day(d(2021, 12, 31)));
+    assert_eq!(cal.day_effect(d(2021, 12, 31)), DayEffect::Normal);
+    // Christmas Eve on an ordinary weekday is still a 12:15 early close.
+    assert!(matches!(
+        cal.day_effect(d(2024, 12, 24)),
+        DayEffect::EarlyClose { .. }
+    ));
+}
+
+// The Monday holidays were full closures in 2013-2014 and 12:00 CT halts from
+// 2014/2015. Measured from the last traded minute before 17:00 CT, and from
+// the Sunday evenings that did not open.
+#[test]
+fn the_monday_holidays_were_closures_before_they_were_halts() {
+    let cal = cme();
+    assert!(matches!(
+        cal.day_effect(d(2013, 1, 21)),
+        DayEffect::Closed { .. }
+    ));
+    assert!(matches!(
+        cal.day_effect(d(2014, 1, 20)),
+        DayEffect::Closed { .. }
+    ));
+    assert!(matches!(
+        cal.day_effect(d(2015, 1, 19)),
+        DayEffect::EarlyClose { .. }
+    ));
+    // Memorial Day switched a year earlier than MLK did.
+    assert!(matches!(
+        cal.day_effect(d(2013, 5, 27)),
+        DayEffect::Closed { .. }
+    ));
+    assert!(matches!(
+        cal.day_effect(d(2014, 5, 26)),
+        DayEffect::EarlyClose { .. }
+    ));
+}
+
+// The July-3 early close, and the condition that stops it. 4 July 2024 was a
+// Thursday (so 3 July closed early); 4 July 2022 was a Monday and 2026 a
+// Saturday (so neither 1 July 2022 nor 2 July 2026 did).
+#[test]
+fn the_day_before_independence_day_closes_early_only_when_the_fourth_is_midweek() {
+    let cal = cme();
+    assert!(matches!(
+        cal.day_effect(d(2024, 7, 3)),
+        DayEffect::EarlyClose { .. }
+    ));
+    assert!(matches!(
+        cal.day_effect(d(2013, 7, 3)),
+        DayEffect::EarlyClose { .. }
+    ));
+    assert_eq!(cal.day_effect(d(2022, 7, 1)), DayEffect::Normal);
+    assert_eq!(cal.day_effect(d(2026, 7, 2)), DayEffect::Normal);
+    // 2012-07-03 traded in full: the rule starts in 2013.
+    assert_eq!(cal.day_effect(d(2012, 7, 3)), DayEffect::Normal);
+}
+
+// ---------------------------------------------------------------------------
+// The four new tables (D-0086), against the archive they were measured from
+// ---------------------------------------------------------------------------
+
+// Every root the acquisition basket holds now resolves to a calendar, and to
+// the right one. Before D-0086 four of the seven resolved to nothing and
+// `bars_per_year` fell back to measuring the sample.
+#[test]
+fn every_archived_root_resolves_to_its_own_calendar() {
+    for (contract, expected) in [
+        ("ESH2024", "cme_globex_equity_index"),
+        ("NQH2024", "cme_globex_equity_index"),
+        ("RTYH2024", "cme_globex_equity_index"),
+        ("CLM2024", "cme_globex_energy"),
+        ("GCZ2014", "cme_globex_metals"),
+        ("6EH2024", "cme_globex_fx"),
+        ("ZNH2024", "cme_globex_rates"),
+    ] {
+        let cal = Calendar::for_instrument(&InstrumentId::new(contract))
+            .expect("tables parse")
+            .unwrap_or_else(|| panic!("{contract} must be claimed"));
+        assert_eq!(cal.id(), expected, "for {contract}");
+    }
+}
+
+// One date, four answers — the reason these are four tables and not one.
+// MLK Day 2022-01-17, from the last traded minute before 17:00 CT in the
+// archive: ES 12:00, ZN 12:00, CL and GC 13:30, 6E a full session to 15:58.
+#[test]
+fn one_holiday_has_four_different_answers_across_the_four_calendars() {
+    let mlk = d(2022, 1, 17);
+    let close_of = |id: &str| match Calendar::by_id(id).expect("bundled").day_effect(mlk) {
+        DayEffect::EarlyClose { close_local, .. } => close_local,
+        DayEffect::Normal => "normal".to_owned(),
+        DayEffect::Closed { .. } => "closed".to_owned(),
+    };
+    assert_eq!(close_of("cme_globex_equity_index"), "12:00");
+    assert_eq!(close_of("cme_globex_rates"), "12:00");
+    assert_eq!(close_of("cme_globex_energy"), "13:30");
+    assert_eq!(close_of("cme_globex_metals"), "13:30");
+    assert_eq!(close_of("cme_globex_fx"), "normal");
+    // And before 2022 energy closed at noon like everything else.
+    assert!(matches!(
+        Calendar::by_id("cme_globex_energy")
+            .expect("bundled")
+            .day_effect(d(2019, 1, 21)),
+        DayEffect::EarlyClose { close_local, .. } if close_local == "12:00"
+    ));
+    // As did FX, which stopped observing the holiday rather than moving it.
+    assert!(matches!(
+        Calendar::by_id("cme_globex_fx")
+            .expect("bundled")
+            .day_effect(d(2021, 1, 18)),
+        DayEffect::EarlyClose { close_local, .. } if close_local == "12:00"
+    ));
+}
+
+// A Good Friday carrying the Employment Situation release: equity index runs to
+// 08:15 CT, rates and FX to 10:15 CT, and energy and metals do not open at all.
+// Measured on 2023-04-07 and 2026-04-03; both years agree.
+#[test]
+fn a_nonfarm_payrolls_good_friday_splits_the_five_calendars_three_ways() {
+    for date in [d(2023, 4, 7), d(2026, 4, 3)] {
+        assert!(matches!(
+            cme().day_effect(date),
+            DayEffect::EarlyClose { close_local, .. } if close_local == "08:15"
+        ));
+        for id in ["cme_globex_rates", "cme_globex_fx"] {
+            assert!(
+                matches!(
+                    Calendar::by_id(id).expect("bundled").day_effect(date),
+                    DayEffect::EarlyClose { close_local, .. } if close_local == "10:15"
+                ),
+                "{id} on {date}"
+            );
+        }
+        for id in ["cme_globex_energy", "cme_globex_metals"] {
+            assert!(
+                matches!(
+                    Calendar::by_id(id).expect("bundled").day_effect(date),
+                    DayEffect::Closed { .. }
+                ),
+                "{id} on {date}"
+            );
+            assert!(!Calendar::by_id(id).expect("bundled").is_trading_day(date));
+        }
+    }
+}
+
+// The bond-calendar assumption, refused because the archive refuses it.
+// `docs/THETADATA_PLAN.md` §8.1 records Veterans Day as a day the NYSE trades
+// and the bond market does not, and that is true of the *cash* market. CBOT
+// Treasury futures on Globex traded a full session on every Columbus Day and
+// every Veterans Day in the archive, so this table has neither.
+#[test]
+fn treasury_futures_trade_through_columbus_day_and_veterans_day() {
+    let zn = Calendar::by_id("cme_globex_rates").expect("bundled");
+    for date in [
+        d(2024, 10, 14), // Columbus Day 2024
+        d(2023, 10, 9),
+        d(2024, 11, 11), // Veterans Day 2024
+        d(2025, 11, 11),
+    ] {
+        assert_eq!(zn.day_effect(date), DayEffect::Normal, "{date}");
+        assert!(zn.is_trading_day(date), "{date}");
+    }
+    // Two-sided: the holidays it DOES observe still fire.
+    assert!(matches!(
+        zn.day_effect(d(2024, 11, 28)),
+        DayEffect::EarlyClose { .. }
+    ));
+}
+
+// The equity-index July-3 rule is equity-index's alone: ZN and CL traded to
+// 16:00 CT on every one of the July 3rds ES closed early on.
+#[test]
+fn only_equity_index_closes_early_the_day_before_independence_day() {
+    let zn = Calendar::by_id("cme_globex_rates").expect("bundled");
+    let cl = Calendar::by_id("cme_globex_energy").expect("bundled");
+    for date in [d(2017, 7, 3), d(2019, 7, 3), d(2024, 7, 3), d(2025, 7, 3)] {
+        assert!(matches!(
+            cme().day_effect(date),
+            DayEffect::EarlyClose { .. }
+        ));
+        assert_eq!(zn.day_effect(date), DayEffect::Normal, "{date}");
+        assert_eq!(cl.day_effect(date), DayEffect::Normal, "{date}");
+    }
+}
+
+// None of the four new calendars carries the 15:15-15:30 CT halt, because none
+// of the four products ever had it. Same wall clock, same date, five calendars.
+#[test]
+fn no_commodity_calendar_carries_the_equity_index_halt() {
+    let ts = chicago(d(2018, 5, 8), 15, 20, 5);
+    assert!(!cme().is_open(ts), "equity index was halted");
+    for id in [
+        "cme_globex_energy",
+        "cme_globex_metals",
+        "cme_globex_fx",
+        "cme_globex_rates",
+    ] {
+        assert!(
+            Calendar::by_id(id).expect("bundled").is_open(ts),
+            "{id} traded straight through"
+        );
+    }
+}
+
+// The ZN open moved 17:30 -> 17:00 CT on Sunday 2011-10-02, which is why this
+// table's `valid_from` is the Monday after it. Answering about an earlier date
+// is legal and wrong by half an hour, and `qa` warns; what must not happen is
+// the table silently claiming to describe it.
+#[test]
+fn the_rates_table_begins_where_its_open_time_does() {
+    let zn = Calendar::by_id("cme_globex_rates").expect("bundled");
+    assert_eq!(zn.valid_from(), d(2011, 10, 3));
+    assert_eq!(zn.era_starts(), vec![d(2011, 10, 3)]);
 }
 
 // ------------------------------------------------------- the session clock
@@ -1034,12 +1489,46 @@ fn the_session_endpoints_are_the_ones_open_intervals_uses() {
 fn halts_are_declared_where_they_exist_and_nowhere_else() {
     assert!(!plain().declares_halts());
     assert!(shaped().declares_halts());
+}
+
+/// The tripwire this replaced fired on the D-0077/D-0086 merge, exactly as its
+/// author intended: it asserted no bundled calendar declares a halt, and said in
+/// its own message that if one ever did, "D-0077's per-day bucket anchor needs
+/// revisiting". Era 3a of CME equity index declares one, so it did.
+///
+/// The revisit is done, and this is the sharper invariant that replaces it: the
+/// question a bucket grid has is per **trading day**, not per calendar, because
+/// the grid is anchored once a day. A calendar-wide answer would refuse every
+/// modern ES bar for a halt that ended on 2021-06-28.
+#[test]
+fn the_halt_gate_is_asked_per_trading_day_not_per_calendar() {
+    let cal = Calendar::by_id("cme_globex_equity_index").expect("bundled table loads");
+
+    // Calendar-wide: yes, some era of it halts. That is the coarse answer now.
+    assert!(
+        cal.declares_halts(),
+        "era 3a of equity index halts 15:15-15:30 CT (D-0086)"
+    );
+
+    // Era 3a — the halt is real, and a bucket grid must refuse those days.
+    assert!(cal.declares_halts_on(d(2019, 3, 14)));
+    assert!(cal.declares_halts_on(d(2021, 6, 25)));
+
+    // Era 3b — CME's SER-8788R removed it effective 2021-06-28, so from that
+    // day a bucket grid is safe and `resample` proceeds.
+    assert!(!cal.declares_halts_on(d(2021, 6, 28)));
+    assert!(!cal.declares_halts_on(d(2024, 1, 3)));
+
+    // And the other bundled tables declare none at all, on any date.
     for id in Calendar::bundled_ids().expect("bundled tables parse") {
-        let cal = Calendar::by_id(&id).expect("bundled table loads");
+        if id == "cme_globex_equity_index" {
+            continue;
+        }
+        let other = Calendar::by_id(&id).expect("bundled table loads");
         assert!(
-            !cal.declares_halts(),
-            "{id} declares a halt; `resample` now refuses it, and D-0077's \
-             per-day bucket anchor needs revisiting"
+            !other.declares_halts(),
+            "{id} grew a halt; the per-day gate covers it, but its era boundary \
+             needs a fixture here the way equity index has one"
         );
     }
 }

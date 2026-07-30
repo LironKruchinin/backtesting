@@ -2484,3 +2484,116 @@ propose a superseding entry — don't silently diverge.
   still fails and the combo is still killed. S0's *verdict* is therefore not a
   leak detector — the IC readout is. Detecting a leak is the permutation and
   truncation harnesses' job, which is `stats` and still owed.
+- **D-0086** (2026-07-30) — **A session calendar carries session ERAS, and the
+  four products that had no table now have one — all of it measured from the
+  archive.** Full workbook in `docs/SESSION_ERAS.md`; the instrument is
+  `crucible-data/examples/session_profile.rs`, which bits every nonzero-volume
+  bar into a `(local civil date, local minute-of-day)` grid and reads open,
+  close, halt and holiday behaviour off it. (Amends D-0039; corrects the scope
+  of D-0040; closes the defect D-0059 deferred.)
+  **The correction that motivated it.** D-0040 deleted the 15:15–15:30 CT halt
+  from the equity-index table after finding 315 nonzero-volume ESH4 bars inside
+  it in January 2024. The measurement was right and the generalisation was not:
+  over the whole archive that window carries **0.04 traded minutes per date on
+  2,018 Mon–Fri dates from 2015-01-01 to 2021-06-25, and 15.00 on every one of
+  the 1,344 from 2021-06-28**. CME's SER-8788R eliminated the halt effective
+  2021-06-28. So the table was right for the month it was checked against and
+  wrong for the five and a half years before it — and a calendar with one
+  session template cannot hold both answers. That is the third side (§7): the
+  archive and the spec page disagreed, and the era boundary is what makes them
+  agree.
+  **The mechanism.** `[calendar.session]` stays the *current* era and gains an
+  optional `from`; `[[calendar.era]]` entries carry earlier templates, each with
+  its own open, close, halts and RTH window. The loader sorts them, refuses an
+  era without a `from`, a `session` without one beside eras, an era newer than
+  `session`, two templates on one date, and a `valid_from` earlier than the
+  oldest era. `open_intervals`, `session_of` and `trading_day` pick the last era
+  starting at or before the date; a date before every era gets the **oldest**
+  era's answer, because the functions are total and a later era's hours would be
+  a bigger lie about an earlier exchange. `reference_span` may no longer cross an
+  era boundary — D-0039 stated that as prose and it became false the moment era 3
+  turned out to be two eras, so it is a load-time check now.
+  **Equity index gains two eras and loses one warning.** `valid_from` moves
+  2015-09-21 → **2012-11-19**; era 2 (close 16:15, halt 15:15–15:30) and era 3a
+  (close 16:00, halt 15:15–15:30) join era 3b. Unmodelled history drops from 5.3
+  years to 2.4. **Era 1 is still not modelled, deliberately**: its trading day
+  opens 15:30 on D−1 with a halt at 16:30–17:00 *on D−1*, and that block is
+  absent whenever D−1 is not a trading day. The template can express neither, and
+  both approximations were measured before being rejected — one produces ~30,000
+  out-of-session bars per contract, the other ~60 phantom expected bars a week.
+  `docs/SESSION_ERAS.md` §1.1 records the shape so nobody re-derives it.
+  **Three more equity-index corrections, each measured.** Holiday treatment
+  changed twice independently of the session eras (10:30 CT closes in era 1;
+  **full closures** 2013-01-21..2014-02-17, proved by the Sunday evenings that
+  did not open — 6 of 8 between 2013-01-06 and 2013-02-24, the two missing being
+  the eves of MLK and Presidents' Day; 12:00 CT from 2014/2015). Christmas
+  landing on a Saturday closes the Friday before (2010-12-24 and 2021-12-24 have
+  no session at all) while New Year's Day landing on a Saturday does not
+  (2010-12-31 and 2021-12-31 are full sessions) — so the two rules now differ,
+  where before both were `sunday_to_monday` and 2021-12-24 got a 12:15 close it
+  never had. And the day before Independence Day is a 12:15 CT close on eight
+  dates, all and only the years from 2013 where 4 July fell Tuesday–Friday.
+  **That last one closes D-0059's deferred defect.** `HolidayRule::WeekdayBefore`
+  gains `anchor_weekday`, a condition on the **unobserved** anchor, and
+  `us_equity_options.toml` uses it too: the six phantom NYSE early closes D-0059
+  named (2015-07-02, 2016-07-01, 2020-07-02, 2021-07-02, 2022-07-01, 2026-07-02)
+  are ordinary sessions again. The test that asserted the wrong behaviour on
+  purpose was flipped, which is exactly what it existed for.
+  **Four new tables, and they are four because the products differ.** MLK Day
+  2022-01-17, last traded minute before 17:00 CT: **ES 12:00, ZN 12:00, CL 13:30,
+  GC 13:30, 6E 15:58 — a full session.** One date, four answers. A Good Friday
+  carrying the Employment Situation release splits them three ways again (ES
+  08:15, ZN and 6E 10:15, CL and GC shut), on four independent years that agree.
+  `cme_globex_energy` (CL), `cme_globex_metals` (GC), `cme_globex_fx` (6E) and
+  `cme_globex_rates` (ZN) join the bundle; every root the acquisition basket
+  holds now resolves to a calendar, so `bars_per_year` stops falling back to
+  measuring the sample for four of the seven.
+  **Two disagreements with CME's published hours, and the archive wins both.**
+  (1) Every published summary puts FX on the same noon holiday halt as the rest
+  of the exchange; 6E stopped observing it entirely in 2022 and has traded full
+  sessions on every recurring US holiday since. (2) The bond market observes
+  Columbus Day and Veterans Day and `docs/THETADATA_PLAN.md` §8.1 records
+  Veterans Day as one the NYSE trades and the bond market does not — but CBOT
+  Treasury **futures** traded a full session on every one of them in sixteen
+  years, so `cme_globex_rates` has neither. Cash and futures are different
+  markets; the prior was checked and refuted rather than assumed. CL and GC
+  produced no disagreement: CME's published hours and holiday summary match the
+  archive to the minute.
+  **What is deliberately NOT modelled, with its size.** The 15:15 CT Friday
+  closes 6E and ZN took before sixteen Monday holidays between 2012-01-13 and
+  2015-05-22 (no rule fits a pattern that includes Columbus Day once and never
+  again, and no CME document was retrievable); the 12:00 CT rather than 13:30 CT
+  close CL and GC take when the holiday is a **Friday** (three for three, but
+  `Effect::EarlyClose` carries one time); the 2010-12-31 12:15 CT close 6E and ZN
+  took and nobody else did; the 2025-11-28 Globex outage. Each is listed in the
+  table header with its date list and its cost.
+  **`rth_open_local`/`rth_close_local` on the four new tables are the one field
+  not measured**, and they say so: open outcry ended for CL and GC on 2016-12-30
+  and CME publishes no RTH window for any of them, so the values are the
+  inherited floor hours, cited, and read only by `session_of` — never by
+  `open_intervals`, `is_open`, `is_trading_day` or `bars_per_year`.
+  **What moved.** `bars_per_year(1m)` for equity index: **354,319 → 353,963**
+  (−0.10 %), because the reference span moved 2016-01-01..2026-01-01 →
+  2022-01-01..2026-01-01 to stop straddling the 2021-06-28 boundary. Neither
+  span contains the halt, so the difference is entirely the holiday mix of a
+  different set of years. The ESH4 January-2024 reference run is bit-identical
+  (30,167 bars, −23.51 %, 665 round trips, $76,486.25), and all three
+  determinism hashes are unchanged — dollars do not touch the calendar.
+  **What the archive QA found.** 26 `qa` runs, one front contract per era per
+  root. Out-of-session bars in era 3b: **zero, all seven roots**. In era 3a:
+  5–36 per month, every one stamped 15:15 or 16:00 CT — a settlement print in
+  the boundary minute, on 71 and 72 of 1,496 ES dates respectively, against
+  D-0040's systematic 15 minutes × 21 days. Moving the halt to absorb them would
+  be fitting the table to noise. **Two genuine archive holes**, each exactly one
+  trading session and each reported `available` by the vendor: **GC 2012-09-12**
+  and **ZN 2014-10-03**, 1,380 one-minute bars apiece. Every other whole-day
+  absence is on the vendor's own `degraded` list (28 dates), and the thirteen
+  dates the vendor calls `missing` are all Saturdays. Reported, not re-pulled.
+  **A blind detector stopped being blind, as a side effect.** D-0072's
+  `the_gap_inside_sessions_check_passes_on_the_merged_partition` had two reasons
+  for silence, and the first — "no bundled calendar claims gold" — is gone. The
+  test keeps its original assertion for the calendar-less call that the bug
+  report made, and a companion asserts that the same planted merge is now loud
+  (>1.87 M missing bars, coverage under 0.1 %). That is a consequence of building
+  a metals table, not the "strengthening" §9 refuses, and the partition key is
+  still what fixes the bug.

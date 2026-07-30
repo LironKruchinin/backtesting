@@ -464,9 +464,14 @@ reference; supersede the decision if you disagree — don't hotfix.
 - **Neither the `ts_open` monotonicity check nor the gap-inside-sessions check
   could have caught D-0072**, and there are tests asserting they still pass on
   the merged fixture. Ordering is a statement about neighbours and aliasing is
-  one about identity; the ten-year hole falls *between* sessions, and gold has no
+  one about identity; the ten-year hole falls *between* sessions, and gold had no
   bundled calendar so `qa` never even looked. Do not "strengthen" either check to
-  cover this — the partition key is what fixes it.
+  cover this — the partition key is what fixes it. **Gold has a calendar now**
+  (D-0086), so the second reason is gone and the same planted merge is loud —
+  over 1.87 M missing bars, coverage under 0.1 %. That is a side effect of
+  building a metals session table, and there is a companion test asserting it;
+  the original test keeps its assertion for the calendar-less call the bug
+  report actually made.
 - **`ParquetBarFeed` loads bars into RAM rather than mmap'ing them**, and
   `ParquetBarFeed::open` does all the failing: `Feed::next_event` returns
   `Option`, not `Result`, so a feed must have no errors left to report by the
@@ -510,19 +515,56 @@ reference; supersede the decision if you disagree — don't hotfix.
   because `ohlcv` has no bar for an interval with no trade. Neither is wrong
   and the calendar is used (D-0039, superseding D-0038's sample default). A
   large gap means a thin contract or a hole — that is the point of showing it.
-- **The bundled CME calendar has no 15:15–15:30 CT halt**, though CME's own
-  E-mini contract-spec page lists one. Our archive falsifies it for the
-  current era: ESH4 January 2024 has 315 bars with nonzero volume in exactly
-  that window (D-0040). The archive is evidence; the spec page is a claim.
-- **Most CME "holidays" are early closes at 12:00 CT, not closures**, and the
-  evening before still opens. CME's trading-hours *landing page* says
-  "Globex closed" and its per-holiday grids disagree; the grids win, and MLK
-  2024-01-15 in our archive agrees with them. Encoding closures would delete a
-  real overnight session plus a real morning from 16 years of backtests.
-- **The calendar answers about 2013 even though it says `valid_from`
-  2015-09-21**: the functions are total by design — there is nowhere to put a
-  `Result` inside replay. `qa` and `backtest` warn when a span starts earlier;
-  the two older session eras are documented in the table, not modelled.
+- **The 15:15–15:30 CT halt exists in one era of the equity-index calendar and
+  not in the next**, and both are right (D-0086). D-0040 deleted it after
+  finding 315 nonzero-volume ESH4 bars inside it in January 2024; that
+  measurement stands, and January 2024 is era 3b. Over the whole archive the
+  window carries 0.04 traded minutes per date on 2,018 dates from 2015-01-01 to
+  2021-06-25 and 15.00 on every one of the 1,344 from 2021-06-28 — and CME's
+  SER-8788R removed it effective exactly 2021-06-28. The archive is still the
+  evidence; what changed is that the table can now hold two answers.
+- **A calendar carries session ERAS, and `[calendar.session]` is the current
+  one** (D-0086). Earlier templates are `[[calendar.era]]` entries with their
+  own `from`, open, close, halts and RTH. A `reference_span` that crosses an era
+  boundary is REFUSED at load: `bars_per_year` averaged over two different
+  exchanges describes neither, which D-0039 said in prose and which stopped
+  being true the moment era 3 turned out to be two eras.
+- **Era 1 of CME equity index (2010-06-06 .. 2012-11-16) is documented and NOT
+  modelled**, and `valid_from = 2012-11-19` says so. Its trading day opens 15:30
+  CT on D−1 with a halt at 16:30–17:00 CT *on D−1*, and that evening block is
+  absent whenever D−1 is not itself a trading day — the template can express
+  neither. Both approximations were measured before being rejected (≈30,000
+  out-of-session bars per contract, or ≈60 phantom expected bars a week);
+  `docs/SESSION_ERAS.md` §1.1 has the shape so nobody re-derives it. `qa` and
+  `backtest` still warn for a span starting earlier, and the functions stay
+  total — a date before every era gets the OLDEST era's answer, because a later
+  era's hours would be a bigger lie about an earlier exchange.
+- **Most CME "holidays" are early closes rather than closures — but not at the
+  same time, and not at the same hour for every product.** CME's trading-hours
+  *landing page* says "Globex closed" and its per-holiday grids disagree; the
+  grids win, and MLK 2024-01-15 agrees with them. What the archive adds
+  (D-0086): equity index ran **full closures** from 2013-01-21 to 2014-02-17 —
+  proved by the Sunday evenings that did not open — and 10:30 CT closes in era 1;
+  and on MLK 2022-01-17 the last traded minute was 12:00 CT for ES and ZN, 13:30
+  for CL and GC, and 15:58 for 6E, which traded a full session. One date, four
+  answers, which is why there are four commodity calendars and not one.
+- **`cme_globex_rates` has no Columbus Day and no Veterans Day**, although the
+  cash Treasury market closes on both and `docs/THETADATA_PLAN.md` §8.1 records
+  Veterans Day as a day the NYSE trades and the bond market does not. CBOT
+  Treasury **futures** on Globex traded a full session on every one of them in
+  sixteen years (D-0086). Cash and futures are different markets; the prior was
+  checked and refuted, not assumed.
+- **Christmas landing on a Saturday closes the Friday before and New Year's Day
+  landing on a Saturday does not**, so the two rules are written differently
+  (D-0086). 2010-12-24 and 2021-12-24 have no session at all in the archive;
+  2010-12-31 and 2021-12-31 are full ones. Making them symmetric re-introduces
+  the 12:15 CT close 2021-12-24 never had.
+- **`rth_open_local`/`rth_close_local` on the four commodity tables are a cited
+  convention, not a measurement**, and are the only field in them that is.
+  Open outcry ended for CL and GC on 2016-12-30 and CME publishes no RTH window
+  for any of the four, so the values are the inherited floor hours. They are
+  read only by `Calendar::session_of`; nothing in `open_intervals`, `is_open`,
+  `is_trading_day` or `bars_per_year` touches them.
 - **`curated/bars/ESH2024/5m` never exists, and that is not an unfinished
   transcode** (D-0077). The archive stores the grain the vendor sent — `1s` and
   `1m` — and `5m`/`15m`/`1h`/`1d` are aggregated on read, on the exchange's own
@@ -541,11 +583,21 @@ reference; supersede the decision if you disagree — don't hotfix.
   session close, so it says "the request cut this bar" and never "the exchange
   did". A 12:15 CT close makes bucket 19 of an hourly resample fifteen minutes
   long, which its volume states.
-- **`resample` refuses a calendar declaring an intraday halt**, though neither
-  bundled table declares one (D-0040, D-0077). The bucket grid is anchored once
-  per trading day, so a halt — which is a session boundary — could sit inside a
-  bucket. The refusal costs nothing today and is what stops "no bar spans a
-  session boundary" from silently becoming false the day a table grows a halt.
+- **`resample` refuses a halt PER TRADING DAY, not per calendar** (D-0077,
+  D-0086). The bucket grid is anchored once per trading day, so a halt — which
+  is a session boundary — could sit inside a bucket, and refusing beats emitting
+  a bar whose constituents straddle a break. The gate was calendar-wide until
+  the eras merge, when equity index grew a real halt in era 3a: a calendar-wide
+  answer would then have refused **every modern ES bar** for a halt that ended
+  on 2021-06-28. `Calendar::declares_halts_on(date)` is what the grid asks;
+  `declares_halts()` survives as the coarse question and is documented as too
+  blunt to gate with.
+
+  Worth noting how this was caught, because it is the pattern working: the
+  resampler's author left a test asserting *no bundled calendar declares a
+  halt*, whose failure message read "D-0077's per-day bucket anchor needs
+  revisiting". It fired on the merge, on the exact day a table grew a halt.
+  A tripwire that names its own remedy is worth more than a comment.
 - **`crucible qa` exits 4 when it finds something**, like `verify`. A
   scheduled job that reads "coverage 61 %" as success is worse than no job.
 - **`AdjustedPrice` cannot be converted to `Price`, and that is the feature**

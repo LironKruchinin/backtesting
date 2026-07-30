@@ -1,57 +1,108 @@
-# CME Globex session calendars.
+# CME Globex equity index session calendar.
 #
-# Every claim here was checked against a CME-published document in July 2026;
-# the URL sits beside the rule it supports. Two things are worth knowing before
-# trusting a number that came out of this file.
+# Every claim here is either checked against a CME-published document (the URL
+# sits beside the rule it supports) or measured out of this project's own bar
+# archive, and where the two disagree the archive wins and the disagreement is
+# written down. `crates/crucible-data/examples/session_profile.rs` is the
+# instrument every count below came from; `docs/SESSION_ERAS.md` is the full
+# workbook. Four things are worth knowing before trusting a number that came
+# out of this file.
 #
-# ## 1. This describes the CURRENT session era only
+# ## 1. THREE session eras are modelled, and one older one is not
 #
-# CME has restructured the equity-index Globex day twice inside this archive's
-# window:
+# CME has restructured the equity-index Globex day three times inside this
+# archive's window. Counting nonzero-volume ES 1-minute bars by local minute
+# (America/Chicago) over 2010-06-06..2026-07-28 gives:
 #
-#   era 1  ..2012-11-16   close 15:15 CT, no intraday halt, trade date D began
-#                         15:30 CT on D-1
-#   era 2  2012-11-19 ..  close 16:15 CT, open 17:00 CT
+#   era 1  ..2012-11-16   Mon-Thu 00:00-15:15, 15:30-16:30, 17:00-24:00
+#                         Fri     00:00-15:15 and nothing after
+#                         -> trade date D = 15:30 on D-1 to 15:15 on D, with an
+#                            evening halt 16:30-17:00 on D-1
+#   era 2  2012-11-19 ..  open 17:00, close 16:15, halt 15:15-15:30
 #          2015-09-18
-#   era 3  2015-09-21 ..  close 16:00 CT, open 17:00 CT   <- what this file says
+#   era 3a 2015-09-21 ..  open 17:00, close 16:00, halt 15:15-15:30
+#          2021-06-25
+#   era 3b 2021-06-28 ..  open 17:00, close 16:00, NO halt   <- [calendar.session]
 #
-#   era 1->2: https://www.cmegroup.com/tools-information/lookups/advisories/clearing/files/Chadv12-423.pdf
-#   era 2->3: https://www.cmegroup.com/tools-information/lookups/advisories/electronic-trading/20150914.html
+#   era 1->2:  https://www.cmegroup.com/tools-information/lookups/advisories/clearing/files/Chadv12-423.pdf
+#   era 2->3a: https://www.cmegroup.com/tools-information/lookups/advisories/electronic-trading/20150914.html
+#   era 3a->3b: https://www.cmegroup.com/notices/ser/2021/06/SER-8788R.pdf
 #
-# `valid_from` below pins that. Asking this calendar about a 2013 session gets
-# an era-3 answer, which is wrong by 15 minutes a day; `crucible qa` and
-# `crucible backtest` both say so out loud when a span starts earlier. Modelling
-# the earlier eras needs a per-era session template and is deliberately not in
-# v1 — the bar archive this project actually replays starts in 2024.
+# Each boundary is located from the bars, not from the advisory, and then found
+# to agree with it:
 #
-# ## 2. The 15:15-15:30 CT halt is NOT encoded, on purpose
+#   * era 1->2. The 16:16-16:30 CT post-close block last traded 2012-11-15 and
+#     was silent on all 158 following trading dates through 2013-06-28. Friday
+#     2012-11-16 still closed 15:15 CT (era 1); Friday 2012-11-30 closed 16:15
+#     CT (era 2). The advisory's effective date, Monday 2012-11-19, is the only
+#     date consistent with both.
+#   * era 2->3a. The 16:00-16:15 CT window traded on every one of the 78 Mon-Fri
+#     dates from 2015-06-01 to 2015-09-18 and on none of the 200 from
+#     2015-09-21 to 2016-06-29. Boundary: 2015-09-21, exactly as advertised.
+#     CL, GC and NQ moved on the same date and in the same way.
+#   * era 3a->3b. See section 2.
 #
-# CME's E-mini S&P contract-spec page lists a 15:15-15:30 CT trading halt, and
-# the era-2 advisory above introduced one. Our own archive contradicts it for
-# era 3: ESH4 `ohlcv-1m` for January 2024 contains **315 bars carrying nonzero
-# volume** in exactly that window — 15 minutes on each of 21 trading days, with
-# no exceptions. `crucible qa` reported every one of them as a bar outside any
-# session, which is what that check exists for. The archive is evidence and the
-# spec page is a claim, so the halt is out. Re-run
-# `crucible qa --instrument ESH4 --timeframe 1m` after changing this.
+# **Era 1 is deliberately NOT modelled**, and `valid_from` says so. Its trading
+# day carries an open on D-1 at 15:30 CT that exists only when D-1 is itself a
+# trading day (the block is absent every Friday, because Monday's session opens
+# Sunday at 17:00), plus a halt at 16:30-17:00 CT that falls on D-1 rather than
+# on D. This file's session template can express neither, and inventing a
+# fourth era that is right about the close and wrong about a daily hour would be
+# worse than the warning `qa` and `backtest` already print. The unmodelled span
+# is 2010-06-06..2012-11-16 -- 2.4 of the archive's 16.1 years.
 #
-# ## 3. Known gaps, all of them small and all of them listed
+# ## 2. The 15:15-15:30 CT halt was REAL, and it ended on 2021-06-28
 #
-# - The 12:15 CT early close on the weekday before Independence Day is NOT
-#   encoded: it applies only when 4 July falls Tuesday-Friday, a condition this
-#   table's rule vocabulary cannot express. Worth ~3h45m of one year.
+# D-0040 removed this halt from the table after finding 315 nonzero-volume ESH4
+# bars inside it in January 2024. That measurement was right and the conclusion
+# drawn from it was too broad: January 2024 is in era 3b, and era 3b is the only
+# era that has no halt. Counting the same window across the whole archive:
+#
+#   ES 1m, local 15:15-15:30 CT, Mon-Fri trading dates
+#     2015-01-01 .. 2021-06-25   2018 dates   0.04 traded minutes/date
+#     2021-06-28 .. 2026-07-27   1344 dates  15.00 traded minutes/date
+#
+# The 0.04 is a settlement print in the 15:15 minute on about one date in
+# twenty-five, not a session. CME's SER-8788R (2021-06-24) eliminated the
+# 15:15-15:30 CT halt effective 2021-06-28 for equity futures and options on
+# CME and CBOT, "initially implemented to account for transactions conducted
+# via open outcry". Archive and exchange agree to the day.
+#
+# ## 3. Holiday TREATMENT changed twice, independently of the session eras
+#
+# Measured from the last traded minute before 17:00 CT on each weekday:
+#
+#   2013 (and 2014 for MLK / Presidents' Day)   full closure, no day session
+#   2014-05-26 onwards                          early close 12:00 CT
+#
+# 2013-01-21 (MLK) has no day session AND no session on the Sunday evening
+# before it -- only 6 of the 8 Sundays between 2013-01-06 and 2013-02-24 opened,
+# the two missing being the eves of MLK and Presidents' Day. That is a `closed`
+# trading day in this file's sense, not an early close. Memorial Day 2014-05-26
+# closed at 12:00 CT and its Sunday eve opened, which is where the switch is.
+#
+# Era 1's holidays closed at 10:30 CT (2010-07-05, 2010-09-06, 2010-11-25,
+# 2011-01-17, 2011-02-21, 2011-05-30, 2011-07-04, 2011-09-05, 2011-11-24,
+# 2012-01-16, 2012-02-20, 2012-05-28, 2012-07-04, 2012-09-03 -- fourteen dates,
+# all exactly 10:30). Not encoded, because era 1 is not modelled.
+#
+# ## 4. Known gaps, all of them small and all of them listed
+#
+# - The 2019-02-27 and 2025-11-28 Globex outages are NOT encoded: no
+#   CME-published notice could be retrieved for either, only press reporting.
+#   The archive shows 2025-11-28 opening at 07:30 CT instead of 00:00 across all
+#   seven roots, which is the outage, and 2019-02-27 is not visible in `ohlcv`
+#   at all.
 # - On an "early halt 12:00" holiday CME books the morning session to the NEXT
 #   business day's trade date. This file gets the *openness* right and the
 #   trade-date *label* wrong for that morning. `open_intervals`, `is_open` and
 #   `bars_per_year` are unaffected; `trading_day` is off by one there.
-# - Weekend observance is verified only for 4 July falling on a Saturday
-#   (-> Friday 3 July). Sunday -> Monday for Jan 1 / Jun 19 / Dec 25 follows the
-#   universal US convention but was not confirmed from a CME document; the
-#   Saturday case for those three is deliberately left alone, because failing to
-#   delete a session is the error that shows up in QA rather than the one that
-#   quietly flatters an annualization factor.
-# - The 2019-02-27 and 2025-11-28 Globex outages are NOT encoded: no CME-published
-#   notice could be retrieved for either, only press reporting.
+# - Weekend observance is verified from the archive for Christmas landing on a
+#   Saturday (2010-12-25 and 2021-12-25: Friday 24 December had no session at
+#   all, so the rule is `nearest_weekday`) and for New Year's Day landing on a
+#   Saturday (2011-01-01 and 2022-01-01: the Friday before traded in full, so
+#   the rule is `sunday_to_monday`). The two differ, which is why they are
+#   written differently.
 
 schema_version = 1
 
@@ -60,36 +111,62 @@ id = "cme_globex_equity_index"
 description = "CME Globex equity index futures (ES, NQ, RTY and their micros)"
 timezone = "America/Chicago"
 roots = ["ES", "MES", "NQ", "MNQ", "RTY", "M2K"]
-valid_from = "2015-09-21"
+valid_from = "2012-11-19"
 sources = [
   "https://www.cmegroup.com/markets/equities/sp/e-mini-sandp500.contractSpecs.html",
   "https://www.cmegroup.com/tools-information/lookups/advisories/electronic-trading/20150914.html",
   "https://www.cmegroup.com/tools-information/lookups/advisories/clearing/files/Chadv12-423.pdf",
+  "https://www.cmegroup.com/notices/ser/2021/06/SER-8788R.pdf",
 ]
 
+# --- era 2: 2012-11-19 .. 2015-09-18 -------------------------------------
+[[calendar.era]]
+from = "2012-11-19"
+open_local = "17:00"
+close_local = "16:15"
+halt_local = [["15:15", "15:30"]]
+rth_open_local = "08:30"
+rth_close_local = "15:00"
+source = "https://www.cmegroup.com/tools-information/lookups/advisories/clearing/files/Chadv12-423.pdf"
+
+# --- era 3a: 2015-09-21 .. 2021-06-25 ------------------------------------
+[[calendar.era]]
+from = "2015-09-21"
+open_local = "17:00"
+close_local = "16:00"
+halt_local = [["15:15", "15:30"]]
+rth_open_local = "08:30"
+rth_close_local = "15:00"
+source = "https://www.cmegroup.com/tools-information/lookups/advisories/electronic-trading/20150914.html"
+
+# --- era 3b: 2021-06-28 .. now -------------------------------------------
 [calendar.session]
 # Sunday 17:00 CT through Friday 16:00 CT, with a 16:00-17:00 CT no-trade
 # window each day (maintenance 16:00-16:45, pre-open 16:45-17:00 — order entry
-# only, no prints, so it is not open).
+# only, no prints, so it is not open). No intraday halt since 2021-06-28.
+from = "2021-06-28"
 open_local = "17:00"
 close_local = "16:00"
 rth_open_local = "08:30"
 rth_close_local = "15:00"
-source = "https://www.cmegroup.com/markets/equities/sp/e-mini-sandp500.contractSpecs.html"
+source = "https://www.cmegroup.com/notices/ser/2021/06/SER-8788R.pdf"
 
 [calendar.reference_span]
-start = "2016-01-01"
+start = "2022-01-01"
 end = "2026-01-01"
 rationale = """
-Ten whole calendar years, entirely inside session era 3, fixed forever so \
+Four whole calendar years, entirely inside session era 3b, fixed forever so \
 bars_per_year is reproducible on every machine and in every future build. It \
-starts after valid_from so no era-2 session is averaged in, and both ends are \
-year boundaries so leap years and weekday drift average out."""
+starts after the 2021-06-28 halt removal so no era-3a session is averaged in — \
+a span crossing that boundary would produce a number describing neither era — \
+and both ends are year boundaries so leap years and weekday drift average out."""
 
 # --- fully closed: no trade date at all ---------------------------------
 
 [[calendar.holiday]]
 name = "New Year's Day"
+# Saturday is NOT observed on the Friday before: 2010-12-31 and 2021-12-31 both
+# traded a full session in the archive.
 rule = { kind = "fixed_date", month = 1, day = 1, observance = "sunday_to_monday" }
 effect = { kind = "closed" }
 source = "https://www.cmegroup.com/trading-hours/files/new-years-day-2024.pdf"
@@ -105,9 +182,67 @@ source = "https://www.cmegroup.com/tools-information/holiday-calendar/files/2014
 
 [[calendar.holiday]]
 name = "Christmas Day"
-rule = { kind = "fixed_date", month = 12, day = 25, observance = "sunday_to_monday" }
+# Saturday IS observed on the Friday before, unlike New Year's Day: 2010-12-24
+# and 2021-12-24 have no day session and no evening session in the archive,
+# where the Christmas Eve rule below would have given them a 12:15 CT close.
+# This entry precedes that one, and `day_effect` returns the first match.
+rule = { kind = "fixed_date", month = 12, day = 25, observance = "nearest_weekday" }
 effect = { kind = "closed" }
 source = "https://www.cmegroup.com/trading-hours/files/christmas-day-2023.pdf"
+
+# --- the 2013-2014 regime: these holidays were full closures -------------
+#
+# Measured, not published: the archive has no day session and no preceding
+# Sunday evening on these dates. MLK and Presidents' Day stayed closures through
+# 2014; the other four switched to a 12:00 CT halt with Memorial Day 2014.
+
+[[calendar.holiday]]
+name = "Martin Luther King Jr. Day (closure era)"
+rule = { kind = "nth_weekday", month = 1, weekday = "monday", nth = 3 }
+effect = { kind = "closed" }
+first_year = 2013
+last_year = 2014
+source = "https://www.cmegroup.com/tools-information/holiday-calendar/files/2014-mlk-day.pdf"
+
+[[calendar.holiday]]
+name = "Presidents' Day (closure era)"
+rule = { kind = "nth_weekday", month = 2, weekday = "monday", nth = 3 }
+effect = { kind = "closed" }
+first_year = 2013
+last_year = 2014
+source = "https://www.cmegroup.com/files/presidents-day.pdf"
+
+[[calendar.holiday]]
+name = "Memorial Day (closure era)"
+rule = { kind = "nth_weekday", month = 5, weekday = "monday", nth = -1 }
+effect = { kind = "closed" }
+first_year = 2013
+last_year = 2013
+source = "https://www.cmegroup.com/trading-hours/files/memorial-day-2023.pdf"
+
+[[calendar.holiday]]
+name = "Independence Day (closure era)"
+rule = { kind = "fixed_date", month = 7, day = 4, observance = "nearest_weekday" }
+effect = { kind = "closed" }
+first_year = 2013
+last_year = 2013
+source = "https://www.cmegroup.com/trading-hours/files/4th-of-july-2023.pdf"
+
+[[calendar.holiday]]
+name = "Labor Day (closure era)"
+rule = { kind = "nth_weekday", month = 9, weekday = "monday", nth = 1 }
+effect = { kind = "closed" }
+first_year = 2013
+last_year = 2013
+source = "https://www.cmegroup.com/trading-hours/files/labor-day-2023.pdf"
+
+[[calendar.holiday]]
+name = "Thanksgiving Day (closure era)"
+rule = { kind = "nth_weekday", month = 11, weekday = "thursday", nth = 4 }
+effect = { kind = "closed" }
+first_year = 2013
+last_year = 2013
+source = "https://www.cmegroup.com/trading-hours/files/thanksgiving-day-2023.pdf"
 
 # --- early halt at 12:00 CT: the evening before opens, the morning trades ---
 #
@@ -121,18 +256,21 @@ source = "https://www.cmegroup.com/trading-hours/files/christmas-day-2023.pdf"
 name = "Martin Luther King Jr. Day"
 rule = { kind = "nth_weekday", month = 1, weekday = "monday", nth = 3 }
 effect = { kind = "early_close", close_local = "12:00" }
+first_year = 2015
 source = "https://www.cmegroup.com/tools-information/holiday-calendar/files/2025/2025-mlk-day-clearing-advisory.pdf"
 
 [[calendar.holiday]]
 name = "Presidents' Day"
 rule = { kind = "nth_weekday", month = 2, weekday = "monday", nth = 3 }
 effect = { kind = "early_close", close_local = "12:00" }
+first_year = 2015
 source = "https://www.cmegroup.com/files/presidents-day.pdf"
 
 [[calendar.holiday]]
 name = "Memorial Day"
 rule = { kind = "nth_weekday", month = 5, weekday = "monday", nth = -1 }
 effect = { kind = "early_close", close_local = "12:00" }
+first_year = 2014
 source = "https://www.cmegroup.com/trading-hours/files/memorial-day-2023.pdf"
 
 [[calendar.holiday]]
@@ -148,18 +286,21 @@ source = "https://www.cmegroup.com/notices/ser/2021/12/SER-8887.pdf"
 name = "Independence Day"
 rule = { kind = "fixed_date", month = 7, day = 4, observance = "nearest_weekday" }
 effect = { kind = "early_close", close_local = "12:00" }
+first_year = 2014
 source = "https://www.cmegroup.com/trading-hours/files/4th-of-july-2023.pdf"
 
 [[calendar.holiday]]
 name = "Labor Day"
 rule = { kind = "nth_weekday", month = 9, weekday = "monday", nth = 1 }
 effect = { kind = "early_close", close_local = "12:00" }
+first_year = 2014
 source = "https://www.cmegroup.com/trading-hours/files/labor-day-2023.pdf"
 
 [[calendar.holiday]]
 name = "Thanksgiving Day"
 rule = { kind = "nth_weekday", month = 11, weekday = "thursday", nth = 4 }
 effect = { kind = "early_close", close_local = "12:00" }
+first_year = 2014
 source = "https://www.cmegroup.com/trading-hours/files/thanksgiving-day-2023.pdf"
 
 # --- early close at 12:15 CT: a short but ordinary trade date ------------
@@ -176,11 +317,30 @@ rule = { kind = "fixed_date", month = 12, day = 24, observance = "actual" }
 effect = { kind = "early_close", close_local = "12:15" }
 source = "https://www.cmegroup.com/tools-information/holiday-calendar/files/2025/christmas-holiday-settlement-times-2025.pdf"
 
+[[calendar.holiday]]
+name = "Day before Independence Day"
+# Only when 4 July falls Tuesday-Friday, which is what `anchor_weekday` exists
+# to say (D-0059 recorded this gap and could not close it; D-0086 does). The
+# archive shows a 12:15 CT close on 2013-07-03, 2014-07-03, 2017-07-03,
+# 2018-07-03, 2019-07-03, 2023-07-03, 2024-07-03 and 2025-07-03 — every year in
+# era 2 or later where 4 July was Tue-Fri and no year where it was not.
+# 2012-07-04 was a Wednesday and 2012-07-03 traded in full, which is why this
+# starts in 2013 rather than being backdated over era 1.
+rule = { kind = "weekday_before", month = 7, day = 4, observance = "actual", anchor_weekday = [
+  "tuesday",
+  "wednesday",
+  "thursday",
+  "friday",
+] }
+effect = { kind = "early_close", close_local = "12:15" }
+first_year = 2013
+source = "https://www.cmegroup.com/trading-hours/files/4th-of-july-2023.pdf"
+
 # --- dated exceptions no rule generates ----------------------------------
 #
-# The five entries before 2015-09-21 are outside `valid_from` and are recorded
-# for the history rather than for use: the session template around them is era 1
-# or era 2, which this file does not model.
+# The four entries before 2012-11-19 are outside `valid_from` and are recorded
+# for the history rather than for use: the session template around them is
+# era 1, which this file does not model.
 
 [[calendar.one_off]]
 date = "2010-04-02"
@@ -217,7 +377,7 @@ date = "2018-12-05"
 name = "National Day of Mourning — George H. W. Bush"
 # CME's own press-release headline says the equity market closed. The binding
 # Special Executive Report says it ran an abbreviated session to 08:30 CT. The
-# SER wins.
+# SER wins, and the archive agrees: the last ES bar with volume is 08:29 CT.
 effect = { kind = "early_close", close_local = "08:30" }
 source = "https://www.cmegroup.com/notices/ser/2018/12/SER-8289.pdf"
 
