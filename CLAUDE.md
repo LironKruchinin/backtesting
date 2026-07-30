@@ -642,6 +642,26 @@ reference; supersede the decision if you disagree — don't hotfix.
   A tripwire that names its own remedy is worth more than a comment.
 - **`crucible qa` exits 4 when it finds something**, like `verify`. A
   scheduled job that reads "coverage 61 %" as success is worse than no job.
+- **`qa`'s spike count is enormous on crisis contracts, and those spikes are
+  REAL** — classified 2026-07-31, `docs/SPIKE_FORENSIC.md`. ESH2020 flags 6,974
+  and every one of its top 20 falls in Feb–Mar 2020; the largest lands on the
+  *minute* of the Fed's emergency cut, two more land one minute after a Sunday
+  reopen, and all four level-1 circuit-breaker days are present. CL contracts
+  cluster the same way on 2012-09-17, 2015-02, 2013-06-20 and 2020-04-21 — the
+  day after WTI settled negative, which §9 already documents. Do not "fix" the
+  archive over these.
+- **The spike sigma is a FULL-SPAN robust estimate, and that is a known
+  limitation with a proposal attached — not yet a decision.** One sigma over a
+  contract's whole life conflates volatility regimes: ESH2020's 0.3707 pt is
+  dominated by calm 2019 and flags the whole crash, while a genuinely impossible
+  2-point jump in quiet July 2019 sits at 5.4σ and never appears. The proposal
+  is a rolling/era-aware estimate, and its justification is **not** the smaller
+  count — it is that the present statistic is blind exactly where a bad print is
+  most likely to hide. **It is deliberately unimplemented**: the rule is that
+  old and new counts are reported together, only the old ones exist, and a
+  change argued from plausibility alone is the thing this section exists to
+  refuse. `docs/SPIKE_FORENSIC.md` lists what the implementer owes, including a
+  planted-print control.
 - **`AdjustedPrice` cannot be converted to `Price`, and that is the feature**
   (D-0042). Back-adjusted levels are for signals; PnL uses the tradeable price
   of the then-front contract. Adding a `From` impl reintroduces the classic
