@@ -37,6 +37,13 @@ pub struct TranscodeArgs {
     /// alone and re-running is a cheap no-op.
     #[arg(long)]
     pub force: bool,
+    /// Also write partitions for spread instruments (`ESH4-ESM4`,
+    /// `CL:BF F0-G0-H0`). Off by default: a parent window resolves to far more
+    /// spreads than outrights — `GC.FUT` to 12,661 of them — and nothing
+    /// replays one yet. The records excluded are counted and printed, and
+    /// `raw/` keeps every spread forever, so this is one rebuild away (D-0070).
+    #[arg(long)]
+    pub include_spreads: bool,
 }
 
 /// Runs the command, returning the process exit code.
@@ -71,12 +78,18 @@ fn run_with_feature(dir: &std::path::Path, args: &TranscodeArgs) -> i32 {
         symbols: (!args.symbols.is_empty()).then(|| args.symbols.clone()),
         manifest_ids: (!args.manifest_ids.is_empty()).then(|| args.manifest_ids.clone()),
         force: args.force,
+        include_spreads: args.include_spreads,
     };
 
     println!(
-        "transcode — {} manifest record(s){}",
+        "transcode — {} manifest record(s){}{}",
         catalog.records().len(),
-        if args.force { ", rebuilding" } else { "" }
+        if args.force { ", rebuilding" } else { "" },
+        if args.include_spreads {
+            ", spreads included"
+        } else {
+            ", spreads excluded (--include-spreads)"
+        }
     );
     println!();
 
@@ -84,6 +97,12 @@ fn run_with_feature(dir: &std::path::Path, args: &TranscodeArgs) -> i32 {
         Ok(report) => {
             print!("{report}");
             0
+        }
+        // A contradiction between two flags is the operator's mistake, not the
+        // archive's, so it exits like any other usage error.
+        Err(e @ crucible_data::transcode::TranscodeError::ContradictorySpreadFilter { .. }) => {
+            eprintln!("error: {e}");
+            EXIT_USAGE
         }
         Err(e) => {
             eprintln!("error: {e}");
