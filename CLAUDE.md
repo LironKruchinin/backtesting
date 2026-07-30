@@ -31,7 +31,10 @@ The research funnel (S0 signal triage → S1 free-fill coarse grid → S2
 walk-forward with costs → S3 statistical battery) is described in
 `crucible-funnel`'s crate docs. Most ideas must die cheaply at S0–S1.
 
-**Current milestone:** M1 (data foundation) — see `docs/MILESTONES.md`.
+**Current milestone:** M3 (funnel + statistics) — see `docs/MILESTONES.md`.
+`crucible funnel <config>` runs the funnel end to end today; what is still
+owed is the statistics battery (`crucible-funnel::stats`), which is why the
+build **cannot award `Graduate`** (D-0075).
 
 ---
 
@@ -247,10 +250,10 @@ when the code that uses them lands**, never speculatively. Blessed set:
 
 | Crate | Where | Purpose |
 |---|---|---|
-| `rayon` | funnel only | run-level parallelism |
-| `duckdb` | funnel only | registry/results store |
-| `serde`, `toml`, `serde_json` | funnel, data, cli | configs, manifest |
-| `blake3` | funnel, data, cli | config identity, archive checksums. `cli` because it is where a combo config is loaded today (D-0060); `crucible-strategies` renders the canonical form and never hashes it |
+| `rayon` | funnel only | run-level parallelism. The ONLY crate that spawns threads |
+| ~~`duckdb`~~ | — | **not adopted** (D-0074). Its `bundled` build fails on this toolchain — a vendored header is missing and MSVC exits 2 — so the registry is append-only JSONL honouring the identical contract. The five rules are about ordering and identity, not SQL |
+| `serde`, `toml`, `serde_json` | funnel, data, cli | configs, manifest, registry records |
+| `blake3` | funnel, data, cli | config identity, archive checksums, registry run ids. `cli` because it is where a combo config is loaded today (D-0060); `crucible-strategies` renders the canonical form and never hashes it |
 | `dbn` | data only | DBN decoding (sync). Consumed via the `databento::dbn` **re-export**, never pinned separately — a decoder that drifts from the client that wrote the file is a silent bug (D-0031) |
 | `databento` | data, `databento` feature, `ingest::databento` only | acquisition; async |
 | `tokio` | data, `databento` feature, `ingest::databento` only | current-thread runtime behind the sync `BatchProvider` seam (D-0025) |
@@ -620,6 +623,79 @@ reference; supersede the decision if you disagree — don't hotfix.
   `highest_daily_closing_equity` advances only at a close, so it has no
   approximate day at all — a zero there is the right answer, not a detector
   that failed to fire.
+- **`crucible funnel` can never print `GRADUATE`**, however good a combo looks
+  (D-0075). §4 defines Graduate as "survived the full battery"; the battery is
+  S3 — deflated Sharpe, PBO/CSCV, permutation nulls — and S3 is not in this
+  build, so the ceiling is `Iterate` and every report and scorecard says so in
+  those words. A reader who saw no `GRADUATE` and no explanation would conclude
+  nothing was good enough, which is a much more flattering claim than the true
+  one. Do not "enable" it by relaxing the stage list.
+- **A config declaring `stages = ["s0", ...]` or `["s3", ...]` is REFUSED**,
+  not run with the missing stage skipped (D-0075). A config that asks for the
+  permutation battery and silently receives a fold table has been answered with
+  a different question than the one it asked, and the answer looks exactly like
+  the one it wanted. The refusal names what each stage needs.
+- **`funnel` exits 5 when every combo is killed.** Not a failure and not
+  success: most ideas must die, and a scheduled job that reads "everything was
+  killed" as exit 0 learns nothing — the same argument `qa`'s exit 4 makes.
+- **`funnel` refuses `fill_model = "free_fills"`** although `combo` and
+  `walk-forward` accept it (D-0006, D-0075). The funnel runs the free-fill
+  screen itself at S1 and then asks S2 whether the edge survives honest costs;
+  a config declaring `free_fills` makes those the same run and turns the
+  mandatory cost sweep into one number repeated four times.
+- **A cost sweep at 0 ticks still charges commission**, and the sweep's fill
+  price at 0.5 ticks is deliberately **off the tick grid** (D-0073). The sweep
+  moves the *spread*; a broker does not stop billing because the book got
+  tight, and half a tick is an average over sessions rather than a price any
+  single print pays. Rounding it back to the grid deletes the sweep's middle
+  row, which is the one that answers "does this edge die at half a tick?".
+- **The matched random-entry control is the median of 16 draws, not one draw.**
+  A single seeded benchmark is a sample of size one, and a strategy that loses
+  to it has lost a coin flip rather than a comparison. The count of draws the
+  combo beat is printed beside the median and is the one empirical p-value this
+  control can honestly give. It is **not** the permutation null, which shuffles
+  real returns in blocks and is S3's.
+- **A control that could not be built FAILS its criterion rather than passing
+  it**, and renders as `ABSENT` with a reason (D-0075). An absent denominator is
+  not a cleared bar, and a zero in that cell would read like a benchmark that
+  was beaten.
+- **A scorecard with an incomplete honesty box produces NO FILE**, not a page
+  with a blank field. It is the one place in this codebase where an empty value
+  aborts a render, because every other omission on such a page reads as "not
+  applicable" and "we did not record the git sha" must not.
+- **The scorecard renders the plateau heatmap, the regime table and the
+  permutation null as *named holes*** rather than omitting them. A reader who
+  does not see a null comparison cannot tell "there wasn't one" from "it
+  passed".
+- **`funnel` re-runs combos the registry says are already finished**, and the
+  dedupe is still real: what it protects is the **trial count**, which does not
+  advance on a re-run. The replay repeats because this build's registry stores
+  metrics rather than equity curves, and a scorecard cannot be rebuilt from a
+  metrics row. Skipping the replay would leave holes in the page.
+- **Re-running a funnel appends a second `run_finished` line for a run that
+  already had one.** The store is append-only by design (D-0074): the run
+  genuinely ran again, and a log that mutated the first line would lose that.
+  The index folds later lines over earlier ones, so the reader is unaffected.
+- **A leaky strategy is checked into this repository on purpose.**
+  `crucible-strategies::controls::LeakyZScore` fits on the whole series and
+  then backtests — the lookahead §2.1 names by name — and
+  `crucible-funnel/tests/planted_leak.rs` asserts the current gates return
+  `Iterate` for it. **That test asserts a failure, and fixing it by tightening a
+  threshold is wrong**: a leaked edge is indistinguishable from a real one by
+  any statistic computed on the leaked run, so a threshold that killed it would
+  kill real strategies too. It is caught by asking a different question — does
+  the edge survive when the future is shuffled, or deleted — and that is the
+  permutation and truncation harnesses' job. The day the expectation flips to
+  `Kill` is the day a detector was watched firing on a defect planted before it
+  existed.
+- **The leak fixture uses seed 29 rather than the smoke config's 42**, and that
+  is confound removal rather than fixture-fitting. Buy-and-hold is a *criterion*,
+  and a random walk's drift across any particular set of test windows is
+  arbitrary; on seed 42 it rises 4.5 % and kills the leak for a reason that has
+  nothing to do with the leak. Seed 29's walk moves −0.04 % across its test
+  windows, so what remains is the leak against the criteria. Chosen after
+  measuring eighteen seeds, and chosen in the direction that makes the *gates'*
+  job easiest.
 
 ---
 
@@ -671,6 +747,18 @@ cargo run -p crucible-cli -- walk-forward --config configs/combo-smoke.toml
 cargo run -p crucible-cli -- walk-forward --config configs/combo-smoke.toml \
   --hash-only                                  # the walk-forward determinism gate
 
+# The funnel: the same grid, judged against the criteria its config declared
+# BEFORE the run, with both mandatory controls and the 0/0.5/1/2-tick sweep.
+# Unattended. Writes results/registry.jsonl (append-only, D-0074) and one
+# self-contained scorecard per config. Exit 5 means every combo was killed,
+# which on the null harness is the correct answer (D-0075).
+cargo run -p crucible-cli -- funnel --config configs/combo-smoke.toml
+cargo run -p crucible-cli -- funnel --config configs/combo-smoke.toml \
+  --out results --hash-only                    # the funnel determinism gate
+
+# The research memory is a text file. The graveyard is a query over it:
+grep '"kind":"verdict"' results/registry.jsonl | grep '"verdict":"kill"'
+
 # The acquisition path. `--features databento` is required (D-0025); without
 # it `pull` exits 2 saying so. A pull is a DRY RUN by default and spends
 # nothing — `--execute` needs `--max-cost-usd` alongside it (D-0024).
@@ -689,7 +777,7 @@ for the day itself is `docs/BLITZ_CHECKLIST.md`.
 
 ## 11. Status snapshot
 
-**M0 complete** (2026-07-24). **M1 in progress** — data foundation.
+**M0 complete** (2026-07-24). **M3 in progress** — funnel + statistics.
 
 *What is done lives in exactly one place:* the checkboxes in
 `docs/MILESTONES.md`. This section deliberately does not restate them — two
@@ -707,6 +795,16 @@ that reads the others back and asks whether the archive is any good — start
 there if you want to know what the data actually looks like. Every module is
 implemented. `docs/DECISIONS.md` is the source of truth for why anything looks
 the way it does.
+
+Where to start reading in M3: `crucible-funnel::funnel` is the orchestration —
+claim, replay, screen, sweep, control, judge, record — and reading it top to
+bottom is the fastest way to see what a verdict is made of. Then
+`crucible-funnel::stages` for the criteria and why `Graduate` is unreachable,
+`crucible-funnel::registry` for the five contract rules and why the backend is
+JSONL, and `crucible-strategies::controls` for the two benchmarks and the
+planted leak. `crucible-funnel::stats` is still a **spec in module docs** and
+is what M3 owes; `crucible-funnel/tests/planted_leak.rs` is the measurement of
+what its absence currently costs.
 
 Known open questions (decide when reached, log when decided): margin
 modeling (M2); multi-instrument portfolio accounting (post-M4); Welford vs

@@ -200,26 +200,77 @@ with reproducible, externally-cross-checked results.
 
 The quant-research payload. Specs live in `crucible-funnel` module docs.
 
-- [ ] Grid expansion + blake3 config identity; combo-count guardrails.
-      *Expansion and identity landed early with M2's combo layer* (D-0060):
-      `ComboSpec::canonical_form` + blake3 in the caller, `ComboId` =
-      (config hash, combo index). What is left here is the funnel's half —
-      guardrails that **refuse** rather than warn once a run costs hours, and
-      dedupe on (config_hash, combo_index, fold)
-- [ ] DuckDB registry: runs, metrics, hypotheses, trials, verdicts;
-      insert-before-run; dedup/resume
-- [ ] Rayon scheduler: run-level parallelism, dataset semaphore,
-      multi-instance pass (one data replay feeding K combo instances)
-- [ ] Stages S0–S3 with pre-registered kill criteria from config
+- [x] Grid expansion + blake3 config identity; combo-count guardrails
+      (2026-07-30). *Expansion and identity landed early with M2's combo
+      layer* (D-0060): `ComboSpec::canonical_form` + blake3 in the caller,
+      `ComboId` = (config hash, combo index). The funnel's half is here:
+      `grid::check_size` **refuses** above 50,000 combos where `combo` merely
+      warns above 10,000, because a funnel run charges a trial per combo and
+      that damage outlives the run — and dedupe on
+      `(config_hash, account_id, combo_index, fold, seed)`
+- [x] Registry: runs, metrics, hypotheses, trials, verdicts;
+      insert-before-run; dedup/resume (2026-07-30). **Append-only JSONL, not
+      DuckDB** — `duckdb 1.10505.0 --features bundled` fails to build on this
+      toolchain (missing vendored header, MSVC `C1083`), so the backend
+      changed and the five contract rules did not (D-0074). A trial is
+      (config, account, combo); folds of one combo are one trial and a second
+      account is a new one (D-0067). An unknown line kind is refused, never
+      skipped
+- [x] Rayon scheduler: run-level parallelism (2026-07-30) — combos across the
+      pool, merged by grid index by construction rather than by a sort, with
+      `the_parallel_scheduler_agrees_with_the_serial_one` asserting the two
+      reports are bit-identical including the captured account series. The
+      **dataset semaphore and the multi-instance pass are deferred**: one
+      config runs one instrument today so there is exactly one resident
+      dataset to bound, and the multi-instance pass is a throughput change,
+      which §7 wants criterion evidence for
+- [x] Stages **S1–S2** with pre-registered kill criteria from config
+      (2026-07-30). Criteria live in `[funnel]`, are read before the run and
+      stored verbatim on the registry row inserted before the run. **S0 and S3
+      are refused, not skipped** (D-0075) — S0 needs a continuous score the
+      combo grammar does not produce, S3 needs `stats` — and because S3 is
+      what "survived the full battery" means, this build **cannot award
+      `Graduate`**; the ceiling is `Iterate` and every report says so
+- [x] The two mandatory controls (2026-07-30): buy-and-hold, and a matched
+      random-entry benchmark reproducing each combo's trade count, holding
+      lengths and long/short mix at seeded-random times — the median of 16
+      draws, with the count of draws beaten reported beside it. An absent
+      control fails its criterion rather than rendering as a zero
+- [x] Automated cost sweep on every combo (2026-07-30): 0 / 0.5 / 1 / 2 ticks,
+      each a separate replay rather than an adjustment to a finished curve.
+      Half a tick needed the fill model to carry a *distance* rather than a
+      tick count (D-0073), which left every existing hash byte-identical
+- [x] Account-evaluation capture wired into the run path (2026-07-30): the CLI
+      computes the trading-day keys once and hands the same slice to
+      `FoldPlan::build` and to the engine's `AccountCapture`, so fold
+      attribution and day slicing cannot disagree (D-0071). Per-combo
+      out-of-sample worst-day close/trough pairs join the scorecard. **The
+      bootstrap evaluator — breach probability, P(pass), payout cadence — is
+      `ACCOUNT_EVAL_SPEC.md` §4 and is the next block**
+- [x] HTML scorecards with the mandatory honesty box (2026-07-30):
+      self-contained, no JavaScript and no network, and `render` **refuses to
+      produce a file at all** when any honesty-box field is empty. The three
+      sections this build cannot compute are rendered as named holes rather
+      than omitted
 - [ ] Stats: deflated Sharpe, PBO/CSCV, block-permutation nulls, empirical
-      p-values — cited implementations with property tests
+      p-values — cited implementations with property tests. **The planted
+      defect they will be measured against already exists**:
+      `controls::LeakyZScore` (a full-sample z-score, §2.1's named lookahead),
+      and `crucible-funnel/tests/planted_leak.rs` records that today's gates
+      return `Iterate` for it. That expectation flipping to `Kill` is the
+      acceptance test for this line
 - [ ] Truncation-invariance harness in CI (sampled cut points)
-- [ ] HTML scorecards with the mandatory honesty box
 - [ ] Cross-instrument rhyme check (needs NQ/RTY archives from M1 tooling)
+- [ ] Multi-instance pass + dataset semaphore, with criterion evidence
 
 **Acceptance:** `crucible funnel configs/example-combo.toml` → scorecards +
 registry rows, unattended; a deliberately-leaky test strategy is caught by
 the permutation/truncation harnesses (negative-control test).
+*First half met 2026-07-30:* `crucible funnel --config
+configs/combo-smoke.toml` runs unattended to 24 registry rows, 6 verdicts and
+a scorecard, killing all six combos of the null harness at S1 and exiting 5.
+*Second half is open, and its baseline is measured rather than assumed:* the
+leaky strategy is planted and the record says the gates do **not** catch it.
 
 ## M4 — Calibration + write-up (~3–4 weeks)
 
