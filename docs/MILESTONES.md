@@ -161,6 +161,29 @@ ESH4 January-2024 1m bars, 30,167 bars, −23.51% under `spread_cross`.
       and unbracketed runs all report zero). Not a config axis yet — the combo
       grammar cannot declare a bracket, and both grid commands say so rather
       than printing a bare zero
+- [x] Account-evaluation series capture (2026-07-30): the engine half of
+      `docs/ACCOUNT_EVAL_SPEC.md` §3 (D-0067, D-0071) — `crucible-engine::series`
+      plus `opened_ts` and MAE/MFE on `ClosedTrade`. Four series: per-trading-day
+      PnL, the intraday unrealized-equity high-water, per-round-trip excursions,
+      and the worst-day pair derived from the days. Captured *inside*
+      `replay.rs` step 2's mark loop and never rebuilt from OHLC afterwards,
+      because a rebuild re-opens the intrabar ordering `stop_first_intrabar`
+      already settled (D-0069) and measures a path the account never took: the
+      §5.12 control puts a number on it — a $150 peak that never existed plus
+      the whole $100 drawdown, out of one bar — while a single-tick fixture and
+      a rebuild adopting the engine's own convention both agree exactly, which
+      is what makes the divergence attributable to the convention and nothing
+      else. The trading day arrives as caller-supplied `&[i64]` keys, the same
+      slice `FoldPlan::build` takes, so fold attribution and day slicing
+      reconcile to the nanodollar and a planted $100 daily-loss breach names day
+      7 in both consumers. Retained artifact is 56 bytes a session — 226 KB for
+      16 years, against 4.98 GiB for a per-bar series — and both sizes are
+      pinned by test. Every control was mutation-verified: 31 planted defects,
+      each watched failing the control it targets, and the one control that did
+      **not** fire (`a_flip_resets_the_excursions_with_the_episode`, blind to a
+      missing excursion reset) was joined by a fixture that does. **Capture
+      only:** breach probability, the block bootstrap, P(pass) and payout
+      cadence are spec §4 and land with the funnel in M3
 - [ ] Golden tests vs an external reference (NautilusTrader or hand-audited
       runs) on identical data — the "why should anyone trust your engine"
       answer

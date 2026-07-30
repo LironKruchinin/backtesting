@@ -1356,8 +1356,30 @@ propose a superseding entry — don't silently diverge.
   `0e1ab52d474b862b`, `walk-forward --hash-only` `711e1cb34a2ee2b4` — all three
   unchanged, and `capturing_changes_no_number_in_the_result` asserts a captured
   run and a plain run produce identical `BacktestResult`s field by field.
-  **Every control was watched firing** (§7): the nanodollar boundary (an
-  off-by-one nanodollar in the decline fails three tests), the day-open
-  convention, MAE/MFE including money already banked in the episode (measuring
-  unrealized alone reports MFE $0 for a trade that was $500 up), the
-  approximate-day counter, and both halves of §5.12.
+  **Every control was watched firing** (§7), and the record says which mutation
+  each one caught. Thirty-one defects were planted one at a time in
+  `series.rs`, `portfolio.rs`, `replay.rs`, `bracket.rs` and
+  `calendar/mod.rs`, each run against the whole audited set: the nanodollar
+  off-by-one in the decline fails five (three unit, two integration); deleting
+  the trough update fails four; anchoring a day on its own first mark fails
+  two; a day's bar range off by one fails four including the fold
+  reconciliation; never recording the day's closing level fails seven,
+  including the planted daily-loss control. Flipping `stop_first_intrabar` to
+  target-first fails **both** halves of §5.12 that should move — the
+  divergence control and the third-side control — and leaves the single-tick
+  control green, which is the two-sided/third-side structure working. Deleting
+  the 17:00 CT roll from the calendar fails both §5.6 controls. Making the
+  capture branch touch the portfolio fails
+  `capturing_changes_no_number_in_the_result` and nothing else.
+  **One control did not fire, and that is part of this record.**
+  `a_flip_resets_the_excursions_with_the_episode` stayed green with both
+  excursion resets deleted from `apply_fill`: on its fixture the second
+  episode's MAE is deeper than the first's and both MFEs are zero, so the
+  running extremes are identical whether or not they reset. It asserted the
+  right numbers and detected nothing.
+  `a_flip_does_not_inherit_the_previous_episodes_excursions` was added beside
+  it — first episode −$1,000/+$1,000, second −$50/+$100, so inheriting either
+  side is visible — and the same mutation fails it. This is what §7's
+  no-quality-exemption clause buys: the gap was invisible to `fmt`, `clippy`,
+  a green `cargo test --workspace --all-features`, and all three determinism
+  hashes.
