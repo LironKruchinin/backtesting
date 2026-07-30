@@ -560,7 +560,7 @@ that drifts shows up as a cell mismatch rather than as a plausible file.
 | OI not duplicated | ratio 1.000 on 2014/2017/2019/2024 |
 | Loopback binding (gate 4, on-machine) | ActiveStore rule capture; `mpssvc` Running; `AllowLocalFirewallRules` NotConfigured (= local rules honoured); all three profiles Enabled |
 | **Off-host block proof** | Rule enabled at test time (ActiveStore, Block, Inbound, Any, TCP 25503+25520). Phone Wi-Fi IP **10.100.102.96** (DHCP, no proxy) — in-subnet with 10.100.102.7, so on-link by routing table regardless of cellular state. Chrome: **`ERR_TIMED_OUT`**, both frames 15:07 local. Watch loop 15:02:49–15:07:50: **zero foreign connections**, self-address baseline recorded. Reading: `TIMED_OUT` not `CONNECTION_REFUSED` — the Terminal listens on `0.0.0.0`, so unfiltered would serve data and a closed port would RST into "refused"; a silent drop is the Block rule's signature. Absence became conclusive because the request is proven in-window. |
-| Databento blitz reconciled *(to the attempted set)* | 26 intents complete `intended→submitted→downloaded→appended`; plan cross-check found `statistics` missing entirely (§9) |
+| **Databento blitz reconciled to the plan** | **All 33 intents** complete `intended→submitted→downloaded→appended` (2026-07-30), against 26 when the cross-check found `statistics` missing entirely; `verify` and `layout-check` clean, closing sentence written (§9) |
 | **Golden-raw round-trip + measured ratio** | `crucible theta-golden`, VIX 2024-01-02, five endpoints, **6,221,352 cells** compared individually against the source CSV; ratios in §7.3 (D-0057) |
 | **Validator per §4 with planted controls** | `external/thetadata/validate.rs`; every detector paired with a planted bug that is asserted to fire — cross-parse both ways, header drift in four directions, `(contract, created)` repeat, repeated contract-minute, mid-day zero-underlying, `iv_error` at and beyond 100, all-zero series, inverted eod↔greeks, OI key absent from eod, DST gap and ambiguous hour |
 | **`inventory.jsonl` schema** | `external/thetadata/inventory.rs`; append-only, resume by request diff, torn-final-line control |
@@ -603,9 +603,11 @@ loses only the in-flight requests, no five-minute stalls) rather than for
 throughput.
 
 *The Databento blitz reached terminal state on 2026-07-30*: all seven
-`statistics` parents are appended, so §9's open row is closed. What remains
-before the closing sentence is `verify` + `layout-check` and the D-0066
-exception, not an acquisition.
+`statistics` parents are appended, so §9's open row is closed. `verify` and
+`layout-check` were re-run clean the same day (exit 0 both, over all 33 records)
+and **§9's closing sentence is written**, carrying the D-0066 exception. What
+remains on the Databento side is the D-0066 repair itself — an M1-close-block
+listed above, not an acquisition.
 
 ### 8.0 T0 does not block M1 close
 
@@ -727,14 +729,44 @@ That is what promotes `ShutdownBlockReasonCreate` from idea to **pre-T1 item**
 (§8): a tranche has to make its own existence visible at the moment the button is
 pressed, because that is the moment the habit and the acquisition collide.
 
-**The blitz closing sentence, and the exception it must name.** "33 intents,
-every plan item appended, zero gaps" is now true of the *acquisition* — every
-plan item is appended and `BLITZ_CHECKLIST` §3's pull rows are done. It is **not
-yet written**, because it still needs `verify` + `layout-check` clean, and
-because "zero gaps" would be false as stated: **D-0066** records that 21,736 of
-108,696 observed symbols are absent from the manifest for CL.FUT and ZN.FUT. The
-sentence must therefore read "every plan item appended" *and* carry the
-exception — the manifest does not yet tell the whole truth per contract, and
-`coverage` would re-buy those symbols. Per §0.1, the smaller true number: 33
-intents appended, one known and quantified symbol-completeness gap, `verify` not
-yet re-run.
+### The blitz closing sentence
+
+It is written, and it reads:
+
+> **33 intents, every plan item appended.** Every intent in the journal reached
+> `appended` — 33 intended, 33 submitted, 33 downloaded, 33 appended, 33 distinct
+> `intent_id`s, matching `layout-check`'s 33 raw files and 33 manifest records:
+> `ohlcv-1m` 9 (ES split ×3), `ohlcv-1s` 7, `definition` 7, `statistics` 7, and
+> one each of `mbo`, `tbbo` and `trades` on ES. The seven `statistics` parents are
+> among them — `6E.FUT` on 2026-07-29, the other six adopted on 2026-07-30 under
+> their original `GLBX-20260729-*` job ids with `submitted 0 job(s)`, so nothing
+> was re-submitted and nothing was bought twice. On **2026-07-30**, with the T0
+> tranche still running against the same disk, `crucible verify` re-hashed the
+> archive against the manifest — **`archive clean: 33 record(s) re-hashed, no
+> findings`**, exit 0, 164.5 s over 21.30 GiB — and `crucible layout-check`
+> reported **`33 raw file(s), 16 curated file(s), 33 manifest record(s)` ·
+> `layout clean`**, exit 0. Per §0.1 the sentence stops at "appended" and does
+> **not** say "zero gaps".
+
+Per §0.1, the smaller true number, restated without the prose: **33 intents
+appended, `verify` and `layout-check` clean on 2026-07-30.**
+
+<!-- BEGIN D-0066-EXCEPTION — delete everything between these two markers,
+     markers included, in the same commit that makes sym_audit read 0 dropped
+     archive-wide (D-0066 specific 4). Nothing outside this block depends on it.
+     A caveat that outlives its cause is how a doc starts lying. -->
+
+> **The exception the sentence carries, and while it stands it is the only one.**
+> `sym_audit` reads **21,736 of 108,696 observed symbols (20.00 %) absent from the
+> manifest's `symbols` lists, across 8 of 33 lines**, confined to **CL.FUT**
+> (9,427 observed / 7,120 recorded, 2,307 dropped) and **ZN.FUT** (3,335 observed
+> / 208 recorded, 3,127 dropped — **94 % missing**). The archived bytes are
+> complete and `verify`-clean; what is incomplete is the per-contract coverage
+> record, so the manifest does not yet tell the whole truth per contract and
+> **`coverage` reads those 21,736 symbols as missing and would buy them again** —
+> the re-buy bug D-0033 exists to prevent. M1-close-block, cause and repair
+> designed in **D-0066**; the completion proof is `sym_audit` reading 0 dropped
+> archive-wide. Until then the restatement above carries one more term: one known
+> and quantified symbol-completeness gap.
+
+<!-- END D-0066-EXCEPTION -->

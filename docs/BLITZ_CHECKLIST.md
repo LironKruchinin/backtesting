@@ -129,7 +129,7 @@ cargo run -p crucible-cli --features databento -- \
        --execute --max-cost-usd 0.00 --timeout-mins 480
 ```
 
-- [ ] `ohlcv-1m` exit 0 · `verify` clean
+- [x] `ohlcv-1m` exit 0 · `verify` clean
 
 ```bash
 cargo run -p crucible-cli --features databento -- \
@@ -139,7 +139,7 @@ cargo run -p crucible-cli --features databento -- \
        --execute --max-cost-usd 0.00 --timeout-mins 480
 ```
 
-- [ ] `ohlcv-1s` exit 0 · `verify` clean
+- [x] `ohlcv-1s` exit 0 · `verify` clean
 
 ```bash
 cargo run -p crucible-cli --features databento -- \
@@ -149,7 +149,7 @@ cargo run -p crucible-cli --features databento -- \
        --execute --max-cost-usd 0.00 --timeout-mins 480
 ```
 
-- [ ] `definition` exit 0 · `verify` clean
+- [x] `definition` exit 0 · `verify` clean
       *(ES/NQ/RTY definitions were archived on 2026-07-28 ahead of the
       subscription, so `coverage` subtracts them and only CL/6E/ZN/GC are
       actually bought here. Re-requesting the owned windows costs nothing —
@@ -163,14 +163,16 @@ cargo run -p crucible-cli --features databento -- \
        --execute --max-cost-usd 0.00 --timeout-mins 480
 ```
 
-- [ ] `statistics` exit 0 · `verify` clean
+- [x] `statistics` exit 0 · `verify` clean
       *(2026-07-30: all seven parents **appended** — `6E` on 07-29, the other six
       adopted under their original `GLBX-20260729-*` job ids on 07-30, nothing
-      re-submitted. Box stays open only because `verify` has not been re-run
-      since; do that once T0 stops competing for disk I/O. **Note when you do:**
-      on a re-run, `--end` must be the date the jobs were submitted with
-      (`2026-07-29`), not today — a wider window is a different intent id and
-      mints new jobs instead of collecting the paid ones.)*
+      re-submitted. `verify` re-run 2026-07-30 while T0 was live: **archive
+      clean, 33 record(s) re-hashed, no findings**, exit 0, 164.5 s over
+      21.30 GiB. **Note if you ever re-run this pull:** `--end` must be the date
+      the jobs were submitted with (`2026-07-29`), not today — a wider window is
+      a different intent id and mints new jobs instead of collecting the paid
+      ones. The archived paths say so:
+      `raw/GLBX.MDP3/statistics/{key}/2010-06-06--2026-07-29.dbn.zst`.)*
 
 ## 4. After each tranche — verify, then curate
 
@@ -185,11 +187,15 @@ cargo run -p crucible-cli -- layout-check
 cargo run -p crucible-cli -- qa --instrument ESH6 --timeframe 1m
 ```
 
-- [ ] `verify` clean after every tranche.
-- [ ] `layout-check` clean after every tranche **and again after `transcode`**
+- [x] `verify` clean after every tranche.
+      *(Closing run, 2026-07-30, all tranches in place: `archive clean: 33
+      record(s) re-hashed, no findings`, exit 0.)*
+- [x] `layout-check` clean after every tranche **and again after `transcode`**
       — the second run is the one that catches a curated file written to the
       wrong path, which is the only way this project has ever grown a tree it
       did not intend. Milliseconds; run it as often as you like.
+      *(Closing run, 2026-07-30, on the post-`transcode` tree: `33 raw file(s),
+      16 curated file(s), 33 manifest record(s)` · `layout clean`, exit 0.)*
 - [ ] `transcode` run after the bar tranches (it needs the feature; it decodes DBN).
 - [ ] `qa` run on at least one front-month contract per parent, per timeframe.
       Findings exit 4. Coverage below ~99 % on a liquid front month, or any
