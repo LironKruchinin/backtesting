@@ -25,6 +25,13 @@
 //! so that every statistic it prints was computed on the window it names —
 //! which `combo`, reporting one number for the whole replay, cannot do.
 //!
+//! `funnel` is the end of that path: the same grid and the same folds, judged
+//! against the criteria the config wrote down **before** the run, with both
+//! mandatory controls and the 0/0.5/1/2-tick sweep, writing registry rows and
+//! a scorecard. It is the only command here that produces a *verdict*, and the
+//! only one that can exit 5 — which means every combo was killed, and is the
+//! healthy answer rather than a failure.
+//!
 //! ## Environment (D-0022)
 //!
 //! This is a **bin target**, so it owns environment resolution: [`main`]
@@ -38,6 +45,7 @@
 mod backtest;
 mod combo;
 mod config;
+mod funnel;
 mod layout_check;
 mod pull;
 mod qa;
@@ -78,9 +86,10 @@ NOTE: `pull`, `transcode` and `symbol-supplement` need a build with the\n\
 \x20 cargo run -p crucible-cli --features databento -- pull ...\n\
 \n\
 PLANNED (see docs/MILESTONES.md):\n\
-\x20 screen      M3  stage 0-1 signal triage / coarse grid\n\
-\x20 funnel      M3  full staged evaluation of a config\n\
-\x20 report      M3  render verdict scorecards";
+\x20 screen      M3  stage-0 signal triage. Needs a continuous score, which\n\
+\x20                 the combo rule grammar does not produce, so `funnel`\n\
+\x20                 REFUSES `stages = [\"s0\"]` rather than faking it\n\
+\x20 report      M3  re-render a scorecard from stored results";
 
 #[derive(Parser)]
 #[command(
@@ -120,6 +129,9 @@ enum Command {
     Combo(combo::ComboArgs),
     /// Replay a combo config in train/test folds and report out-of-sample.
     WalkForward(walkforward::WalkForwardArgs),
+    /// Evaluate a combo config against its pre-registered criteria and
+    /// write a verdict scorecard.
+    Funnel(funnel::FunnelArgs),
     /// Inspect curated bars for gaps, spikes, and vendor-reported problems.
     Qa(qa::QaArgs),
     /// Build a continuous-contract roll table from curated bars.
@@ -157,6 +169,7 @@ fn main() {
         Some(Command::Backtest(args)) => backtest::run(&args),
         Some(Command::Combo(args)) => combo::run_cmd(&args),
         Some(Command::WalkForward(args)) => walkforward::run_cmd(&args),
+        Some(Command::Funnel(args)) => funnel::run_cmd(&args),
         Some(Command::Qa(args)) => qa::run(&args),
         Some(Command::Rolls(args)) => rolls::run(&args),
         Some(Command::ThetaGolden(args)) => theta::run(&args),
@@ -272,10 +285,9 @@ fn one_run<M: FillModel>(fill_model: &mut M) -> BacktestResult {
 
 fn demo(hash_only: bool) {
     let free = one_run(&mut FreeFills);
-    let costed = one_run(&mut SpreadCrossFills {
-        half_spread_ticks: 1,
-        fee_per_contract_nano_usd: 1_250_000_000, // $1.25/contract/side
-    });
+    let costed = one_run(
+        &mut SpreadCrossFills::from_ticks(1, es_like_spec().tick).with_fee(1_250_000_000), // $1.25/contract/side
+    );
 
     if hash_only {
         let mut h = Fnv64::new();

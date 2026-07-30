@@ -1626,3 +1626,126 @@ propose a superseding entry — don't silently diverge.
   the identity itself becomes unknowable — measured at zero across all seven
   roots. Reported rather than hotfixed: `crucible rolls --expiries auto` on GC
   still exits 4, and superseding D-0046 is its own decision.
+- **D-0073** (2026-07-30) — **A half-spread is a DISTANCE, not a tick count, and
+  a fractional one deliberately lands off the tick grid.**
+  `SpreadCrossFills.half_spread_ticks: i64` became
+  `half_spread_nano_points: i64`, constructed by `from_ticks(n, tick)` or
+  `from_tick_halves(h, tick)`.
+  **Why:** §2.4 makes the cost-sensitivity sweep — 0 / **0.5** / 1 / 2 ticks —
+  mandatory on every scorecard, and an `i64` tick multiple cannot express the
+  middle level. Carrying the field as a count made the most decision-relevant
+  row of the sweep the one the type refused to hold, so the sweep would have had
+  to round it to 0 or 1 and quietly delete the row that answers "does this edge
+  die at half a tick?".
+  **The visible consequence, stated because it is a fill price:** at a whole
+  number of ticks the fill stays on the tick grid, because a bar's open is on it
+  and `open ± k·tick` is too. At half a tick it does not, and that is what a
+  fractional half-spread *is* — an average over sessions where the spread was a
+  tick and sessions where the trade printed at the touch. No single print pays
+  half a tick, and rounding it back would be modelling a cost nobody can pay by
+  charging one nobody did.
+  **`round_to_tick` came off the slipped price**, and that is a no-op for every
+  existing result rather than a semantics change: rounding an already-aligned
+  price is the identity. The proof is empirical — `demo --hash-only`,
+  `combo --run --hash-only` and `walk-forward --hash-only` are **byte-identical
+  to the pre-change baseline** (b55747513df596ed / 0e1ab52d474b862b /
+  711e1cb34a2ee2b4), and every hand-derived golden in `golden_smoke.rs`,
+  `bracket_golden.rs` and `negative_prices.rs` passes unchanged.
+  **Sweep levels are integers, in half-ticks** (`0 / 1 / 2 / 4`), not `f64`
+  ticks, for D-0060's reason: a level reached by floating-point arithmetic is a
+  level whose existence depends on floating-point arithmetic. A config writes
+  `0.5`, and `Criteria::new` refuses anything not within a billionth of a
+  half-tick multiple, naming the value it refused.
+  **`ClosedTrade` gained `direction` in the same commit** (40 → 48 bytes,
+  re-pinned by test): the matched random-entry control has to reproduce the
+  long/short *mix* of the trades it benchmarks, and a control that quietly gives
+  itself a different mix measures the market's drift instead of the strategy's
+  timing.
+- **D-0074** (2026-07-30) — **The trial registry's backend is an append-only
+  JSONL log, not DuckDB. The contract is unchanged; only the storage is.**
+  CLAUDE.md §6 blesses `duckdb` for `crucible-funnel`, and it was tried first,
+  before anything was written. On this toolchain `duckdb 1.10505.0` with
+  `bundled` **fails to build**: the vendored amalgamation's
+  `catalog_entry/list.hpp` includes
+  `duckdb/catalog/catalog_entry/aggregate_function_catalog_entry.hpp`, which is
+  not in the shipped tree, and MSVC 14.43 exits 2 with `fatal error C1083` after
+  ~2 GB of object files. Measured, not assumed.
+  **What did not change, because it is the part that matters:** insert before
+  running; dedupe on `(config_hash, account_id, combo_index, fold, seed)`;
+  automatic trial counting per hypothesis family; the pre-registered criteria
+  stored verbatim on the row; the graveyard as a query. Those five rules are
+  statements about *ordering and identity*, not about SQL, and each has a test.
+  **Why JSONL is not a consolation prize:** it is the shape this archive already
+  uses and already trusts — `manifest.jsonl` (D-0014, D-0017) and its second
+  line kind (D-0068) — append-only, greppable, diffable, and readable by
+  anything in five years. A finished run appends a second line rather than
+  mutating the first, exactly as the manifest does. An unknown line kind is a
+  **refusal**, never a skip: skipping would under-count the trials of whatever
+  family wrote it, and an under-counted trial count is the one error here that
+  flatters every deflated Sharpe downstream.
+  **A trial is `(config_hash, account_id, combo_index)`** — folds of one combo
+  are one trial, because charging eight would deflate a Sharpe by an artifact of
+  the fold layout; a second account is a new trial, because D-0067 prices account
+  selection. The **seed is in the run key** though not in the trial:
+  `config_hash` is blake3 over a `ComboSpec::canonical_form` and deliberately
+  does not cover `[run].seed` (D-0064), so without it two configs differing only
+  in their declared seed would dedupe into each other and the second would never
+  run.
+  **No clock in the crate.** `started_at`, `finished_at` and `decided_on` are
+  caller-supplied strings, and the CLI reads them through `SystemClock` — which
+  is now the workspace's one OS-clock reader in *every* build rather than only
+  under the acquisition features, making D-0032's claim literally rather than
+  approximately true.
+- **D-0075** (2026-07-30) — **The funnel refuses a stage it cannot run, and
+  therefore cannot award `Graduate`. Its ceiling is `Iterate`, and it says so on
+  every report.**
+  S1 (free-fill screen) and S2 (walk-forward under costs, the mandatory sweep,
+  the two controls) are implemented. **S0 and S3 are refused at config load**,
+  each with a message naming what it needs: S0 buckets forward returns by signal
+  quantile and needs a continuous score, which the combo rule grammar does not
+  produce — its rules yield *positions*; S3 is deflated Sharpe, PBO/CSCV, the
+  permutation nulls and the cross-instrument rhyme check, which is
+  `crucible-funnel::stats`, still a module-doc spec.
+  **Why refuse rather than skip:** a config that asks for the permutation
+  battery and silently receives a fold table has been answered with a different
+  question than the one it asked — and the answer looks exactly like the one it
+  wanted.
+  **The consequence follows from the glossary, not from taste.** §4 defines
+  Graduate as "survived the full battery"; the battery is S3; so no combo in
+  this build can graduate, and `assess` cannot return it. Every report and every
+  scorecard says that in those words, because otherwise a reader infers that
+  nothing graduated for want of merit, which is a different and much more
+  flattering claim.
+  **Two S3 criteria are parsed and echoed but not evaluated** (`max_pbo`,
+  `require_plateau`), and the scorecard renders each as a *named hole* rather
+  than omitting it: a reader who does not see a null comparison cannot tell
+  "there wasn't one" from "it passed".
+  **The controls are runs, not formulas**, because `PROJECT_PLAN.md` §7.4 lists
+  them as denominators and a denominator computed by a different method than its
+  numerator is not a comparison. The matched random-entry control reproduces the
+  combo's trade count, holding lengths and direction mix and re-places them at
+  seeded-random times inside each *test window* — never across a seam, because
+  the gap between two test windows is a training window the pooled curve does not
+  look at. It is the **median of 16 draws**: one draw is a sample of size one,
+  and a strategy can lose to a single coin flip by luck. The count of draws
+  beaten is printed beside it, which is the one empirical p-value this control
+  can honestly give. An **absent control fails its criterion** and never renders
+  as a zero.
+  **`free_fills` is refused as a config's own fill model here**: the funnel runs
+  that screen itself at S1, so declaring it would make S1 and S2 the same run and
+  the cost sweep one number repeated four times (D-0006).
+  **`funnel` exits 5 when every combo is killed** — not a failure, and not
+  success either. Most ideas must die; a scheduled job that reads "everything was
+  killed" as exit 0 learns nothing, which is the argument `qa`'s exit 4 already
+  makes.
+  **And the honest gap is recorded rather than assumed.**
+  `crucible-strategies::controls::LeakyZScore` is a planted lookahead defect — a
+  full-sample z-score, the failure §2.1 names by name — and
+  `crucible-funnel/tests/planted_leak.rs` asserts that today's gates return
+  **Iterate** for it, on a drift-free random walk where it beats both controls.
+  That assertion is a record of a failure, not a goal: these gates are not leak
+  detectors, and no threshold could make them into one, because a leaked edge is
+  indistinguishable from a real one by any statistic computed on the leaked run.
+  The day the permutation harness flips that expectation to `Kill` is the day a
+  detector was watched firing on a defect planted before it existed, which is
+  exactly what §7's no-quality-exemption clause asks for.

@@ -18,16 +18,28 @@
 //! (config `[funnel]` section), because criteria chosen after seeing results
 //! are not criteria, they're rationalization.
 //!
-//! [`walkforward`] is implemented (M2): it cuts a grid's replay into
-//! train/test folds by trading day and reports each statistic on the window
-//! it names. It is the machinery S2 runs on, not S2 itself — it produces
-//! evidence and stops there, because a verdict needs the cost sweep, the
-//! trial count and the battery that only this crate's M3 half provides.
+//! [`walkforward`] cuts a grid's replay into train/test folds by trading day
+//! and reports each statistic on the window it names (M2). It is the machinery
+//! S2 runs on, not S2 itself: it produces evidence and stops there, and says so
+//! in its own footer.
 //!
-//! Everything else here except [`stages::Verdict`] is an **M3 spec encoded in
-//! module docs**. Implement in this order: `grid` → `registry` →
-//! `scheduler` → `stages` → `stats` → `scorecard`.
+//! [`funnel`] is what turns that evidence into a verdict — claiming every run
+//! in the [`registry`] before it executes, replaying the grid across
+//! [`scheduler`]'s pool, screening cost-free, sweeping the cost assumption,
+//! running the two mandatory controls, and judging against [`stages`]'
+//! pre-registered criteria. [`scorecard`] renders the result with the honesty
+//! box §2.4 and §2.5 require.
+//!
+//! **What is still spec**: [`stats`] — deflated Sharpe, PBO/CSCV, the
+//! permutation nulls and the truncation harness — and with it stage S3, which
+//! [`stages`] therefore **refuses** rather than skipping. Because S3 is what
+//! "survived the full battery" means, this build cannot award
+//! [`Verdict::Graduate`]; its ceiling is [`Verdict::Iterate`], and every report
+//! says so. `crucible-strategies::controls::LeakyZScore` is the planted defect
+//! those detectors will be measured against, and
+//! `tests/planted_leak.rs` records that today's gates do not catch it.
 
+pub mod funnel;
 pub mod grid;
 pub mod registry;
 pub mod scheduler;
@@ -36,5 +48,10 @@ pub mod stages;
 pub mod stats;
 pub mod walkforward;
 
-pub use stages::Verdict;
+pub use funnel::{
+    ComboOutcome, Control, CostLevel, Costs, FunnelError, FunnelInputs, FunnelReport, run_funnel,
+    survivors,
+};
+pub use registry::{Registry, RegistryError, RunKey, RunRow, RunStatus, VerdictRow};
+pub use stages::{Assessment, Criteria, CriteriaError, CriteriaSource, Stage, Verdict, assess};
 pub use walkforward::{FoldPlan, FoldScheme, FoldSpec, WalkForwardReport};

@@ -35,6 +35,23 @@ jobs:
           B=$(cargo run -q -p crucible-cli -- demo --hash-only)
           test "$A" = "$B" && echo "deterministic: $A"
 
+      # The funnel gate. It is a *different* claim from the demo's: the demo
+      # hashes one strategy's equity curve, this hashes six combos' verdicts,
+      # the criteria they were judged against, both controls, all four sweep
+      # levels and the captured day series — which is the first thing here
+      # that runs across rayon's pool, and therefore the first place a result
+      # could depend on completion order (§2.2).
+      #
+      # The wall clock is deliberately outside the hash: two runs a minute
+      # apart must agree, and a timestamp is metadata rather than a result.
+      - name: Funnel determinism gate
+        run: |
+          A=$(cargo run -q -p crucible-cli -- funnel \
+                --config configs/combo-smoke.toml --out "$RUNNER_TEMP/results" --hash-only)
+          B=$(cargo run -q -p crucible-cli -- funnel \
+                --config configs/combo-smoke.toml --out "$RUNNER_TEMP/results" --hash-only)
+          test "$A" = "$B" && echo "deterministic: $A"
+
   # The `databento` feature is non-default (D-0025), so the job above never
   # compiles the one file in the workspace containing `.await`. A feature
   # nothing builds is a feature that rots — and this one is the code that

@@ -169,6 +169,7 @@ fn identity() -> RunIdentity {
     RunIdentity {
         config_hash: ConfigHash::from_bytes([0x5a; 32]),
         root_seed: 42,
+        account_id: None,
     }
 }
 
@@ -250,8 +251,17 @@ fn every_fold_reports_the_window_it_names() {
 
     let plan = FoldPlan::build(&day_keys(ev.len()), g.max_warmup_bars(), fold_spec())
         .expect("the fixture plans");
-    let report = run_grid(&ev, &g, &plan, &spec(), &params(), &identity(), &FreeFills)
-        .expect("the fixture runs");
+    let report = run_grid(
+        &ev,
+        &day_keys(ev.len()),
+        &g,
+        &plan,
+        &spec(),
+        &params(),
+        &identity(),
+        &FreeFills,
+    )
+    .expect("the fixture runs");
 
     let combo = &report.combos[0];
     assert_eq!(combo.folds.len(), 3);
@@ -298,8 +308,17 @@ fn the_out_of_sample_headline_excludes_the_training_windows() {
     let g = grid(IntAxis::Fixed(2));
     let plan =
         FoldPlan::build(&day_keys(ev.len()), g.max_warmup_bars(), fold_spec()).expect("plans");
-    let report =
-        run_grid(&ev, &g, &plan, &spec(), &params(), &identity(), &FreeFills).expect("runs");
+    let report = run_grid(
+        &ev,
+        &day_keys(ev.len()),
+        &g,
+        &plan,
+        &spec(),
+        &params(),
+        &identity(),
+        &FreeFills,
+    )
+    .expect("runs");
     let combo = &report.combos[0];
 
     assert_eq!(dollars(combo.whole_run.final_equity_nano_usd), 100_550);
@@ -348,8 +367,17 @@ fn a_fold_sharpe_is_hand_derivable() {
     let g = grid(IntAxis::Fixed(2));
     let plan =
         FoldPlan::build(&day_keys(ev.len()), g.max_warmup_bars(), fold_spec()).expect("plans");
-    let report =
-        run_grid(&ev, &g, &plan, &spec(), &params(), &identity(), &FreeFills).expect("runs");
+    let report = run_grid(
+        &ev,
+        &day_keys(ev.len()),
+        &g,
+        &plan,
+        &spec(),
+        &params(),
+        &identity(),
+        &FreeFills,
+    )
+    .expect("runs");
 
     let sharpe = report.combos[0].folds[1]
         .oos
@@ -379,6 +407,7 @@ fn a_short_warmup_combo_gains_nothing_from_being_short() {
     let alone_plan = FoldPlan::build(&keys, alone.max_warmup_bars(), fold_spec()).expect("plans");
     let alone_report = run_grid(
         &ev,
+        &keys,
         &alone,
         &alone_plan,
         &spec(),
@@ -394,6 +423,7 @@ fn a_short_warmup_combo_gains_nothing_from_being_short() {
     let mixed_plan = FoldPlan::build(&keys, mixed.max_warmup_bars(), fold_spec()).expect("plans");
     let mixed_report = run_grid(
         &ev,
+        &keys,
         &mixed,
         &mixed_plan,
         &spec(),
@@ -449,8 +479,19 @@ fn two_runs_are_bit_identical() {
     let g = grid(IntAxis::List(vec![2, 3, 20]));
     let plan =
         FoldPlan::build(&day_keys(ev.len()), g.max_warmup_bars(), fold_spec()).expect("plans");
-    let go =
-        || run_grid(&ev, &g, &plan, &spec(), &params(), &identity(), &FreeFills).expect("runs");
+    let go = || {
+        run_grid(
+            &ev,
+            &day_keys(ev.len()),
+            &g,
+            &plan,
+            &spec(),
+            &params(),
+            &identity(),
+            &FreeFills,
+        )
+        .expect("runs")
+    };
 
     let (a, b) = (go(), go());
     assert_eq!(a.combos.len(), b.combos.len());
@@ -488,8 +529,17 @@ fn derived_seeds_are_distinct_per_combo_and_fold() {
     let g = grid(IntAxis::List(vec![2, 3, 20]));
     let plan =
         FoldPlan::build(&day_keys(ev.len()), g.max_warmup_bars(), fold_spec()).expect("plans");
-    let report =
-        run_grid(&ev, &g, &plan, &spec(), &params(), &identity(), &FreeFills).expect("runs");
+    let report = run_grid(
+        &ev,
+        &day_keys(ev.len()),
+        &g,
+        &plan,
+        &spec(),
+        &params(),
+        &identity(),
+        &FreeFills,
+    )
+    .expect("runs");
 
     let mut seeds: Vec<u64> = report
         .combos
@@ -511,8 +561,17 @@ fn a_plan_from_another_grid_is_refused() {
     let ev = events();
     let g = grid(IntAxis::Fixed(2));
     let wrong = FoldPlan::build(&day_keys(ev.len()), 21, fold_spec()).expect("plans");
-    let err = run_grid(&ev, &g, &wrong, &spec(), &params(), &identity(), &FreeFills)
-        .expect_err("a mismatched warmup must refuse");
+    let err = run_grid(
+        &ev,
+        &day_keys(ev.len()),
+        &g,
+        &wrong,
+        &spec(),
+        &params(),
+        &identity(),
+        &FreeFills,
+    )
+    .expect_err("a mismatched warmup must refuse");
     assert_eq!(
         err,
         WalkForwardError::PlanWarmupMismatch {
@@ -531,6 +590,7 @@ fn a_plan_over_another_series_is_refused() {
     let plan = FoldPlan::build(&day_keys(ev.len()), 3, fold_spec()).expect("plans");
     let err = run_grid(
         &ev[..60],
+        &day_keys(60),
         &g,
         &plan,
         &spec(),
@@ -846,4 +906,73 @@ fn a_wall_clock_slicer_books_a_daily_loss_the_calendar_never_had() {
         disagreements > 0,
         "two slicers that never disagree are the same slicer"
     );
+}
+
+/// The parallel scheduler's whole claim, checked rather than argued: replaying
+/// a grid across rayon's pool produces the *same report* as replaying it one
+/// combo at a time — same order, same integers, same float bit patterns.
+///
+/// This is the third case CLAUDE.md §7 asks for. A parallel path with no
+/// serial twin is a claim; a parallel path that agrees with one is evidence,
+/// and the specific failure it rules out is §2.2's "results merge by
+/// completion order", which on a 3-combo grid would show up here as a
+/// permuted `combos` vector.
+#[test]
+fn the_parallel_scheduler_agrees_with_the_serial_one() {
+    let ev = events();
+    let keys = day_keys(ev.len());
+    let g = grid(IntAxis::List(vec![2, 3, 20]));
+    let plan = FoldPlan::build(&keys, g.max_warmup_bars(), fold_spec()).expect("plans");
+
+    let serial = run_grid(
+        &ev,
+        &keys,
+        &g,
+        &plan,
+        &spec(),
+        &params(),
+        &identity(),
+        &FreeFills,
+    )
+    .expect("runs");
+    let parallel = crate::scheduler::run_grid_parallel(
+        &ev,
+        &keys,
+        &g,
+        &plan,
+        &spec(),
+        &params(),
+        &identity(),
+        &FreeFills,
+    )
+    .expect("runs");
+
+    assert_eq!(serial.combos.len(), parallel.combos.len());
+    for (s, p) in serial.combos.iter().zip(&parallel.combos) {
+        assert_eq!(s.id, p.id, "grid-index order, not completion order");
+        assert_eq!(s.label, p.label);
+        assert_eq!(
+            s.oos_pooled.final_equity_nano_usd,
+            p.oos_pooled.final_equity_nano_usd
+        );
+        assert_eq!(
+            s.oos_pooled.sharpe_naive.map(f64::to_bits),
+            p.oos_pooled.sharpe_naive.map(f64::to_bits),
+            "bit-identical, not approximately equal (§2.2)"
+        );
+        assert_eq!(
+            s.oos_pooled.max_drawdown_pct.to_bits(),
+            p.oos_pooled.max_drawdown_pct.to_bits()
+        );
+        assert_eq!(s.folds.len(), p.folds.len());
+        for (a, b) in s.folds.iter().zip(&p.folds) {
+            assert_eq!(a.seed, b.seed);
+            assert_eq!(a.oos.final_equity_nano_usd, b.oos.final_equity_nano_usd);
+        }
+        // The captured account series has to survive the crossing too — it is
+        // the artifact D-0071 built and the one a bootstrap will resample.
+        assert_eq!(s.account, p.account);
+        assert_eq!(s.oos_worst_days, p.oos_worst_days);
+        assert_eq!(s.round_trip_bars, p.round_trip_bars);
+    }
 }

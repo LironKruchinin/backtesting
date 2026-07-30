@@ -798,10 +798,7 @@ mod enabled {
         // The one OS-clock read in the workspace, in a bin target for exactly
         // that reason (D-0032). Taken once, so every line this run appends
         // carries the same `fetched_ts` rather than a drifting one.
-        let now_ts = {
-            use crucible_data::ingest::clock::Clock;
-            crate::pull::SystemClock.now_ts().0
-        };
+        let now_ts = crate::pull::SystemClock.now_ts().0;
         let mut last_percent = u64::MAX;
         let result = crucible_data::external::thetadata::run_tranche(
             &client,

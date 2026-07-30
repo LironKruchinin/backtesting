@@ -52,9 +52,10 @@ pub mod window;
 
 pub use folds::{Fold, FoldError, FoldPlan, FoldScheme, FoldSpec, Window};
 pub use runner::{
-    ComboWalkForward, FoldResult, RunIdentity, WalkForwardError, WalkForwardReport, run_grid,
+    ComboWalkForward, FoldResult, GridRun, RunIdentity, WalkForwardError, WalkForwardReport,
+    run_grid,
 };
-pub use seed::derive_seed;
+pub use seed::{derive_control_seed, derive_run_seed, derive_seed};
 pub use window::RunTrace;
 
 #[cfg(test)]

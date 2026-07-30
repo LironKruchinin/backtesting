@@ -30,21 +30,28 @@
 //! than leaving a reader to assume neither happened.
 
 use crucible_core::prelude::*;
-use crucible_engine::{BacktestParams, BacktestResult, EngineError, Summary, run};
+use crucible_engine::{
+    AccountCapture, AccountSeries, BacktestParams, BacktestResult, ClosedTrade, DayRecord,
+    EngineError, Summary, WorstDayDistribution, run_capturing,
+};
 use crucible_strategies::combo::{ComboId, ConfigHash, Grid};
 
 use super::folds::{Fold, FoldPlan};
-use super::seed::derive_seed;
+use super::seed::derive_run_seed;
 use super::window::RunTrace;
 
 /// What a stored result must be able to name (CLAUDE.md §2.5), minus the
 /// parts only the caller knows (git sha, data manifest ids).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct RunIdentity {
     /// blake3 over the config's canonical form (D-0012).
     pub config_hash: ConfigHash,
     /// The config's declared `[run].seed`, root of every derived seed.
     pub root_seed: u64,
+    /// The account being evaluated, if any (D-0067). Part of the run identity
+    /// and of the seed lineage, because choosing an account after seeing
+    /// results is a maximum over sixteen draws reported as an expectation.
+    pub account_id: Option<String>,
 }
 
 /// One combo's numbers on one fold.
@@ -106,6 +113,31 @@ pub struct ComboWalkForward {
     /// day a config can declare a bracket — today none can, so the honest
     /// number is one per combo.
     pub path_sensitive_bars: usize,
+    /// The account-evaluation series, captured inside the mark loop rather
+    /// than rebuilt afterwards (`docs/ACCOUNT_EVAL_SPEC.md` §3, D-0071).
+    ///
+    /// Whole-replay, because that is what the engine captures and what a
+    /// day-block bootstrap will resample. The out-of-sample slice of it is
+    /// [`ComboWalkForward::oos_worst_days`], cut here rather than by a
+    /// consumer, because which days are out of sample is a *fold* question and
+    /// the fold plan lives on this side of the seam.
+    pub account: AccountSeries,
+    /// The worst-day pair over the out-of-sample days only — every day whose
+    /// bars fall inside a test window.
+    ///
+    /// The gap between the worst *close* and the worst *trough* is exactly the
+    /// amount of a bad day that a daily-close model never sees, which is the
+    /// endpoint fallacy D-0067 exists to quantify rather than argue about.
+    pub oos_worst_days: WorstDayDistribution,
+    /// Every round-trip as `(open bar, close bar, direction)`.
+    ///
+    /// Reduced here, while the equity curve is still alive, rather than
+    /// retained: the matched random-entry control needs the *shape* of the
+    /// trades and nothing else, and keeping a per-combo copy of a per-bar
+    /// series to recover it later is the 4.98 GiB mistake D-0071 refused for
+    /// the high-water reducer. This is O(round-trips), which is what a trade
+    /// list costs anyway.
+    pub round_trip_bars: Vec<(usize, usize, Side)>,
 }
 
 /// A grid, walked forward on one bar series.
@@ -133,6 +165,19 @@ pub enum WalkForwardError {
         /// The grid's max warmup.
         grid_warmup: usize,
     },
+    /// The day keys do not describe the series being replayed.
+    ///
+    /// Separate from [`WalkForwardError::PlanSeriesMismatch`] because it means
+    /// something more specific: the caller passed *different* keys to the fold
+    /// plan and to the run. D-0071's whole device is that both consumers read
+    /// one slice, and two slices is how a daily-loss breach lands on a
+    /// different date in two reports.
+    DayKeysMismatch {
+        /// Keys supplied to this call.
+        day_keys: usize,
+        /// Bars supplied.
+        series_bars: usize,
+    },
     /// The replay itself failed.
     Engine(EngineError),
 }
@@ -158,6 +203,15 @@ impl std::fmt::Display for WalkForwardError {
                  {grid_warmup}; folds must be laid out behind the warmup every combo shares, \
                  or a combo would be scored on bars its neighbours were not (CLAUDE.md §2.6)"
             ),
+            WalkForwardError::DayKeysMismatch {
+                day_keys,
+                series_bars,
+            } => write!(
+                f,
+                "{day_keys} trading-day key(s) were supplied for a {series_bars}-bar series. The \
+                 keys must be the SAME slice the fold plan was built from (D-0071): two \
+                 independent attributions of \"which day\" is how one breach lands on two dates"
+            ),
             WalkForwardError::Engine(e) => write!(f, "{e}"),
         }
     }
@@ -165,58 +219,16 @@ impl std::fmt::Display for WalkForwardError {
 
 impl std::error::Error for WalkForwardError {}
 
-/// Replays every combo in `grid` on `events` and cuts each result into
-/// `plan`'s folds.
+/// Everything a grid replay needs, borrowed once instead of threaded through
+/// an argument list nobody can read.
 ///
-/// `fill_model` is cloned per combo, so a stateful fill model (M4's queue
-/// simulator) starts each run from the same state rather than inheriting the
-/// previous combo's book.
-///
-/// # Errors
-/// [`WalkForwardError`] if the plan does not match the series or the grid, or
-/// if the feed violates the engine's ordering contract.
-pub fn run_grid<M: FillModel + Clone>(
-    events: &[MarketEvent],
-    grid: &Grid,
-    plan: &FoldPlan,
-    spec: &ContractSpec,
-    params: &BacktestParams,
-    identity: &RunIdentity,
-    fill_model: &M,
-) -> Result<WalkForwardReport, WalkForwardError> {
-    if plan.n_bars() != events.len() {
-        return Err(WalkForwardError::PlanSeriesMismatch {
-            plan_bars: plan.n_bars(),
-            series_bars: events.len(),
-        });
-    }
-    if plan.warmup_bars() != grid.max_warmup_bars() {
-        return Err(WalkForwardError::PlanWarmupMismatch {
-            plan_warmup: plan.warmup_bars(),
-            grid_warmup: grid.max_warmup_bars(),
-        });
-    }
-
-    let run = GridRun {
-        events,
-        grid,
-        plan,
-        spec,
-        params,
-        identity,
-        fill_model,
-    };
-    let mut combos = Vec::with_capacity(grid.len());
-    for index in 0..grid.len() {
-        combos.push(run.one_combo(index)?);
-    }
-    Ok(WalkForwardReport { combos })
-}
-
-/// Everything one combo's replay needs, borrowed once instead of threaded
-/// through an argument list nobody can read.
-struct GridRun<'a, M> {
+/// Public so [`crate::scheduler`] can hand the same borrowed state to rayon
+/// without a second copy of the wiring — two constructions of "one combo's
+/// run" that could drift from each other is one run.
+#[derive(Clone, Copy, Debug)]
+pub struct GridRun<'a, M> {
     events: &'a [MarketEvent],
+    day_keys: &'a [i64],
     grid: &'a Grid,
     plan: &'a FoldPlan,
     spec: &'a ContractSpec,
@@ -225,8 +237,79 @@ struct GridRun<'a, M> {
     fill_model: &'a M,
 }
 
-impl<M: FillModel + Clone> GridRun<'_, M> {
-    fn one_combo(&self, index: usize) -> Result<ComboWalkForward, WalkForwardError> {
+impl<'a, M: FillModel + Clone> GridRun<'a, M> {
+    /// Validates that the plan, the keys and the grid all describe `events`.
+    ///
+    /// Every check here is a wiring bug that would otherwise be silent: folds
+    /// cut from the wrong series land on the wrong bars, and day keys that are
+    /// not the plan's own put a breach on the wrong date (D-0071).
+    ///
+    /// # Errors
+    /// [`WalkForwardError`] naming which of the three disagrees.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "this is the argument list the checks exist to reconcile; bundling it would \
+                  hide the very mismatch the constructor is for"
+    )]
+    pub fn new(
+        events: &'a [MarketEvent],
+        day_keys: &'a [i64],
+        grid: &'a Grid,
+        plan: &'a FoldPlan,
+        spec: &'a ContractSpec,
+        params: &'a BacktestParams,
+        identity: &'a RunIdentity,
+        fill_model: &'a M,
+    ) -> Result<GridRun<'a, M>, WalkForwardError> {
+        if plan.n_bars() != events.len() {
+            return Err(WalkForwardError::PlanSeriesMismatch {
+                plan_bars: plan.n_bars(),
+                series_bars: events.len(),
+            });
+        }
+        if plan.warmup_bars() != grid.max_warmup_bars() {
+            return Err(WalkForwardError::PlanWarmupMismatch {
+                plan_warmup: plan.warmup_bars(),
+                grid_warmup: grid.max_warmup_bars(),
+            });
+        }
+        if day_keys.len() != events.len() {
+            return Err(WalkForwardError::DayKeysMismatch {
+                day_keys: day_keys.len(),
+                series_bars: events.len(),
+            });
+        }
+        Ok(GridRun {
+            events,
+            day_keys,
+            grid,
+            plan,
+            spec,
+            params,
+            identity,
+            fill_model,
+        })
+    }
+
+    /// Combos in the grid.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.grid.len()
+    }
+
+    /// Whether the grid is empty. Present because clippy asks for it beside
+    /// [`GridRun::len`]; a grid with no combos never reaches here.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.grid.is_empty()
+    }
+
+    /// Replays one combo and cuts it into every fold.
+    ///
+    /// # Errors
+    /// [`WalkForwardError::Engine`] if the feed violates the engine's ordering
+    /// contract, or if the day keys do not describe the series.
+    pub fn one_combo(&self, index: usize) -> Result<ComboWalkForward, WalkForwardError> {
         let combo = self.grid.combo(index);
         let mut strategy = self.grid.aligned_strategy(index);
         let mut feed = SliceFeed {
@@ -234,9 +317,26 @@ impl<M: FillModel + Clone> GridRun<'_, M> {
             at: 0,
         };
         let mut fills = self.fill_model.clone();
-        let result: BacktestResult =
-            run(&mut feed, &mut strategy, &mut fills, self.spec, self.params)
-                .map_err(WalkForwardError::Engine)?;
+        // The mark grain comes off the bars themselves rather than from a
+        // parameter: it is stamped on every result derived from these series
+        // (spec §3.3.2, bar-close marks are a lower bound on P(breach)), and a
+        // parameter is a second place for it to be wrong.
+        let MarketEvent::Bar(first) = self
+            .events
+            .first()
+            .expect("INVARIANT: an empty series is refused before a plan can be built over it");
+        let mut capture =
+            AccountCapture::new(self.day_keys, self.params.initial_cash_nano_usd, first.tf);
+        let result: BacktestResult = run_capturing(
+            &mut feed,
+            &mut strategy,
+            &mut fills,
+            self.spec,
+            self.params,
+            &mut capture,
+        )
+        .map_err(WalkForwardError::Engine)?;
+        let account = capture.finish();
 
         let trace = RunTrace::new(&result.equity, &result.closed_trades, &result.fee_events);
         let cash = self.params.initial_cash_nano_usd;
@@ -249,7 +349,13 @@ impl<M: FillModel + Clone> GridRun<'_, M> {
             .iter()
             .map(|fold: &Fold| FoldResult {
                 fold_index: fold.index,
-                seed: derive_seed(&identity.config_hash, identity.root_seed, index, fold.index),
+                seed: derive_run_seed(
+                    &identity.config_hash,
+                    identity.root_seed,
+                    identity.account_id.as_deref(),
+                    index,
+                    fold.index,
+                ),
                 is: trace.window(fold.train.bars.clone(), cash, per_year),
                 oos: trace.window(fold.test.bars.clone(), cash, per_year),
             })
@@ -265,6 +371,10 @@ impl<M: FillModel + Clone> GridRun<'_, M> {
             cash,
             per_year,
         );
+
+        let oos_worst_days =
+            WorstDayDistribution::from_days(&out_of_sample_days(&account.days, &test_windows));
+        let round_trip_bars = round_trip_bars(&result.equity, &result.closed_trades);
 
         Ok(ComboWalkForward {
             id: ComboId {
@@ -282,8 +392,95 @@ impl<M: FillModel + Clone> GridRun<'_, M> {
             cancelled_at_eof: result.cancelled_at_eof,
             n_protective_exits: result.n_protective_exits,
             path_sensitive_bars: result.path_sensitive_bars,
+            account,
+            oos_worst_days,
+            round_trip_bars,
         })
     }
+}
+
+/// Round-trips as `(open bar, close bar, direction)`.
+///
+/// A [`crucible_engine::ClosedTrade`] is stamped with the `avail_ts` of the
+/// fills that opened and closed it, and every fill lands on an event that also
+/// produced an equity point, so the bar index is a lookup rather than a search
+/// — the same join [`RunTrace`] does, for the same reason. A trade whose stamp
+/// is past the end of the curve cannot happen and is dropped rather than
+/// panicking (again as `RunTrace` does): losing one entry from a control's
+/// match list is a smaller wrong than aborting a research run over an
+/// impossible branch.
+fn round_trip_bars(equity: &[(Ts, NanoUsd)], trades: &[ClosedTrade]) -> Vec<(usize, usize, Side)> {
+    let index_of = |ts: Ts| equity.partition_point(|&(t, _)| t < ts);
+    trades
+        .iter()
+        .filter_map(|t| {
+            let (open, close) = (index_of(t.opened_ts), index_of(t.closed_ts));
+            (close < equity.len()).then_some((open, close, t.direction))
+        })
+        .collect()
+}
+
+/// The captured days that fall inside a test window.
+///
+/// Membership is decided by the day's **first** bar, and that is exact rather
+/// than approximate: fold boundaries are trading days (D-0062) and the day
+/// keys the folds were cut on are the same slice the capture was fed
+/// (D-0071), so a captured day lies wholly inside one window or wholly outside
+/// every one. If those two ever stopped being the same slice this would become
+/// an approximation — which is why `GridRun::new` refuses a key slice that is
+/// not the plan's length.
+fn out_of_sample_days(
+    days: &[DayRecord],
+    test_windows: &[std::ops::Range<usize>],
+) -> Vec<DayRecord> {
+    days.iter()
+        .filter(|day| test_windows.iter().any(|w| w.contains(&day.bars.start)))
+        .cloned()
+        .collect()
+}
+
+/// Replays every combo in `grid` on `events` and cuts each result into
+/// `plan`'s folds, one combo at a time.
+///
+/// `day_keys` is one trading-day key per bar — **the same slice `plan` was
+/// built from** (D-0071). It reaches the engine's account-evaluation capture
+/// unchanged, so fold attribution and day slicing cannot disagree about which
+/// session a loss belongs to.
+///
+/// `fill_model` is cloned per combo, so a stateful fill model (M4's queue
+/// simulator) starts each run from the same state rather than inheriting the
+/// previous combo's book.
+///
+/// [`crate::scheduler::run_grid_parallel`] computes the identical report
+/// across rayon's pool, and `the_parallel_scheduler_agrees_with_the_serial_one`
+/// asserts they agree bit for bit.
+///
+/// # Errors
+/// [`WalkForwardError`] if the plan, the keys or the grid do not describe the
+/// series, or if the feed violates the engine's ordering contract.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the seven inputs are what a run IS (§2.5); a bundle struct would only move the \
+              list, and `GridRun::new` is that struct"
+)]
+pub fn run_grid<M: FillModel + Clone>(
+    events: &[MarketEvent],
+    day_keys: &[i64],
+    grid: &Grid,
+    plan: &FoldPlan,
+    spec: &ContractSpec,
+    params: &BacktestParams,
+    identity: &RunIdentity,
+    fill_model: &M,
+) -> Result<WalkForwardReport, WalkForwardError> {
+    let run = GridRun::new(
+        events, day_keys, grid, plan, spec, params, identity, fill_model,
+    )?;
+    let mut combos = Vec::with_capacity(run.len());
+    for index in 0..run.len() {
+        combos.push(run.one_combo(index)?);
+    }
+    Ok(WalkForwardReport { combos })
 }
 
 /// Merges sorted, possibly overlapping bar ranges into disjoint ones.

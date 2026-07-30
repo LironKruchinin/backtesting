@@ -77,14 +77,29 @@ step_days = 126              # tile exactly; this is also the default, and a
                              # smaller value is refused (the headline pools
                              # the test windows, and overlap double-counts)
 
-[funnel]                     # declared; consumed by `crucible funnel` (M3)
-stages = ["s0", "s1", "s2", "s3"]
+[funnel]                     # consumed by `crucible funnel`
+# Stages this build implements. `s0` (signal triage) and `s3` (the overfitting
+# battery) are REFUSED rather than skipped: a config that asks for the
+# permutation battery and silently receives a fold table has been answered with
+# a different question than the one it asked.
+stages = ["s1", "s2"]
+# Mandatory, all four levels (§2.4) — it is not a list to trim, because
+# dropping the level an edge dies at is how a cost sensitivity stops being one.
+# Every entry is a whole number of half-ticks (D-0073).
 cost_sensitivity_ticks = [0.0, 0.5, 1.0, 2.0]
-# Pre-registered kill criteria — written BEFORE running, judged by machines.
-min_oos_sharpe_after_costs = 0.5
+# Pre-registered kill criteria — written BEFORE running, judged by machines,
+# and stored on the registry row that is inserted before the run. A threshold
+# chosen after seeing the result is not a criterion.
+min_oos_trades = 30          # sample adequacy: fewer and there is nothing to
+min_oos_sessions = 60        # measure, whatever the return says
+min_oos_return_pct_free_fills = 0.0   # S1: dead cheaply if it loses cost-free
+min_oos_sharpe_after_costs = 0.5      # S2, under the declared fill model
+kill_if_dead_at_ticks = 1.0  # ...and still, at this much half-spread
+require_controls_beaten = true        # vs matched random-entry AND buy-and-hold
+# Declared and echoed; NOT evaluated by this build (they are S3), and the
+# scorecard renders both as named holes rather than leaving them out.
 max_pbo = 0.5
 require_plateau = true
-kill_if_dead_at_ticks = 1.0
 
 [run]
 seed = 42

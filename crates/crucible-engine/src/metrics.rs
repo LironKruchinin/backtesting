@@ -126,6 +126,7 @@ mod tests {
             .map(|(i, &net)| ClosedTrade {
                 closed_ts: Ts(i as i64),
                 net_nano_usd: net,
+                direction: Side::Buy,
                 opened_ts: Ts(i as i64),
                 mae_nano_usd: net.min(0),
                 mfe_nano_usd: net.max(0),
