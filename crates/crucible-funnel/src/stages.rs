@@ -31,6 +31,14 @@
 //! signal-extraction seam the combo grammar does not have — its rules produce
 //! *positions*, not a continuous score to bucket forward returns by.
 //!
+//! S0's **measurement half exists** as [`crate::s0`] (D-0082): the
+//! forward-return join, the information coefficient, the quantile buckets and
+//! the session block bootstrap, with the leak control planted and watched
+//! firing. What it still lacks is a caller — a config surface, a score
+//! extracted from a combo, and a registry row. Until those land there is
+//! nothing for a declared `s0` to run, so [`Stage::is_implemented`] stays
+//! `false` here and the refusal stands (D-0075, D-0081).
+//!
 //! **The consequence: this build cannot award [`Verdict::Graduate`].** The
 //! glossary defines Graduate as "survived the full battery", and the battery
 //! is what is missing, so the best verdict available is [`Verdict::Iterate`]

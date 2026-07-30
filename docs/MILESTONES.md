@@ -292,6 +292,27 @@ The quant-research payload. Specs live in `crucible-funnel` module docs.
       on a deliberately reversed join — a forward return is §2.1 lookahead the
       instant it can reach a decision, and this build's whole job is to keep it
       in measurement space
+      - [x] **The measurement half** (`crucible-funnel::s0`, 2026-07-30,
+            D-0082): the forward-return join, the information coefficient, the
+            equal-count quantile buckets and the session block bootstrap.
+            Horizons are **durations, not bar counts**, and a window running off
+            the end of the series is unanswerable rather than short-windowed —
+            the second was found by a failing test, not designed in. **The
+            negative control was planted before any real use and watched
+            firing:** the same signal-that-is-the-forward-return scores
+            IC 1.000000 through the leaky join and −0.026527 through the correct
+            one, and collapses to 0.277185 at a mismatched horizon, which is the
+            third case naming the cause. Three mutations each watched failing
+            and restored; the one that matters is correlating the score against
+            itself, caught by the *silent* control. `rand_chacha` adopted, its §6
+            placeholder deleted. All four determinism hashes unmoved, because
+            nothing calls it yet
+      - [ ] **The caller**: a config surface, a score extracted from a combo,
+            the registry row that charges the trial, the CLI path, and the S0
+            determinism hash. `Stage::S0.is_implemented()` stays `false` and the
+            `s0` load refusal stands until this lands — a declared stage that is
+            silently skipped is what D-0075 refuses. H-008 stays `blocked` for
+            the same reason
 - [ ] Stats: deflated Sharpe, PBO/CSCV, block-permutation nulls, empirical
       p-values — cited implementations with property tests. **The planted
       defect they will be measured against already exists**:

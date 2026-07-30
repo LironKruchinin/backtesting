@@ -42,6 +42,7 @@
 pub mod funnel;
 pub mod grid;
 pub mod registry;
+pub mod s0;
 pub mod scheduler;
 pub mod scorecard;
 pub mod stages;

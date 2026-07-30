@@ -2255,3 +2255,75 @@ propose a superseding entry — don't silently diverge.
   (§4 over daily PnL records, S0 over forward returns), so whichever lands
   first builds it in `crucible-funnel::stats` where the other consumes it,
   rather than each growing a private resampler whose seeds derive differently.
+- **D-0082** (2026-07-30) — **S0's measurement half: the forward-return join,
+  its semantics, and its negative control — planted before the seam's first
+  real use.** `crucible-funnel::s0`. This is the first block of D-0081's seam
+  and deliberately **not** the whole of it; what is *not* here is at the bottom
+  of this entry, because a half-built seam that reads as finished is worse than
+  no seam.
+  **The join runs one way, and the direction is the design.** For a score at
+  `avail_ts = t`, the partner is the **last bar whose `avail_ts` is at or before
+  `t + horizon`**, and it must be strictly later than the scored bar. Never the
+  first bar at or *after* the target: that reads a price the horizon had not
+  reached, which is a one-bar lookahead wearing a measurement's clothes. A
+  forward return is information from after `t` and is legal **only** in
+  measurement space; nothing signal-side may read one.
+  **Horizons are durations, not bar counts** — `ohlcv` has no bar for an
+  interval that did not trade, so "ten bars ahead" is ten minutes only on a
+  grain with no gaps, and H-008 registers a *ten-minute* horizon. The fixture
+  `horizons_are_durations_not_bar_counts` puts a 37-minute hole in the series
+  and asserts a 3-minute horizon does not jump it.
+  **A window that runs off the end of the series is UNANSWERABLE, not
+  answerable-with-a-shorter-window** — and this was found by a failing test
+  rather than designed in, so it is recorded as the correction it was. Inside
+  the series a missing bar means *nothing traded*, and the last bar in the
+  window is the best price the horizon offered. At the end of the series the
+  same absence means *the data stopped*, and from inside the two are
+  indistinguishable. Pairing anyway measures a one-minute return and labels it
+  ten: silent, survives every downstream statistic, and biases the tail of every
+  sample toward whatever the last few bars happened to do. Such scores are
+  dropped and **counted**, never zero-filled — a fabricated zero drags every
+  mean toward the middle, and `pairs + dropped == input length` is asserted
+  against the input length precisely so a quiet zero-fill cannot balance the
+  books.
+  **The quantile buckets are descriptive, not §2.1 lookahead, and the boundary
+  is stated rather than assumed.** `buckets` cuts at quantiles of the whole
+  measured sample, which is textually the thing §2.1 forbids. §2.1 forbids a
+  full-sample statistic *used inside a strategy or feature*, where it decides a
+  trade with information the trade could not have had. Nothing here decides
+  anything. The moment a bucket edge is used to **trade** — "enter in the top
+  quintile" — it is lookahead again and must come from a trailing window.
+  **The bootstrap resamples whole sessions.** Resampling individual observations
+  would call one minute's return independent of the next, which is false at
+  every horizon this stage measures and yields an interval far too narrow. A
+  session is the block: the unit the archive is organized in, the unit a fold
+  boundary lands on (D-0062), long enough to carry short-horizon
+  autocorrelation. `rand_chacha` is adopted here as its first real consumer and
+  its §6 placeholder comment is deleted, as §6 requires.
+  **The negative control, planted before the first real use and watched firing**
+  (§7, no quality exemption). A "signal" that IS the forward return, run two
+  ways on the same bars: through the leaky join it scores **IC = 1.000000**, and
+  through the correct join the same planted signal scores **IC = −0.026527**.
+  The third case names the cause rather than leaving a difference: the same leak
+  measured at a *60-minute* horizon collapses to **0.277185**, so the
+  near-perfect score belongs to the horizon the leak read and is not an artifact
+  of the data or of the statistic (§7's "add the third case" rule).
+  **Three mutations, each watched failing and each restored byte-exactly.**
+  (1) deleting the fully-observed-window guard → caught by 2 controls;
+  (2) making the join look **backward** → caught by 6, including the leak
+  control ceasing to fire, which is what proves that control is not merely
+  agreeing with the data; (3) making the information coefficient correlate the
+  score against **itself** → caught by the *silent* control, which is the
+  mutation that matters most, because a silent control that cannot fail is
+  decoration.
+  **What is deliberately NOT in this build, and why the refusal stands.** There
+  is no config surface, no score extraction from a combo, no registry row, no
+  CLI path and therefore **no S0 determinism hash** — the four existing hashes
+  are unmoved (demo `b55747513df596ed`, combo `0e1ab52d474b862b`, walk-forward
+  `711e1cb34a2ee2b4`, funnel `2f430893d2a79a8f`) because nothing calls this
+  module yet. Accordingly `Stage::S0.is_implemented()` is **still false**, a
+  config declaring `s0` is **still refused at load**, and
+  `H-008`'s `blocked_on: s0-predictor-seam` **still stands**. D-0075 and D-0081
+  both say the refusal lifts in the commit where S0 can actually run and never
+  earlier; lifting it beside a module with no caller would be exactly the
+  "declared stage, silently skipped" failure D-0075 exists to refuse.

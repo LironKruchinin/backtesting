@@ -30,8 +30,11 @@ serde_json = "1.0"
 # run identically without talking to each other (D-0012's device).
 blake3 = "1.8"
 
-# --- Milestone M3, still outstanding (do not add before implementing; §6) ---
-# rand_chacha = "..." # block permutation / bootstrap resampling, with `stats`
+# S0's block bootstrap resamples whole sessions with replacement (D-0082).
+# First real consumer of the seed lineage D-0064 built ahead of it; §6 blesses
+# `rand_chacha` "where seeded randomness is needed" and its placeholder comment
+# is deleted here, as §6 requires when a blessed crate lands.
+rand_chacha = "0.9"
 
 [dev-dependencies]
 # `tests/planted_leak.rs` runs the planted lookahead defect on THIS project's
