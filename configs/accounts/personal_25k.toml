@@ -36,6 +36,32 @@ kind = "cash"
 nominal_size_usd = "25000"
 starting_balance_usd = "25000"
 
+# Whether this project's output -- an automated strategy -- may legally be
+# run on this account. Closed set: forbidden | conditional | unknown.
+# `unknown` is a VALUE, not a placeholder to be guessed away: it means no
+# stance was found on the firm's own pages, and it must not be read as
+# permission. Cited like everything else in `[source]`.
+automation_policy = "unknown"
+automation_policy_source_url = "https://www.cmegroup.com/solutions/risk-management/performance-bonds-margins.html"
+automation_policy_accessed_date = "2026-07-30"
+# There is no firm, so there is no firm policy to cite. What
+# governs an automated strategy here is the chosen BROKER's own
+# automated-trading and API terms, and no broker is named in
+# this config -- so nothing was verified and the value is
+# `unknown`. It becomes verifiable the day a broker is chosen.
+# The cited URL is the only outside authority this file has and
+# it is about margin, not automation; it is named because the
+# field's citation discipline is not waived just because the
+# answer is unknown.
+
+# TRUE means the firm's own rules forbid running this project's output on
+# the funded account this evaluation leads to. It does NOT mean excluded:
+# a reference-only account is evaluated by the full battery, because its
+# rule STRUCTURE is what measures strategy fragility, which is the
+# research question. Which product to actually target is an M4 decision,
+# taken against rules re-verified at that time -- they will have changed.
+reference_only = false
+
 [source]
 rule_pages = [
   "https://www.cmegroup.com/solutions/risk-management/performance-bonds-margins.html",
@@ -67,15 +93,24 @@ threshold_cum_pnl_pct = -50.0
 basis = "equity_including_unrealized"
 
 [margin]
-# DELIBERATELY EMPTY. CME performance bonds change by clearing
-# advisory (several times a year), so a number pasted here would be
-# a stale constant wearing a spec's clothes -- and CME's Data Terms
-# of Use forbid automated retrieval, so this session could not read
-# one at all. Fill `initial_margin_per_contract_usd` and
-# `maintenance_margin_per_contract_usd` by hand from the official
-# product margin page, with `as_of_date`, or leave them absent and
-# accept that the contract-count cap is unmodelled -- which is what
-# absent MEANS here. It must never be silently defaulted.
+# DELIBERATELY EMPTY, AND A HUMAN TASK. CME performance bonds change
+# by clearing advisory (several times a year), so a number pasted
+# here would be a stale constant wearing a spec's clothes -- and
+# CME's Data Terms of Use forbid automated retrieval while their site
+# blocks it outright, so no automated process may fill this in.
+#
+# WHICH NUMBER IS WANTED: the EXCHANGE MAINTENANCE margin, as the
+# conservative baseline. Broker day-trading margins are far smaller
+# and are a future refinement, not the baseline -- and where the two
+# differ, the conservative (larger) figure is chosen, because it caps
+# position size lower and so understates rather than flatters what
+# the account could hold. Paste it with `as_of_date`, by hand:
+#   initial_margin_per_contract_usd = "..."
+#   maintenance_margin_per_contract_usd = "..."
+#   as_of_date = "YYYY-MM-DD"
+# Or leave them absent and accept that the contract-count cap is
+# unmodelled -- which is what absent MEANS here. It must never be
+# silently defaulted.
 #   https://www.cmegroup.com/markets/equities/sp/e-mini-sandp500.margins.html
 #   https://www.cmegroup.com/markets/equities/sp/micro-e-mini-sandp-500.margins.html
 #   https://www.cmegroup.com/solutions/risk-management/performance-bonds-margins.html

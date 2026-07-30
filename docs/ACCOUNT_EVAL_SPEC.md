@@ -213,6 +213,13 @@ pub struct HighWaterState {
 immediately after `portfolio.mark(bar.close)`.** Not a second pass. Not a
 post-processing step.
 
+**Required for all sixteen accounts, including every `highest_daily_closing_equity`
+one.** The ratchet basis decides what advances the threshold; it decides nothing
+about what is tested against it, and every firm here tests intraday on
+unrealized equity (§7.0). There is no account in `configs/accounts/` for which
+this series can be skipped, and "it's an EOD account" is not a reason — it is the
+reason eight of the sixteen would otherwise be evaluated wrongly.
+
 **HARD REQUIREMENT: this series is never reconstructed from bars after the
 fact.** Reconstruction — walking the OHLC series afterwards and inferring what
 the equity path must have been — re-derives the path from high and low prints,
@@ -526,12 +533,25 @@ parameter** (−50 % as shipped), not anybody's rule, and every quoted ruin
 probability prints it. Two `personal_*` runs at different thresholds are two
 runs, and the second one is a trial.
 
-`[margin]` is empty in all four files. CME performance bonds change by clearing
-advisory several times a year, so a constant pasted into a config would be a
-stale number wearing a spec's clothes; and CME's Data Terms of Use forbid
-automated retrieval, so this session could not read one. Absent means **the
-contract-count cap is unmodelled**, the report says so, and no default is
-substituted. Filling it is a human action with an `as_of_date`.
+`[margin]` is empty in all four files, and **filling it is a human task**. CME
+performance bonds change by clearing advisory several times a year, so a constant
+pasted into a config is a dated observation and never a spec value; and CME's
+Data Terms of Use forbid automated retrieval while their site blocks it outright,
+so no automated process in this project may fill the field in. Absent means
+**the contract-count cap is unmodelled**, the report says so, and no default is
+substituted.
+
+**Which number is wanted, and how to break the tie.** The **exchange maintenance
+margin** is the baseline, because it is the conservative figure: it is larger
+than a broker's day-trading margin, so it caps contracts lower and understates
+rather than flatters what the account could have held. Broker day-margins are a
+**future refinement**, not the baseline — they are smaller, broker-specific, and
+revocable intraday at the broker's discretion, which makes them a worse thing to
+pin a research constant to. **Where the two differ, the conservative (larger)
+figure is chosen.** Whoever pastes the numbers pastes
+`initial_margin_per_contract_usd`, `maintenance_margin_per_contract_usd` and
+`as_of_date` together; a figure without its date is not a figure, because the
+rate it came from has already moved.
 
 `personal_*` is the control arm and that is its real job: every difference
 between `personal_50k` and a prop account of the same size, same strategy, same
@@ -559,6 +579,48 @@ that machinery is the answer:
 4. **A report never sorts by the metric it is about to quote.** Per-account
    detail prints in declared config order, following `walk-forward`'s existing
    rule about printing the first N combos by grid index and never "the best N".
+
+### 4.7 Automation policy, and why `reference_only` is not an exclusion
+
+Two fields exist because "can this account legally be traded by an automated
+strategy?" is a fact about the product that a metric cannot see, and a P(pass)
+for an account this project's output may not run on means something different
+from a P(pass) for one it may.
+
+**`[account].automation_policy`** — closed set `forbidden | conditional |
+unknown`, each with `automation_policy_source_url` and
+`automation_policy_accessed_date`, cited to the page it was read on:
+
+| accounts | value | basis |
+|---|---|---|
+| `topstep_*` | `conditional` | "Can I use automated trading strategies? Yes, with conditions." |
+| `tpt_*` | `forbidden` | "We do not allow any automated or bot trading of any kind. All trades must be manually executed by the trader." |
+| `apex_*` | `unknown` | no stance located on any cited page; the linked Prohibited Activities page was not retrievable |
+| `personal_*` | `unknown` | no firm exists; the governing terms are the chosen broker's, and no broker is named |
+
+**`unknown` is a value, not a placeholder**, and it must never be read as
+permission. Closing it by inference — "they didn't say no" — is exactly the move
+this project's refusal discipline exists to block, and it stays open (§8, items
+8 and 9) until someone reads a page that says so.
+
+**`[account].reference_only`** — `true` on the five `tpt_*` files, meaning the
+firm's own rules forbid running this project's output on the funded account this
+evaluation leads to. It does **not** mean excluded:
+
+- **A reference-only account is evaluated by the full battery.** Its rule
+  *structure* is what measures strategy fragility, which is the research
+  question this document is in service of. TPT is the most informative account
+  in the directory precisely because one firm supplies both ratchet bases at an
+  identical drawdown amount — the cleanest available isolation of §7.0's axis.
+- **Which product to target is an M4 decision**, taken against rules re-verified
+  at that time. Every figure here carries a 2026-07-30 access date because these
+  rules changed during 2026 and will change again; pruning a config today on the
+  strength of a rule read today would throw away a measurement to act on a fact
+  with a shorter shelf life than the measurement has.
+- What `reference_only` does change is the **wording of the report**: a
+  reference-only account's numbers are labelled as a fragility measurement and
+  never as a route to funding. `automation_policy` prints beside them, so a
+  reader cannot mistake one for the other.
 
 ---
 
@@ -603,7 +665,10 @@ Honest, if all of them hold:
 - every probability carries its Monte Carlo error, its mark grain, and its
   DLL setting;
 - every reported figure traces to a firm's own page with an access date, and
-  every ambiguity is in §8 rather than resolved by preference.
+  every ambiguity is in §8 rather than resolved by preference;
+- `automation_policy` prints beside every account's numbers, so a P(pass) for an
+  account this project's output may not legally trade is never read as a route
+  to funding (§4.7).
 
 A lie, by any one of these — each has been seen in published prop-firm
 "backtests":
@@ -632,6 +697,45 @@ A lie, by any one of these — each has been seen in published prop-firm
 Captured separately from the reading of it. The baseline this work started from
 is on the left; the firm's own page on 2026-07-30 is on the right; the verified
 figure is what `configs/accounts/` encodes.
+
+### 7.0 The framing was wrong, not only the numbers
+
+Ten individual figures were corrected below, and that is the smaller half of
+this record. The larger half is that **the working baseline's "intraday-trailing
+versus EOD-trailing" dichotomy is not a true dichotomy, and no assignment of
+these sixteen accounts to those two labels can be correct.** It is a one-axis
+framing of a two-axis object, and the axes are independent:
+
+- **the ratchet** — what advances the threshold upward: a continuously-updated
+  peak of equity including unrealized PnL, or the highest end-of-day balance;
+- **the breach test** — what is compared against the threshold, and how often.
+
+The dichotomy implicitly ties the two together, so "EOD-trailing" is heard as
+*both* an end-of-day ratchet *and* an end-of-day test. The second half is false
+for every account in this directory. Topstep's own page: the MLL "updates at the
+end of each trading day **but is monitored in real time throughout the session.
+Both realized and unrealized P&L count toward it.**" Take Profit Trader's Test:
+"If your account drops to the Minimum Account Balance **at any time — through
+realized or unrealized losses** — the account is immediately liquidated."
+
+Two consequences, and the second one is the whole cost of getting this wrong:
+
+1. **`ratchet_basis` and `breach_basis` are separate config fields** because the
+   product of the two, not either alone, is what an account is. The same firm can
+   move one and hold the other — TPT's Test and PRO differ in ratchet at an
+   identical drawdown amount — and a schema with one field cannot say so.
+2. **The intraday unrealized-equity high-water series (§3.3) is required for all
+   sixteen configs, including every "EOD" one.** It is not an Apex-only
+   refinement to be skipped for Topstep and TPT. An implementer who reads
+   "EOD account" as licence to evaluate Topstep on daily closes reintroduces the
+   endpoint fallacy on eight of the sixteen accounts, and gets numbers that are
+   optimistic by construction while looking careful — the exact failure this
+   document opens by naming. The ratchet is what changes between accounts; the
+   capture requirement does not change at all.
+
+A one-axis model of these accounts is therefore not a simplification with a
+known error bar. It is a model that cannot represent the object, and its error
+has a sign.
 
 **Apex Trader Funding** — Intraday Trailing Drawdown Evaluation
 ([evaluations](https://support.apextraderfunding.com/hc/en-us/articles/45683414022299-Intraday-Trailing-Drawdown-Evaluations),
@@ -689,9 +793,13 @@ total net P/L.
 **PRO forbids automated trading outright** — "We do not allow any automated or
 bot trading of any kind. All trades must be manually executed by the trader" —
 and forbids open positions within one minute either side of FOMC, NFP and CPI.
-A systematic strategy cannot be run in a TPT PRO account, so the TPT files are
-a reference point in this study, not a target. That is a fact about the product,
-not a caveat about the model.
+A systematic strategy cannot be run in a TPT PRO account, so the five TPT files
+carry `automation_policy = "forbidden"` and `reference_only = true`. **They are
+kept and they are fully evaluated** (§4.7): the rule structure is what measures
+fragility, and the Test/PRO ratchet pair is the sharpest instrument in the
+directory for the axis §7.0 is about. Product targeting is an M4 decision made
+against rules re-verified then. That is a fact about the product, not a caveat
+about the model.
 
 **CME margins**, for `personal_*`: **nothing encoded.** CME's site returns
 "This IP address is blocked due to suspected web scraping activity" and its Data
@@ -703,6 +811,14 @@ and names the pages a human should read.
 ---
 
 ## 8. Open questions — refused rather than guessed
+
+**These stay open.** None of the twelve is to be closed by inference, by
+plausibility, or by the absence of a contrary statement — only by reading a page
+that answers it, with an access date, or by asking the firm. An item resolved
+here without a source is worse than the item, because it stops looking like a
+gap. Where an item has a *provisional* encoding (a target basis, an Apex lock
+variant), the encoded value is the stricter reading, the alternative is named,
+and the report says both.
 
 1. **Does the Apex evaluation target have to be standing at a close?** Inferred
    from "the evaluation will be marked as passed after market close", not

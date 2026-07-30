@@ -39,6 +39,31 @@ kind = "prop_evaluation"
 nominal_size_usd = "100000"
 starting_balance_usd = "100000"
 
+# Whether this project's output -- an automated strategy -- may legally be
+# run on this account. Closed set: forbidden | conditional | unknown.
+# `unknown` is a VALUE, not a placeholder to be guessed away: it means no
+# stance was found on the firm's own pages, and it must not be read as
+# permission. Cited like everything else in `[source]`.
+automation_policy = "unknown"
+automation_policy_source_url = "https://support.apextraderfunding.com/hc/en-us/articles/45683414022299-Intraday-Trailing-Drawdown-Evaluations"
+automation_policy_accessed_date = "2026-07-30"
+# NOT STATED on any page in `[source]`. The evaluation rules
+# link a 'Prohibited Activities' page and enumerate hedging and
+# 'rule circumvention' without mentioning automation either way;
+# that linked page was not retrievable in this session (the
+# public site returns HTTP 403 to non-browser clients).
+# `unknown` therefore means UNKNOWN. Do not read it as
+# permission, and do not close it by inference -- open question
+# 9 in ACCOUNT_EVAL_SPEC §8.
+
+# TRUE means the firm's own rules forbid running this project's output on
+# the funded account this evaluation leads to. It does NOT mean excluded:
+# a reference-only account is evaluated by the full battery, because its
+# rule STRUCTURE is what measures strategy fragility, which is the
+# research question. Which product to actually target is an M4 decision,
+# taken against rules re-verified at that time -- they will have changed.
+reference_only = false
+
 [source]
 rule_pages = [
   "https://support.apextraderfunding.com/hc/en-us/articles/45683414022299-Intraday-Trailing-Drawdown-Evaluations",
