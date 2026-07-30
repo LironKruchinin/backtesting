@@ -45,6 +45,30 @@ kind = "prop_evaluation"
 nominal_size_usd = "150000"
 starting_balance_usd = "150000"
 
+# Whether this project's output -- an automated strategy -- may legally be
+# run on this account. Closed set: forbidden | conditional | unknown.
+# `unknown` is a VALUE, not a placeholder to be guessed away: it means no
+# stance was found on the firm's own pages, and it must not be read as
+# permission. Cited like everything else in `[source]`.
+automation_policy = "conditional"
+automation_policy_source_url = "https://help.topstep.com/en/articles/8284197-trading-combine-parameters"
+automation_policy_accessed_date = "2026-07-30"
+# 'Can I use automated trading strategies? Yes, with
+# conditions.' -- Trading Combine Parameters FAQ. The stated
+# conditions: Topstep will not help set up or troubleshoot them,
+# no exceptions are made for errant trades or malfunctions, test
+# on a Practice Account first, and Prohibited Conduct and
+# Prohibited Trading Strategies still apply. The only account in
+# this directory with a verified affirmative stance.
+
+# TRUE means the firm's own rules forbid running this project's output on
+# the funded account this evaluation leads to. It does NOT mean excluded:
+# a reference-only account is evaluated by the full battery, because its
+# rule STRUCTURE is what measures strategy fragility, which is the
+# research question. Which product to actually target is an M4 decision,
+# taken against rules re-verified at that time -- they will have changed.
+reference_only = false
+
 [source]
 rule_pages = [
   "https://help.topstep.com/en/articles/8284197-trading-combine-parameters",

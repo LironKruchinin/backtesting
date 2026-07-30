@@ -20,16 +20,25 @@
 # firm's own help centre on the access date below, including the $75,000 size
 # the working baseline did not list.
 #
-# READ THIS BEFORE QUOTING ANY TPT NUMBER: the PRO (funded) account rules say
-# 'No Trading bots/Algos -- We do not allow any automated or bot trading of any
+# REFERENCE-ONLY, AND STILL EVALUATED. The PRO (funded) account rules say 'No
+# Trading bots/Algos -- We do not allow any automated or bot trading of any
 # kind. All trades must be manually executed by the trader.' A systematic
-# strategy therefore CANNOT be run on a TPT PRO account, and a P(pass) computed
-# for this Test file describes a path to an account this project's output is not
-# permitted to trade. The PRO page also forbids open positions one minute
-# either side of FOMC/NFP/CPI. That is a fact about the product, not a caveat
-# about the model, and it is the reason this file exists as a reference point
-# rather than as a target. Whether the ban extends to the Test phase is not
-# stated on the Test rule pages -- open question, not an assumption.
+# strategy therefore cannot be run on a TPT PRO account, so `reference_only`
+# below is true: a P(pass) computed here describes a path to an account this
+# project's output is not permitted to trade.
+#
+# That is NOT a reason to prune this file or to exclude it from the battery.
+# Its rule STRUCTURE -- an EOD ratchet in the Test and an intraday ratchet in
+# PRO at the identical drawdown amount -- is the cleanest available measurement
+# of strategy fragility, which is the actual research question, and one firm
+# supplying both ratchet bases is worth more here than a product recommendation
+# would be. Which product to target is an M4 decision, taken against rules
+# re-verified then; they will have changed again by then, as they changed in
+# 2026 before this file was written.
+#
+# Whether the ban extends to the Test phase is not stated on the Test rule
+# pages. That stays an open question (ACCOUNT_EVAL_SPEC §8, item 8) and is not
+# closed by inference in either direction.
 
 schema_version = 1
 
@@ -44,6 +53,32 @@ kind = "prop_evaluation"
 # number the threshold arithmetic uses.
 nominal_size_usd = "100000"
 starting_balance_usd = "100000"
+
+# Whether this project's output -- an automated strategy -- may legally be
+# run on this account. Closed set: forbidden | conditional | unknown.
+# `unknown` is a VALUE, not a placeholder to be guessed away: it means no
+# stance was found on the firm's own pages, and it must not be read as
+# permission. Cited like everything else in `[source]`.
+automation_policy = "forbidden"
+automation_policy_source_url = "https://takeprofittraderhelp.zendesk.com/hc/en-us/articles/15171769361053-PRO-Account-Rules"
+automation_policy_accessed_date = "2026-07-30"
+# 'No Trading bots/Algos -- We do not allow any automated or bot
+# trading of any kind. All trades must be manually executed by
+# the trader.' -- PRO Account Rules, rule 1.
+# Encoded as `forbidden` on this Test file because the Test
+# exists only as a path to PRO, which is where the ban is
+# documented. The Test rule pages do not restate it, and that
+# gap is NOT closed here -- open question 8 in
+# ACCOUNT_EVAL_SPEC §8. The PRO page also bars open positions
+# one minute either side of FOMC, NFP and CPI.
+
+# TRUE means the firm's own rules forbid running this project's output on
+# the funded account this evaluation leads to. It does NOT mean excluded:
+# a reference-only account is evaluated by the full battery, because its
+# rule STRUCTURE is what measures strategy fragility, which is the
+# research question. Which product to actually target is an M4 decision,
+# taken against rules re-verified at that time -- they will have changed.
+reference_only = true
 
 [source]
 rule_pages = [
