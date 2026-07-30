@@ -300,6 +300,11 @@ While working:
 - Stay within the active milestone unless the human redirects scope.
 - Semantic/architectural choices → `docs/DECISIONS.md` entry in the same
   commit (template in that file's header).
+- **Reader-first.** Any change to a persisted record shape lands its READER
+  on `main` before any writer emits the new shape. `deny_unknown_fields`
+  turns a premature writer into an archive-wide refusal BY DESIGN — that is
+  the strictness succeeding, not failing. Never weaken the parser; order the
+  deployment. Worked example in `docs/DATA_PLAN.md`.
 - Keep module-doc specs in sync with what you implement; the spec comment is
   done only when the module is.
 - Definition of done: fmt + clippy + tests green locally, docs updated,

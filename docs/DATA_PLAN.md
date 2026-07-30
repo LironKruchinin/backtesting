@@ -181,3 +181,53 @@ The honest consequence: a 16-year backtest is not 16 years of homogeneous
 data. It is ~9 years of nanosecond-timestamped MDP 3 and ~7 years of
 millisecond-ish MDP 2, and any result whose sign depends on the early period
 deserves a truncation test before it is believed.
+
+---
+
+## Operational record: the 2026-07-30 manifest outage
+
+The worked example behind CLAUDE.md §8's **reader-first** rule. Kept because
+the interesting thing about it is that nothing broke.
+
+**What happened.** The D-0066 repair appended 8 symbol-supplement records — a
+*new line kind* — to the live `manifest.jsonl` at **15:54**, while the code
+that parses that line kind was still sitting unmerged in a worktree.
+`ManifestRecord` carries `#[serde(deny_unknown_fields)]`, so from that instant
+every command built from `main` refused the entire manifest at
+`Catalog::open`: `transcode` exit 2, `layout-check` exit 2, and any `verify`
+would have followed. Roughly **40 minutes** until the reader merged
+(`bc04b1d`), after which `layout-check` returned exit 0 over all 33 records.
+
+**What did not happen.** No byte of the archive was altered, no record was
+rewritten, nothing was lost, and no result was computed from a
+half-understood manifest. The append itself was measured as append-only: the
+original 33 lines occupied exactly the 1,167,298 bytes they had occupied
+before, with the new lines after them.
+
+**The reading.** This is `deny_unknown_fields` doing its job. A permissive
+parser would have skipped the eight unknown lines, reported coverage that
+silently omitted 21,736 symbols, and let `coverage` re-buy them — the D-0033
+re-buy bug, arriving quietly and looking like success. Instead the archive
+refused to be read at all, loudly, everywhere, at once. **A total refusal is
+the cheapest possible failure: it costs a merge, and it cannot be
+mistaken for a result.** The fix is never to widen the parser; it is to land
+the reader first.
+
+**The rule, in one line:** any change to a persisted record shape lands its
+READER on `main` before any writer emits the new shape.
+
+## Operational caution: `G:` is an SMR drive
+
+`G:` is a **Seagate ST4000DM004 — 4 TB SMR**, not CMR and not an SSD.
+Measured cold sequential read: **131.6 MB/s at one stream, 69.5 MB/s at two**
+— concurrency *costs* 47 % in aggregate, which is why bulk transcode runs at
+two streams at most and pairs a large record with a small one.
+
+The unmeasured hazard is writes, not reads. SMR drives absorb interleaved
+small writes into a limited CMR cache and **collapse when it exhausts**, with
+throughput falling by an order of magnitude until the drive destages. A bulk
+`transcode` writes ~17.6 GB as tens of thousands of files with interleaved
+row-group appends, which is the shape that exhausts it. **If write throughput
+craters mid-transcode, suspect the drive before the code**: pause, let it
+destage, resume. Curated output is derived and disposable, so a paused
+transcode costs only its own re-run.

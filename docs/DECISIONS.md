@@ -1265,3 +1265,18 @@ propose a superseding entry — don't silently diverge.
   ambiguous bar reports zero, and an unbracketed run reports zero however
   violent its bars — a flag that fired on every exit would be
   indistinguishable from one that worked.
+  **Ratified 2026-07-30, with two framings the original entry left implicit.**
+  (a) *Stopping out on the installation bar is the CONSERVATIVE direction.* It
+  penalizes and never flatters, so it composes with the worst-case intrabar
+  doctrine rather than sitting awkwardly beside it, and it violates nothing in
+  §2.1 — no information from the future is consulted, only the spread the
+  position already paid. A sell stop one tick under an offer you just lifted is
+  resting at the bid, and a real market fills it immediately; the engine
+  agreeing is microstructure, not a modelling artifact. (b) *Grids must KEEP
+  sub-spread stop distances rather than excluding them.* The point of the
+  behaviour is that the cost-sensitivity sweep shows that region **being
+  dominated, as data** — a reader can see the stop distances that cannot
+  survive their own spread. Filtering them out of the grid would replace that
+  evidence with the absence of evidence, and quietly: the region would not look
+  bad, it would look like nobody tried it. An axis is allowed to contain points
+  that lose.
