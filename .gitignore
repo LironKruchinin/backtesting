@@ -23,3 +23,6 @@
 .idea/
 *.swp
 .DS_Store
+
+# Agent worktrees — gitlinks to throwaway checkouts, never part of the tree
+.claude/worktrees/

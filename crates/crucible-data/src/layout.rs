@@ -10,7 +10,7 @@
 //! 2. **No directory ever holds two kinds of data.**
 //!
 //! Everything below is those two rules applied to a particular tree. They are
-//! what make `rm -rf curated/bars/ESH4` a safe, complete, obviously-correct
+//! what make `rm -rf curated/bars/ESH2024` a safe, complete, obviously-correct
 //! operation, and what stop a glob from silently sweeping up a neighbour.
 //!
 //! ## What this checks, and what it deliberately does not
@@ -189,6 +189,17 @@ pub enum Finding {
         /// The directory name.
         kind: String,
     },
+    /// A `curated/bars/` directory named after a contract whose year is written
+    /// with a single digit — the spelling that cannot say which decade it means
+    /// (D-0072).
+    AmbiguousCuratedContract {
+        /// The directory name, decoded.
+        instrument: String,
+        /// What the key would be if the decade were known, using the pinned
+        /// [`DecadeAnchor`](crate::continuous::DecadeAnchor) — shown as an
+        /// *illustration* of the shape a key must have, never as a repair.
+        example: String,
+    },
     /// A data file in the wrong tree — Parquet under `raw/`, DBN under
     /// `curated/`.
     WrongTree {
@@ -252,6 +263,19 @@ impl core::fmt::Display for Finding {
                 f,
                 "curated/{kind}/ is not a known curated kind. Known: {}",
                 KNOWN_CURATED_KINDS.join(", ")
+            ),
+            Finding::AmbiguousCuratedContract {
+                instrument,
+                example,
+            } => write!(
+                f,
+                "curated/bars/{instrument}/ spells its delivery year with one digit, \
+                 which repeats every ten years — and the archive's bar windows are \
+                 sixteen years long, so this directory can hold two contracts whose \
+                 bars concatenate in perfect order and pass every check (D-0072). A \
+                 curated contract key carries a four-digit year, e.g. {example}. \
+                 Curated data is disposable: delete and rebuild it —\n\
+                 \x20      rm -rf curated/bars && crucible transcode"
             ),
             Finding::WrongTree {
                 path,
@@ -518,6 +542,14 @@ fn check_curated(
                     });
                 }
             }
+            // The instrument level of `curated/bars/`. Checked here rather than
+            // trusted to the writer, because the writer that produced the whole
+            // archive's `curated/bars/` was the one that got it wrong (D-0072).
+            if depth == 2
+                && let Some(finding) = ambiguous_contract_dir(&rel)
+            {
+                report.findings.push(finding);
+            }
             continue;
         }
         report.curated_files += 1;
@@ -537,6 +569,39 @@ fn check_curated(
         }
     }
     Ok(())
+}
+
+/// Whether a `curated/bars/{instrument}` directory names a contract whose year
+/// is written with a single digit (D-0072).
+///
+/// Only `bars/` is checked, and only the instrument level. `rolls/` is keyed by
+/// **root** (`curated/rolls/ES/…`), which carries no year at all; a root is not
+/// a contract and must not be flagged as one.
+///
+/// Anything that is not an outright contract — `SYN%3ARW`, `ES.v.0`, a spread —
+/// is not flagged either. A spread's key is still the vendor's spelling
+/// (D-0070), and a directory that does not name a contract has no delivery year
+/// to be ambiguous about.
+fn ambiguous_contract_dir(rel: &str) -> Option<Finding> {
+    let mut parts = rel.split('/');
+    if parts.next() != Some("curated") || parts.next() != Some("bars") {
+        return None;
+    }
+    let component = parts.next()?;
+    let instrument = crate::curated::path::decode_instrument(component)?;
+    let parsed = crate::continuous::parse_parts(&instrument).ok()?;
+    if !parsed.has_ambiguous_year() {
+        return None;
+    }
+    // The example is what the *pinned* anchor would have said, which is exactly
+    // the guess this check exists to forbid — so it is labelled as a shape, not
+    // offered as a fix. There is deliberately no `--fix` (D-0049).
+    let example = crate::continuous::ContractSymbol::parse(&instrument)
+        .map_or_else(|_| "GCZ2024".to_owned(), |s| s.to_string());
+    Some(Finding::AmbiguousCuratedContract {
+        instrument,
+        example,
+    })
 }
 
 /// Names and kinds of one directory's entries, sorted.

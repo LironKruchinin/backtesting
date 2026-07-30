@@ -153,7 +153,7 @@ engine: there is no `f64` anywhere on the path.
 cargo run -p crucible-cli --features databento -- transcode
 
 # Replay them. No vendor feature needed — this reads local Parquet.
-cargo run -p crucible-cli -- backtest --instrument ESH4 --timeframe 1m   --start 2024-01-01 --end 2024-02-01 --fast 20 --slow 50
+cargo run -p crucible-cli -- backtest --instrument ESH2024 --timeframe 1m   --start 2024-01-01 --end 2024-02-01 --fast 20 --slow 50
 ```
 
 Curated data is disposable: it is rebuilt from `raw/`, which the manifest

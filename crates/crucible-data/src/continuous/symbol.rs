@@ -12,26 +12,46 @@
 //! CME writes the year as one digit (`ESH4`); Databento passes that spelling
 //! through as `raw_symbol`. One digit cannot distinguish 2014 from 2024, and
 //! this project's archive starts in 2010 — so the ambiguity is real, not
-//! theoretical.
+//! theoretical. It is not a hypothetical either: the 16-year `GC.FUT ohlcv-1m`
+//! window contains bars for **both** `GCZ4`s, ten years apart (D-0072).
 //!
 //! The rule, pinned here and recorded in every roll table:
 //!
-//! - **Two digits are absolute**: `yy` means `2000 + yy`. Unambiguous, and
-//!   correct for every contract in a 21st-century archive.
+//! - **Four digits are absolute and unambiguous**: `yyyy` means exactly that
+//!   year. This is the spelling this project *writes* — see below.
+//! - **Two digits are absolute**: `yy` means `2000 + yy`. Correct for every
+//!   contract in a 21st-century archive, and the spelling the vendor itself
+//!   falls back to for far-dated listings (`CLZ36`).
 //! - **One digit resolves against a [`DecadeAnchor`]**: the year congruent to
 //!   the digit modulo 10 that is *nearest* the anchor, ties broken toward the
 //!   **earlier** year. [`DecadeAnchor::DEFAULT`] is a pinned constant
 //!   ([`DEFAULT_ANCHOR_YEAR`]), never a clock — a symbol must parse to the
 //!   same contract on every machine, forever (CLAUDE.md §2.2).
 //!
-//! A table built over contracts spanning a decade boundary must therefore say
-//! which decade it means; the anchor it used is stored in the table so the
-//! same bytes always reparse to the same contracts. [`ContractSymbol`]'s
-//! `Display` renders the **two-digit** form, which is anchor-independent and
-//! round-trips through [`ContractSymbol::parse`] regardless of anchor. The
-//! archive's own spelling is not reconstructed from the symbol: it travels
-//! beside it, in [`ContractSeries::instrument`](super::ContractSeries), because
-//! that is what names a curated partition.
+//! **A one-digit year is never resolved by an anchor where a record can say
+//! better.** The anchor is a constant, and a constant cannot separate two
+//! contracts that a single file contains; only the record can
+//! ([`expiry`](super::expiry), D-0046, D-0072). The anchor remains the
+//! fallback for the one place with nothing to consult — a bare symbol with no
+//! timestamp beside it.
+//!
+//! ## The canonical spelling this project writes
+//!
+//! [`ContractSymbol`]'s `Display` renders the **four-digit** form (`GCZ2014`),
+//! and that is what names a curated partition (D-0072). Two reasons, and the
+//! second is the load-bearing one:
+//!
+//! 1. It is absolute: no anchor, no decade, no era. It reparses to the same
+//!    contract on any machine and in any century.
+//! 2. It **cannot be confused with a vendor spelling**. A two-digit form would
+//!    be unambiguous arithmetically and still ambiguous to a reader: `GCZ14` is
+//!    one character from the vendor's `GCZ4`, and `CLZ36` is a real vendor
+//!    spelling that means 2036. A directory listing mixing our keys with the
+//!    archive's would depend on knowing which convention wrote each name. Four
+//!    digits can never collide with a CME year code, which has at most two.
+//!
+//! [`ContractSymbol::parse`] accepts all three spellings, so the canonical form
+//! round-trips and every archive spelling still parses.
 
 use core::cmp::Ordering;
 use core::fmt;
@@ -223,11 +243,110 @@ impl fmt::Display for MonthCode {
     }
 }
 
+/// The earliest year a four-digit spelling may name.
+///
+/// Not a style rule: it is what stops [`ContractSymbol::parse`] from reading
+/// four trailing digits out of a string that is not a contract at all. `ZN1234`
+/// would otherwise parse as root `Z`, month `N` (July), year 1234. Every
+/// timestamp in this project is nanoseconds since the Unix epoch, so a contract
+/// that expired before 1970 could not be represented anywhere downstream.
+const EARLIEST_FOUR_DIGIT_YEAR: i32 = 1970;
+
+/// An outright contract symbol split into its written parts, **before** the
+/// year is resolved.
+///
+/// This is the one place the text `ROOT + month letter + year digits` is taken
+/// apart, so every consumer that has to reason about the *spelling* — the year
+/// resolver in [`expiry`](super::expiry), the curated-layout check, and
+/// [`ContractSymbol::parse_with_anchor`] itself — agrees by construction rather
+/// than by three regexes that happen to match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SymbolParts<'a> {
+    /// Product root, e.g. `ES`.
+    pub root: &'a str,
+    /// Delivery month.
+    pub month: MonthCode,
+    /// How many digits the year was written with: 1, 2, or 4.
+    pub year_digits: usize,
+    /// The digits' numeric value, *unresolved*: `4`, `24`, or `2024`.
+    pub year_value: u32,
+}
+
+impl SymbolParts<'_> {
+    /// Whether the year was written with a single digit — the spelling that
+    /// cannot say which decade it means.
+    ///
+    /// The predicate a curated partition key must answer `false` to (D-0072).
+    #[must_use]
+    pub const fn has_ambiguous_year(&self) -> bool {
+        self.year_digits == 1
+    }
+}
+
+/// Splits an outright contract symbol into [`SymbolParts`].
+///
+/// # Errors
+/// [`ContinuousError::UnparseableSymbol`] for anything that is not
+/// `ROOT + month letter + 1, 2, or 4 year digits` — including calendar spreads
+/// (`ESH4-ESM4`), which are real instruments but are never the front contract
+/// of a continuous series.
+pub fn parse_parts(text: &str) -> Result<SymbolParts<'_>, ContinuousError> {
+    let bad = |reason: &'static str| ContinuousError::UnparseableSymbol {
+        symbol: text.to_owned(),
+        reason,
+    };
+    if !text.is_ascii() {
+        return Err(bad("must be ASCII"));
+    }
+    let bytes = text.as_bytes();
+    let year_digits = bytes
+        .iter()
+        .rev()
+        .take_while(|b| b.is_ascii_digit())
+        .count();
+    if year_digits == 0 {
+        return Err(bad("has no year digits"));
+    }
+    // 1 and 2 are CME's spellings; 4 is this project's canonical one. 3 is
+    // nobody's, and more than 4 is a serial number, not a year.
+    if !matches!(year_digits, 1 | 2 | 4) {
+        return Err(bad(
+            "has a trailing digit count that is not a year: CME writes 1 or 2, \
+             this project writes 4",
+        ));
+    }
+    // With the digits removed, the last character must be the month code and
+    // everything before it the product root.
+    let head = &text[..text.len() - year_digits];
+    let letter = head.chars().next_back().ok_or_else(|| bad("has no root"))?;
+    let month = MonthCode::from_letter(letter)
+        .ok_or_else(|| bad("does not carry an uppercase month code (F G H J K M N Q U V X Z)"))?;
+    let root = &head[..head.len() - letter.len_utf8()];
+    validate_root(root).map_err(|_| {
+        bad("has a product root that is not uppercase ASCII alphanumeric (a calendar spread is not an outright)")
+    })?;
+    let year_value: u32 = text[text.len() - year_digits..]
+        .parse()
+        .map_err(|_| bad("has an unparseable year"))?;
+    if year_digits == 4 && i64::from(year_value) < i64::from(EARLIEST_FOUR_DIGIT_YEAR) {
+        return Err(bad(
+            "spells four year digits that are not a year a futures contract \
+             could carry (before 1970, the epoch every timestamp here counts from)",
+        ));
+    }
+    Ok(SymbolParts {
+        root,
+        month,
+        year_digits,
+        year_value,
+    })
+}
+
 /// An outright futures contract, identified well enough to be ordered.
 ///
-/// Equality and ordering are on `(root, year, month)` only — the two archive
-/// spellings of one contract (`ESH4` and `ESH24`) are the same contract and
-/// must collapse to one key in any map.
+/// Equality and ordering are on `(root, year, month)` only — the three
+/// spellings of one contract (`ESH4`, `ESH24`, `ESH2024`) are the same contract
+/// and must collapse to one key in any map.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContractSymbol {
     root: String,
@@ -252,18 +371,23 @@ impl ContractSymbol {
         })
     }
 
-    /// Parses an exchange symbol using [`DecadeAnchor::DEFAULT`].
+    /// Parses a contract symbol using [`DecadeAnchor::DEFAULT`].
+    ///
+    /// Accepts all three spellings (`ESH4`, `ESH24`, `ESH2024`); only the
+    /// one-digit form consults the anchor.
     ///
     /// # Errors
     /// [`ContinuousError::UnparseableSymbol`] for anything that is not
-    /// `ROOT + month letter + one or two year digits` — including calendar
+    /// `ROOT + month letter + 1, 2, or 4 year digits` — including calendar
     /// spreads (`ESH4-ESM4`), which are real instruments but are never the
     /// front contract of a continuous series.
     pub fn parse(text: &str) -> Result<ContractSymbol, ContinuousError> {
         ContractSymbol::parse_with_anchor(text, DecadeAnchor::DEFAULT)
     }
 
-    /// Parses an exchange symbol, resolving a one-digit year against `anchor`.
+    /// Parses a contract symbol, resolving a one-digit year against `anchor`.
+    ///
+    /// Two- and four-digit years are absolute and ignore `anchor` entirely.
     ///
     /// # Errors
     /// [`ContinuousError::UnparseableSymbol`]; see [`ContractSymbol::parse`].
@@ -271,53 +395,11 @@ impl ContractSymbol {
         text: &str,
         anchor: DecadeAnchor,
     ) -> Result<ContractSymbol, ContinuousError> {
-        let bad = |reason: &'static str| ContinuousError::UnparseableSymbol {
-            symbol: text.to_owned(),
-            reason,
-        };
-        if !text.is_ascii() {
-            return Err(bad("must be ASCII"));
-        }
-        let bytes = text.as_bytes();
-        let digits = bytes
-            .iter()
-            .rev()
-            .take_while(|b| b.is_ascii_digit())
-            .count();
-        if digits == 0 {
-            return Err(bad("has no year digits"));
-        }
-        if digits > 2 {
-            return Err(bad(
-                "has more than two trailing digits, so its year is not a CME year code",
-            ));
-        }
-        // With the digits removed, the last character must be the month code
-        // and everything before it the product root.
-        let head = &text[..text.len() - digits];
-        let letter = head.chars().next_back().ok_or_else(|| bad("has no root"))?;
-        let month = MonthCode::from_letter(letter).ok_or_else(|| {
-            bad("does not carry an uppercase month code (F G H J K M N Q U V X Z)")
-        })?;
-        let root = &head[..head.len() - letter.len_utf8()];
-        validate_root(root).map_err(|_| {
-            bad("has a product root that is not uppercase ASCII alphanumeric (a calendar spread is not an outright)")
-        })?;
-
-        let value: u32 = text[text.len() - digits..]
-            .parse()
-            .map_err(|_| bad("has an unparseable year"))?;
-        let year = if digits == 2 {
-            // Two digits are absolute in a 21st-century archive; see the
-            // module docs.
-            2000 + i32::try_from(value).unwrap_or(0)
-        } else {
-            anchor.resolve(value)
-        };
+        let parts = parse_parts(text)?;
         Ok(ContractSymbol {
-            root: root.to_owned(),
-            year,
-            month,
+            root: parts.root.to_owned(),
+            year: resolve_year(&parts, anchor),
+            month: parts.month,
         })
     }
 
@@ -350,18 +432,26 @@ impl ContractSymbol {
     }
 }
 
+/// Turns written year digits into an absolute year.
+///
+/// Four and two digits are absolute; only one consults the anchor.
+fn resolve_year(parts: &SymbolParts<'_>, anchor: DecadeAnchor) -> i32 {
+    match parts.year_digits {
+        // Absolute, and validated by `parse_parts` to be a year at all.
+        4 => i32::try_from(parts.year_value).unwrap_or(EARLIEST_FOUR_DIGIT_YEAR),
+        // Two digits are absolute in a 21st-century archive; see the module docs.
+        2 => 2000 + i32::try_from(parts.year_value).unwrap_or(0),
+        _ => anchor.resolve(parts.year_value),
+    }
+}
+
 impl fmt::Display for ContractSymbol {
-    /// The **two-digit** spelling (`ESH24`), which is anchor-independent and
-    /// reparses to the same contract with any anchor. The archive's own
-    /// spelling is not reconstructed here — see the module docs.
+    /// The **four-digit** canonical spelling (`GCZ2014`) — absolute, anchor-free,
+    /// and impossible to confuse with a CME year code, which has at most two
+    /// digits. This is what names a curated partition (D-0072); the module docs
+    /// argue why. It round-trips through [`ContractSymbol::parse`].
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}{}{:02}",
-            self.root,
-            self.month.letter(),
-            self.year.rem_euclid(100)
-        )
+        write!(f, "{}{}{:04}", self.root, self.month.letter(), self.year)
     }
 }
 
@@ -404,15 +494,80 @@ mod tests {
         assert_eq!(s.year(), 2024);
     }
 
-    // Two digits are absolute: 24 is 2024 whatever the anchor says.
+    // Two and four digits are absolute: both mean 2024 whatever the anchor
+    // says, and all three spellings are the same contract.
     #[test]
-    fn two_digit_years_ignore_the_anchor() {
+    fn two_and_four_digit_years_ignore_the_anchor() {
         for anchor in [1999, 2015, 2025, 2099] {
-            let s = ContractSymbol::parse_with_anchor("ESH24", DecadeAnchor::new(anchor))
-                .expect("valid");
-            assert_eq!(s.year(), 2024, "anchor {anchor}");
+            for text in ["ESH24", "ESH2024"] {
+                let s = ContractSymbol::parse_with_anchor(text, DecadeAnchor::new(anchor))
+                    .expect("valid");
+                assert_eq!(s.year(), 2024, "{text} at anchor {anchor}");
+            }
         }
         assert_eq!(sym("ESH4"), sym("ESH24"), "one contract, two spellings");
+        assert_eq!(sym("ESH24"), sym("ESH2024"), "and a third");
+    }
+
+    // The canonical spelling is four digits, and it is what `Display` writes —
+    // so it is what names a curated partition (D-0072). A two-digit key would
+    // be arithmetically unambiguous and still one character from the vendor's
+    // `GCZ4`; four digits cannot collide with a CME year code at all.
+    #[test]
+    fn display_writes_the_four_digit_canonical_form() {
+        assert_eq!(sym("GCZ4").to_string(), "GCZ2024");
+        assert_eq!(
+            ContractSymbol::parse_with_anchor("GCZ4", DecadeAnchor::new(2015))
+                .expect("valid")
+                .to_string(),
+            "GCZ2014",
+            "the two GCZ4s of a 16-year window must render differently"
+        );
+        assert_eq!(sym("CLZ36").to_string(), "CLZ2036");
+        assert_eq!(sym("6EU6").to_string(), "6EU2026");
+    }
+
+    // The regression control for D-0072, at the level of the key itself: the
+    // partition key of a 2014 contract and of a 2024 contract must not be the
+    // same string. Under the spelling this replaces, both were `GCZ4`.
+    #[test]
+    fn two_contracts_ten_years_apart_never_share_a_partition_key() {
+        let old = ContractSymbol::new("GC", 2014, MonthCode::Z).expect("valid");
+        let new = ContractSymbol::new("GC", 2024, MonthCode::Z).expect("valid");
+        assert_ne!(old, new);
+        assert_ne!(
+            old.to_string(),
+            new.to_string(),
+            "one key for two contracts is the bug D-0072 fixed"
+        );
+        assert_eq!(old.to_string(), "GCZ2014");
+        assert_eq!(new.to_string(), "GCZ2024");
+    }
+
+    // The spelling predicate the curated-layout check reads. A key that spells
+    // its year with one digit is a key that cannot say which decade it means.
+    #[test]
+    fn a_one_digit_year_is_the_only_ambiguous_spelling() {
+        assert!(parse_parts("GCZ4").expect("valid").has_ambiguous_year());
+        assert!(!parse_parts("GCZ14").expect("valid").has_ambiguous_year());
+        assert!(!parse_parts("GCZ2014").expect("valid").has_ambiguous_year());
+        // Not contracts at all, so not a curated-key question.
+        for other in ["SYN:RW", "ES.v.0", "ESH4-ESM4", "ZN", ""] {
+            assert!(parse_parts(other).is_err(), "{other}");
+        }
+    }
+
+    // Widening `parse` to four digits must not let it read a year out of a
+    // string that is not a contract: `ZN1234` would otherwise be root Z,
+    // month N, year 1234.
+    #[test]
+    fn four_trailing_digits_must_still_be_a_plausible_year() {
+        assert!(ContractSymbol::parse("ZN1234").is_err());
+        assert!(ContractSymbol::parse("ESH1969").is_err());
+        assert_eq!(sym("ESH1970").year(), 1970);
+        // Three is nobody's spelling, and five is a serial number.
+        assert!(ContractSymbol::parse("ESH123").is_err());
+        assert!(ContractSymbol::parse("ESH20244").is_err());
     }
 
     // Nearest-with-ties-to-earlier, worked by hand for anchor 2025:
@@ -453,7 +608,7 @@ mod tests {
         let mut symbols = [sym("ESH5"), sym("ESZ4"), sym("ESM4"), sym("ESH4")];
         symbols.sort();
         let rendered: Vec<String> = symbols.iter().map(ToString::to_string).collect();
-        assert_eq!(rendered, vec!["ESH24", "ESM24", "ESZ24", "ESH25"]);
+        assert_eq!(rendered, vec!["ESH2024", "ESM2024", "ESZ2024", "ESH2025"]);
         assert!("ESZ4" > "ESH5", "text order really is the wrong order");
     }
 
@@ -462,7 +617,7 @@ mod tests {
         let mut symbols = [sym("NQH4"), sym("ESZ4"), sym("ESH4")];
         symbols.sort();
         let rendered: Vec<String> = symbols.iter().map(ToString::to_string).collect();
-        assert_eq!(rendered, vec!["ESH24", "ESZ24", "NQH24"]);
+        assert_eq!(rendered, vec!["ESH2024", "ESZ2024", "NQH2024"]);
         assert_eq!(sym("ESH4").delivery_cmp(&sym("NQH4")), None);
         assert_eq!(sym("ESH4").delivery_cmp(&sym("ESM4")), Some(Ordering::Less));
     }
@@ -480,7 +635,7 @@ mod tests {
             "H4",
             "ESh4",
             "ESI4",   // I is not a month code
-            "ESH123", // three year digits
+            "ESH123", // three year digits: nobody's spelling
             "ES:H4",
             "",
             "ESH\u{00fc}4",
@@ -494,9 +649,22 @@ mod tests {
 
     #[test]
     fn display_round_trips_through_parse() {
-        for text in ["ESH4", "ESH24", "6EU6", "ZNZ25", "CLF6"] {
+        for text in ["ESH4", "ESH24", "6EU6", "ZNZ25", "CLF6", "GCZ2014"] {
             let parsed = sym(text);
             assert_eq!(sym(&parsed.to_string()), parsed, "{text}");
+            // And round-trips under *any* anchor, which is the point of the
+            // canonical form: it carries no decade question to answer.
+            for anchor in [1999, 2015, 2025, 2099] {
+                assert_eq!(
+                    ContractSymbol::parse_with_anchor(
+                        &parsed.to_string(),
+                        DecadeAnchor::new(anchor)
+                    )
+                    .expect("canonical parses"),
+                    parsed,
+                    "{text} at anchor {anchor}"
+                );
+            }
         }
     }
 }

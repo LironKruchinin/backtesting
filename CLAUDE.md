@@ -390,10 +390,40 @@ reference; supersede the decision if you disagree — don't hotfix.
   beside `raw/`**: none are acquisitions, so none appear in the manifest.
   `raw/` stays exactly what D-0017 says it is.
 - **Curated files are named after the raw window, not the year**
-  (`curated/bars/ESH4/1m/2024-01.parquet`), and `curated/` is not in the
+  (`curated/bars/ESH2024/1m/2024-01.parquet`), and `curated/` is not in the
   manifest: one raw file fans out to one curated file per instrument, each
   naming exactly one source blake3 (D-0036). A year-named file would have to
   be merged, and merging is where duplication hides.
+- **A curated contract directory carries a FOUR-digit year** — `GCZ2014`, never
+  the vendor's `GCZ4` (D-0072). A CME year code has one digit and repeats every
+  ten years; every bar window here is sixteen years long, so `curated/bars/GCZ4/`
+  held Dec-2014 and Dec-2024 gold concatenated, spanning 14.5 years. Two digits
+  would be arithmetically enough and still one character from the vendor's
+  spelling (`CLZ36` really means 2036); four can never collide with a year code.
+  The year is resolved **per record against the contract's own expiry**, read
+  from the archived `definition` file — never against a `DecadeAnchor` constant,
+  which has an answer for `GCZ4` and is right for half the bars.
+- **`transcode` refuses a whole file when a bar's contract cannot be resolved**,
+  with no fallback to the anchor constant (D-0072). This looks like D-0070's
+  spread filter and is its opposite: a spread is a record nothing replays *yet*,
+  so it is filtered and counted; a bar under the wrong contract is corruption of
+  *meaning* that looks exactly like correct data, and the silent path is what
+  produced the bug. A missing `definition` fails loudly.
+- **A spread partition still carries the vendor's spelling** under
+  `--include-spreads`, decade ambiguity and all (D-0072). Resolution applies to
+  outrights, because an outright is what a strategy replays; a spread does not
+  parse as a contract and has no delivery year. Bounded and stated, not hidden —
+  making spreads replayable means resolving their legs first.
+- **`backtest --instrument GCZ4` refuses rather than picking one** when two
+  curated contracts answer to that spelling, and prints `ESH4 -> ESH2024` when
+  only one does (D-0072). The shorthand is convenience; answering an ambiguous
+  one would move the archive bug into the CLI.
+- **Neither the `ts_open` monotonicity check nor the gap-inside-sessions check
+  could have caught D-0072**, and there are tests asserting they still pass on
+  the merged fixture. Ordering is a statement about neighbours and aliasing is
+  one about identity; the ten-year hole falls *between* sessions, and gold has no
+  bundled calendar so `qa` never even looked. Do not "strengthen" either check to
+  cover this — the partition key is what fixes it.
 - **`ParquetBarFeed` loads bars into RAM rather than mmap'ing them**, and
   `ParquetBarFeed::open` does all the failing: `Feed::next_event` returns
   `Option`, not `Result`, so a feed must have no errors left to report by the
@@ -609,15 +639,21 @@ cargo run -p crucible-cli -- layout-check      # is the tree the shape DATA_LAYO
 # does not. Curated data is disposable: `--force` rebuilds, deleting is safe.
 # Spreads are excluded by default and the excluded records are counted in the
 # report (D-0070); `--include-spreads` writes them.
+#
+# A curated contract is spelled with a FOUR-digit year (D-0072) — `ESH4` is a
+# shorthand that still resolves while it names exactly one curated contract, and
+# refuses when it names two (`GCZ4` is both Dec-2014 and Dec-2024 gold). The
+# canonical form is written here so these commands do not depend on how much of
+# the archive has been transcoded.
 cargo run -p crucible-cli --features databento -- transcode
 cargo run -p crucible-cli --features databento -- transcode --include-spreads
-cargo run -p crucible-cli -- backtest --instrument ESH4 --timeframe 1m \
+cargo run -p crucible-cli -- backtest --instrument ESH2024 --timeframe 1m \
   --start 2024-01-01 --end 2024-02-01 --fast 20 --slow 50
 
 # The same run with protective levels, in ticks from each entry's fill price.
 # Both flags are optional and either alone is legal; the header names the
 # intrabar convention and the result counts the bars where it chose (D-0069).
-cargo run -p crucible-cli -- backtest --instrument ESH4 --timeframe 1m \
+cargo run -p crucible-cli -- backtest --instrument ESH2024 --timeframe 1m \
   --start 2024-01-01 --end 2024-02-01 --stop-ticks 8 --target-ticks 12
 
 # The combo path: a strategy defined in TOML rather than in Rust. Expansion

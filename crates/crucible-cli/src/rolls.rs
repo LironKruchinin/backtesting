@@ -65,24 +65,17 @@ pub struct RollsArgs {
 
 /// Locates an archived `definition` file covering `root`.
 ///
-/// Goes through the manifest rather than guessing a path, so the file the
-/// expiries came from is one the catalog vouches for (D-0014). Returns the
-/// most recently acquired match, since a later pull of the same parent is a
-/// superset of an earlier one.
+/// The lookup itself lives in [`Catalog::definition_file`] — `transcode` needs
+/// the same file to name its curated partitions (D-0072), and CLAUDE.md §3 puts
+/// logic in the owning crate rather than in two CLI commands that agree by
+/// accident.
+///
+/// [`Catalog::definition_file`]: crucible_data::Catalog::definition_file
 #[cfg(feature = "databento")]
 fn archived_definitions(dir: &std::path::Path, root: &str) -> Option<std::path::PathBuf> {
-    let catalog = crucible_data::Catalog::open(dir).ok()?;
-    let key = format!("{root}.FUT");
-    let mut best: Option<(Ts, String)> = None;
-    for record in catalog.records() {
-        if record.schema != "definition" || !record.symbols.contains(&key) {
-            continue;
-        }
-        if best.as_ref().is_none_or(|(ts, _)| record.acquired_ts > *ts) {
-            best = Some((record.acquired_ts, record.file_path.clone()));
-        }
-    }
-    best.map(|(_, path)| dir.join(path))
+    crucible_data::Catalog::open(dir)
+        .ok()?
+        .definition_file(root)
 }
 
 /// Recorded in the table when expiries came from an archived `definition` file.
