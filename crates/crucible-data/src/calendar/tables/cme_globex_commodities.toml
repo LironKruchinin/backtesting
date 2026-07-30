@@ -5,46 +5,93 @@
 # was measured with `crates/crucible-data/examples/session_profile.rs` over
 # 2010-06-06..2026-07-28 of this project's own `ohlcv-1m` archive (CL 247
 # contracts / 29.5 M bars, GC 221 / 10.3 M, 6E 149 / 7.0 M, ZN 68 / 6.1 M) and
-# then cross-checked against CME's published hours. `docs/SESSION_ERAS.md` is
-# the workbook. Where the two disagree the archive wins and the disagreement is
-# written down here.
+# then cross-checked against published hours. `docs/SESSION_ERAS.md` is the
+# workbook; §5 is these four tables. Where measurement and publication disagree
+# the archive wins and the disagreement is written down here.
+#
+# ## All four calendars now start at the archive's first date
+#
+# `valid_from = "2010-06-06"` on every one of them, which is the Sunday the
+# archive opens; each product's first bar is that evening, at exactly the open
+# its oldest era claims. Before D-0089 three of the four
+# started 2015-09-21 and the fourth 2011-10-03, so 5.3 of the archive's 16.1
+# years were measured against a template that did not describe them — about 145
+# of the first 423 contracts a sweep touches.
 #
 # ## What is the same across all four
 #
-# Sunday 17:00 CT through Friday 16:00 CT, with a 16:00-17:00 CT no-trade window
-# each day, and **no intraday halt**. The 15:15-15:30 CT halt that equity index
-# carried until 2021-06-28 never existed for any of these four: the window
-# traded on essentially every session of the archive for CL, GC, 6E and ZN.
-# CME's published Globex hours agree ("Sunday - Friday 5:00 p.m. - 4:00 p.m. CT
-# with a 60-minute break each day beginning at 4:00 p.m. CT").
+# Sunday evening through Friday afternoon, with a break each day between the
+# close and the next open, and **no intraday halt in any era**. The 15:15-15:30
+# CT halt that equity index carried until 2021-06-28 never existed for any of
+# these four: the window traded on essentially every session of the archive for
+# CL, GC, 6E and ZN, in every year from 2010.
 #
-# ## What is different, and how it was found
+# ## Session eras, one line each
+#
+#   CL, GC   2010-06-06 .. 2015-09-18   17:00 -> 16:15 CT
+#            2015-09-21 ..              17:00 -> 16:00 CT   <- [calendar.session]
+#   6E       2010-06-06 ..              17:00 -> 16:00 CT   (no era change)
+#   ZN       2010-06-06 .. 2011-09-30   17:30 -> 16:00 CT
+#            2011-10-03 ..              17:00 -> 16:00 CT   <- [calendar.session]
 #
 # * **CL, GC — the close moved 16:15 -> 16:00 CT on 2015-09-21**, the same date
 #   and the same advisory as equity index. The 16:00-16:15 CT window traded on
 #   all 78 Mon-Fri dates from 2015-06-01 to 2015-09-18 and on none of the 200
-#   from 2015-09-21 to 2016-06-29, for both roots. `valid_from` starts there.
+#   from 2015-09-21 to 2016-06-29, for both roots. Going the other way, the same
+#   window traded on 263 of the 276 Mon-Fri dates from 2010-06-07 to 2011-06-29
+#   — the thirteen that did not are holidays and early closes — so the 16:15
+#   close is evidenced back to the archive's first trading day and there is no
+#   third era hiding in between.
 # * **6E — no era change at all.** Open 17:00, close 16:00 for every one of the
 #   sixteen years. The 2015-09-21 advisory did not touch it, and the archive
 #   shows the 16:00-16:15 window silent on all 280 Mon-Fri dates spanning it.
 # * **ZN — the open moved 17:30 -> 17:00 CT on Sunday 2011-10-02.** Sunday
 #   evenings first traded at 17:30 through 2011-09-25 and at 17:00 from
-#   2011-10-02, with no mixed week. The close was 16:00 CT throughout. No CME
-#   document for this change could be retrieved, so the boundary rests on the
-#   archive alone; `valid_from` is the first trading day after it.
+#   2011-10-02, with no mixed week; on Mon-Fri, every minute from 16:01 to 17:29
+#   is silent on all 338 trading dates of the older era and 17:30 trades on 80 %
+#   of them. The close was 16:00 CT throughout. No CME document for this change
+#   could be retrieved, so the boundary rests on the archive alone.
 #
-# ## Holiday behaviour: three different schedules, none of them equity index's
+# The one third-party corroboration of the 2015 change also explains its
+# product list: ATAS, "New changes on CME trading session", published
+# 2015-09-20, accessed 2026-07-31 — "CME Equity, CBOT Equity, COMEX, NYMEX"
+# moved their close from 16:15 to 16:00 CT effective 2015-09-21
+# (https://atas.net/volume-analysis/new-changes-on-cme-trading-session/). CME
+# FX and CBOT interest rates are not on that list, and the archive shows neither
+# moving. That is the third case CLAUDE.md §7 asks for: the archive says CL and
+# GC moved while 6E and ZN did not, and an independent source says which product
+# groups the advisory covered.
+#
+# ## Holiday behaviour: four regimes, and none of them equity index's
 #
 # On the recurring US holidays (MLK, Presidents' Day, Memorial Day, Juneteenth,
 # Independence Day, Labor Day, Thanksgiving), measured as the last traded minute
-# before 17:00 CT:
+# before 17:00 CT, and with the closures also measured from the evening BEFORE
+# each date, which a closure removes and an early close does not:
 #
-#   equity index (for comparison)   12:00 CT
+#   equity index (for comparison)   10:30 CT -> closures -> 12:00 CT
+#   CL, GC   2010-06-06 .. 2012     12:15 CT
+#   CL, GC   2012-11-22 .. 2014-02  FULL CLOSURE
 #   CL, GC   2014-05-26 .. 2021     12:00 CT
 #   CL, GC   2022 ..                13:30 CT
-#   ZN       throughout             12:00 CT
-#   6E       .. 2021                12:00 CT
+#   6E, ZN   2010-06-06 .. 2012     12:00 CT
+#   6E, ZN   2012-11-22 .. 2014-02  FULL CLOSURE
+#   ZN       2014-05-26 ..          12:00 CT
+#   6E       2014-05-26 .. 2021     12:00 CT
 #   6E       2022 ..                NO early close — the full session runs
+#
+# **The closure regime is the same nine dates for all four products** —
+# 2012-11-22, 2013-01-21, 2013-02-18, 2013-05-27, 2013-07-04, 2013-09-02,
+# 2013-11-28, 2014-01-20, 2014-02-17 — and it is `EVIDENCED` twice over on each:
+# no day session, and no session on the evening before (the Sunday before a
+# Monday holiday, the Wednesday before Thanksgiving). Memorial Day 2014-05-26
+# closed at 12:00 CT with its Sunday eve open, which is where the switch back
+# is; MLK and Presidents' Day stayed closures a year longer than the other four,
+# exactly as they did for equity index.
+#
+# Note where the closure regime STARTS: Thanksgiving **2012**-11-22, not 2013.
+# All four products, plus ES and NQ, have no day session on it and no evening on
+# 2012-11-21.
 #
 # CME's own summary agrees with the modern half: "For Monday holidays, energy
 # and metals futures at CME NYMEX and COMEX close early at 1:30 PM CT, while
@@ -53,27 +100,43 @@
 # stopped at 12:00, GC and CL at 13:30 and ZN at 12:00. Four products, four
 # answers, on one date — which is the whole reason these are four tables.
 #
-# Good Friday is a full closure for all four in a normal year. In the six years
-# the Employment Situation release landed on Good Friday the products diverge
-# again, and the archive is unambiguous about it:
+# Good Friday is a full closure for all four in a normal year. In the years the
+# Employment Situation release landed on Good Friday the products diverge again,
+# and the archive is unambiguous about it:
 #
-#   2015-04-03 / 2021-04-02 / 2023-04-07 / 2026-04-03
+#   2012-04-06 / 2015-04-03 / 2021-04-02 / 2023-04-07 / 2026-04-03
 #     ES  abbreviated to 08:15 CT      6E, ZN  abbreviated to 10:15 CT
 #     CL, GC  fully closed — no day session and no evening session
 #
-# ## Known gaps, all of them listed
+# 2012-04-06 is inside `valid_from` for both 6E and ZN now and is encoded as a
+# one-off for both; before this change ZN's table claimed it was fully closed on
+# a date the archive shows trading to 10:15 CT.
 #
-# - **The Friday before a Monday holiday closed at 15:15 CT for 6E and ZN, on
-#   sixteen dates between 2012-01-13 and 2015-05-22** (2012-01-13, 2012-02-17,
-#   2012-05-25, 2012-08-31, 2012-10-05, 2013-01-18, 2013-02-15, 2013-05-24,
-#   2013-08-30, 2014-01-17, 2014-02-14, 2014-05-23, 2014-08-29, 2015-01-16,
-#   2015-02-13, 2015-05-22 — identical date sets for both roots, and absent for
-#   ES, CL and GC). The pattern stops after 2015-05-22 and includes the Friday
-#   before Columbus Day in 2012 only, so no rule fits it and no CME document
-#   explaining it could be retrieved. NOT encoded: 45 minutes on sixteen dates,
-#   all before the 6E table's `valid_from` and inside the ZN table's, where they
-#   will show up as gaps in `crucible qa`. Refusing to guess a rule from a
-#   pattern with one exception in it is the cheaper error.
+# ## Known gaps, all of them listed, all of them measured
+#
+# - **The last session before a holiday closed at 15:15 CT on 26 dates for 6E
+#   and ZN and on 6 dates for CL and GC.** NOT encoded. Full lists, identical
+#   for the two roots in each pair:
+#
+#     6E, ZN (26): 2010-07-02, 2010-09-03, 2010-10-08, 2010-11-24 (15:24/15:25),
+#       2011-01-14, 2011-02-18, 2011-05-27, 2011-07-01, 2011-09-02, 2011-10-07,
+#       2012-01-13, 2012-02-17, 2012-05-25, 2012-08-31, 2012-10-05, 2013-01-18,
+#       2013-02-15, 2013-05-24, 2013-08-30, 2014-01-17, 2014-02-14, 2014-05-23,
+#       2014-08-29, 2015-01-16, 2015-02-13, 2015-05-22
+#     CL, GC (6): 2010-07-02, 2010-09-03, 2010-10-08, 2010-11-24 (15:25),
+#       2010-12-31, 2011-01-14
+#
+#   No rule fits. The anchor set changes twice — every US holiday including
+#   **Columbus Day in 2010, 2011 AND 2012** up to 2012-10-05, then only the four
+#   Monday holidays, then nothing after 2015-05-22 — and Thanksgiving eve
+#   appears in 2010 and not in 2011 or 2012. CL and GC stop after 2011-01-14
+#   entirely. No CME document explaining any of it could be retrieved. The cost
+#   of not encoding it is 45 min x 26 dates for 6E and ZN and 60 min x 6 for CL
+#   and GC, reported by `crucible qa` as missing bars — against the ~20,000
+#   minutes of REAL bars per contract that the old `valid_from = 2015-09-21`
+#   reported as *outside any session*, which is the error that indicts the
+#   calendar rather than the archive (D-0040). Refusing to guess a rule from a
+#   pattern with three regimes and a hole in it is the cheaper error.
 # - **The day-after-Thanksgiving close moved 12:45 -> 13:45 CT for CL and GC and
 #   12:15 -> 13:45 CT for 6E, apparently in 2024.** The evidence is two years
 #   (2024-11-29 and 2025-11-28) against twelve at the older time, and 2025-11-28
@@ -91,9 +154,10 @@
 #   table. Listed rather than carried silently, and listed rather than
 #   special-cased as one-offs, because the next Friday holiday would need
 #   another one.
-# - **2010-12-31 closed at 12:15 CT for 6E and ZN** and traded in full for ES,
-#   CL and GC. A single New Year's Eve — no other year in the archive shows it —
-#   so it is recorded here and not encoded. Outside both tables' `valid_from`.
+# - **2010-12-31 closed at 12:15 CT for 6E and ZN** and at 15:15 CT for CL and
+#   GC, where equity index traded in full. A single New Year's Eve — no other
+#   year in the archive shows it — so 6E and ZN carry it as a dated one-off
+#   rather than as a rule, and CL and GC leave it in the 15:15 list above.
 # - **The 2025-11-28 Globex outage is not encoded** for any root: the archive
 #   shows all seven roots opening at 07:30 CT instead of 00:00 that morning, and
 #   no CME-published notice could be retrieved.
@@ -103,7 +167,13 @@
 #   publishes a "regular trading hours" window for any of them. They are a
 #   convention, cited below, and they are used only by `Calendar::session_of` to
 #   label an instant `regular` or `overnight`. Nothing in `open_intervals`,
-#   `is_open`, `is_trading_day` or `bars_per_year` reads them.
+#   `is_open`, `is_trading_day` or `bars_per_year` reads them. Each era carries
+#   the same pair, which is *more* defensible in the older eras than in the
+#   current one: those eras are entirely before open outcry ended.
+# - **Nothing before 2010-06-06 is described**, and nothing here is a claim
+#   about it. The oldest era of each table starts at the archive's first date
+#   because that is the oldest evidence there is, not because the exchange
+#   changed that day.
 
 schema_version = 1
 
@@ -116,18 +186,31 @@ id = "cme_globex_energy"
 description = "CME Globex NYMEX energy futures (CL and its micro)"
 timezone = "America/Chicago"
 roots = ["CL", "MCL"]
-valid_from = "2015-09-21"
+valid_from = "2010-06-06"
 sources = [
   "https://www.cmegroup.com/markets/energy/crude-oil/light-sweet-crude.contractSpecs.html",
   "https://www.cmegroup.com/tools-information/lookups/advisories/electronic-trading/20150914.html",
   "https://www.cmegroup.com/trading-hours.html",
+  "https://atas.net/volume-analysis/new-changes-on-cme-trading-session/ (published 2015-09-20, accessed 2026-07-31)",
 ]
 
+# --- era 1: 2010-06-06 .. 2015-09-18 -------------------------------------
+[[calendar.era]]
+# 17:00 CT to 16:15 CT, a 45-minute break each day, no halt. The archive's
+# first CL bar opens 2010-06-06 at 17:00 CT; 16:00-16:15 CT traded on 263 of
+# 276 Mon-Fri dates from 2010-06-07 to 2011-06-29 and on 78 of 78 from
+# 2015-06-01 to 2015-09-18.
+from = "2010-06-06"
+open_local = "17:00"
+close_local = "16:15"
+rth_open_local = "08:00"
+rth_close_local = "13:30"
+source = "archive: session_profile window CL 1m 2010-06-06 2011-06-30 16:00 16:15 (docs/SESSION_ERAS.md §5.1); ended by https://www.cmegroup.com/tools-information/lookups/advisories/electronic-trading/20150914.html"
+
+# --- era 2: 2015-09-21 .. now --------------------------------------------
 [calendar.session]
 # Sunday 17:00 CT to Friday 16:00 CT, 16:00-17:00 CT break daily, no halt.
-# Verified in the archive on all 16 years: the only closed window inside the
-# week is 16:00-17:00 CT (16:15-17:00 before 2015-09-21, which is outside
-# valid_from).
+from = "2015-09-21"
 open_local = "17:00"
 close_local = "16:00"
 rth_open_local = "08:00"
@@ -138,10 +221,11 @@ source = "https://www.cmegroup.com/markets/energy/crude-oil/light-sweet-crude.co
 start = "2016-01-01"
 end = "2026-01-01"
 rationale = """
-Ten whole calendar years, entirely inside the one session era this table \
-describes, fixed forever so bars_per_year is reproducible on every machine. It \
-starts after valid_from so no 16:15-close session is averaged in, and both ends \
-are year boundaries so leap years and weekday drift average out. The 2022 \
+Ten whole calendar years, entirely inside the current session era, fixed \
+forever so bars_per_year is reproducible on every machine. It starts after the \
+2015-09-21 era boundary so no 16:15-close session is averaged in — a span \
+crossing it would produce a number describing neither era — and both ends are \
+year boundaries so leap years and weekday drift average out. The 2022 \
 holiday-close change moves session *length* on nine days a year and does not \
 change the session template, so it is not an era and the span may cross it."""
 
@@ -154,8 +238,8 @@ source = "https://www.cmegroup.com/trading-hours.html"
 [[calendar.holiday]]
 name = "Good Friday"
 # Fully closed even in the years the Employment Situation release lands on it —
-# 2023-04-07 and 2026-04-03 both have no day session and no evening session in
-# the archive, where ES ran to 08:15 CT and ZN to 10:15 CT.
+# 2012-04-06, 2015-04-03, 2023-04-07 and 2026-04-03 all have no day session and
+# no evening session in the archive, where ES ran to 08:15 CT and ZN to 10:15.
 rule = { kind = "good_friday" }
 effect = { kind = "closed" }
 source = "https://www.cmegroup.com/trading-hours.html"
@@ -165,6 +249,15 @@ name = "Christmas Day"
 rule = { kind = "fixed_date", month = 12, day = 25, observance = "nearest_weekday" }
 effect = { kind = "closed" }
 source = "https://www.cmegroup.com/trading-hours.html"
+
+# --- the seven recurring US holidays, in four regimes --------------------
+#
+# Every entry below carries a first_year/last_year pair that does not overlap
+# any other entry for the same rule, so which one fires never depends on file
+# order. The 12:15 and closure regimes were added with
+# D-0089; the 12:00 entries gained their `first_year`
+# in the same change, because without one they would have answered for 2010
+# through 2013 as well.
 
 [[calendar.holiday]]
 name = "Martin Luther King Jr. Day"
@@ -177,8 +270,27 @@ source = "https://www.cmegroup.com/trading-hours.html"
 name = "Martin Luther King Jr. Day (noon era)"
 rule = { kind = "nth_weekday", month = 1, weekday = "monday", nth = 3 }
 effect = { kind = "early_close", close_local = "12:00" }
+first_year = 2015
 last_year = 2021
 source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Martin Luther King Jr. Day (closure era)"
+# 2013-01-21 and 2014-01-20: no day session, and the Sunday before each has no
+# session either. Measured, not published.
+rule = { kind = "nth_weekday", month = 1, weekday = "monday", nth = 3 }
+effect = { kind = "closed" }
+first_year = 2013
+last_year = 2014
+source = "archive: session_profile holidays CL 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
+
+[[calendar.holiday]]
+name = "Martin Luther King Jr. Day (12:15 era)"
+# 2011-01-17 and 2012-01-16, both at 12:15 CT with the Sunday evening open.
+rule = { kind = "nth_weekday", month = 1, weekday = "monday", nth = 3 }
+effect = { kind = "early_close", close_local = "12:15" }
+last_year = 2012
+source = "archive: session_profile holidays CL 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
 
 [[calendar.holiday]]
 name = "Presidents' Day"
@@ -191,8 +303,24 @@ source = "https://www.cmegroup.com/trading-hours.html"
 name = "Presidents' Day (noon era)"
 rule = { kind = "nth_weekday", month = 2, weekday = "monday", nth = 3 }
 effect = { kind = "early_close", close_local = "12:00" }
+first_year = 2015
 last_year = 2021
 source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Presidents' Day (closure era)"
+rule = { kind = "nth_weekday", month = 2, weekday = "monday", nth = 3 }
+effect = { kind = "closed" }
+first_year = 2013
+last_year = 2014
+source = "archive: session_profile holidays CL 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
+
+[[calendar.holiday]]
+name = "Presidents' Day (12:15 era)"
+rule = { kind = "nth_weekday", month = 2, weekday = "monday", nth = 3 }
+effect = { kind = "early_close", close_local = "12:15" }
+last_year = 2012
+source = "archive: session_profile holidays CL 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
 
 [[calendar.holiday]]
 name = "Memorial Day"
@@ -205,11 +333,30 @@ source = "https://www.cmegroup.com/trading-hours.html"
 name = "Memorial Day (noon era)"
 rule = { kind = "nth_weekday", month = 5, weekday = "monday", nth = -1 }
 effect = { kind = "early_close", close_local = "12:00" }
+first_year = 2014
 last_year = 2021
 source = "https://www.cmegroup.com/trading-hours.html"
 
 [[calendar.holiday]]
+name = "Memorial Day (closure era)"
+# One year only: 2013-05-27 is a closure, 2014-05-26 a 12:00 CT close with its
+# Sunday eve open. Same year the equity-index calendar switches back.
+rule = { kind = "nth_weekday", month = 5, weekday = "monday", nth = -1 }
+effect = { kind = "closed" }
+first_year = 2013
+last_year = 2013
+source = "archive: session_profile holidays CL 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
+
+[[calendar.holiday]]
+name = "Memorial Day (12:15 era)"
+rule = { kind = "nth_weekday", month = 5, weekday = "monday", nth = -1 }
+effect = { kind = "early_close", close_local = "12:15" }
+last_year = 2012
+source = "archive: session_profile holidays CL 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
+
+[[calendar.holiday]]
 name = "Juneteenth"
+# Adopted from 2022, so it has no earlier regime to carry.
 rule = { kind = "fixed_date", month = 6, day = 19, observance = "sunday_to_monday" }
 effect = { kind = "early_close", close_local = "13:30" }
 first_year = 2022
@@ -226,8 +373,25 @@ source = "https://www.cmegroup.com/trading-hours.html"
 name = "Independence Day (noon era)"
 rule = { kind = "fixed_date", month = 7, day = 4, observance = "nearest_weekday" }
 effect = { kind = "early_close", close_local = "12:00" }
+first_year = 2014
 last_year = 2021
 source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Independence Day (closure era)"
+rule = { kind = "fixed_date", month = 7, day = 4, observance = "nearest_weekday" }
+effect = { kind = "closed" }
+first_year = 2013
+last_year = 2013
+source = "archive: session_profile holidays CL 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
+
+[[calendar.holiday]]
+name = "Independence Day (12:15 era)"
+# 2010-07-05 (observed), 2011-07-04 and 2012-07-04, all at 12:15 CT.
+rule = { kind = "fixed_date", month = 7, day = 4, observance = "nearest_weekday" }
+effect = { kind = "early_close", close_local = "12:15" }
+last_year = 2012
+source = "archive: session_profile holidays CL 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
 
 [[calendar.holiday]]
 name = "Labor Day"
@@ -240,8 +404,24 @@ source = "https://www.cmegroup.com/trading-hours.html"
 name = "Labor Day (noon era)"
 rule = { kind = "nth_weekday", month = 9, weekday = "monday", nth = 1 }
 effect = { kind = "early_close", close_local = "12:00" }
+first_year = 2014
 last_year = 2021
 source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Labor Day (closure era)"
+rule = { kind = "nth_weekday", month = 9, weekday = "monday", nth = 1 }
+effect = { kind = "closed" }
+first_year = 2013
+last_year = 2013
+source = "archive: session_profile holidays CL 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
+
+[[calendar.holiday]]
+name = "Labor Day (12:15 era)"
+rule = { kind = "nth_weekday", month = 9, weekday = "monday", nth = 1 }
+effect = { kind = "early_close", close_local = "12:15" }
+last_year = 2012
+source = "archive: session_profile holidays CL 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
 
 [[calendar.holiday]]
 name = "Thanksgiving Day"
@@ -254,12 +434,33 @@ source = "https://www.cmegroup.com/trading-hours.html"
 name = "Thanksgiving Day (noon era)"
 rule = { kind = "nth_weekday", month = 11, weekday = "thursday", nth = 4 }
 effect = { kind = "early_close", close_local = "12:00" }
+first_year = 2014
 last_year = 2021
 source = "https://www.cmegroup.com/trading-hours.html"
 
 [[calendar.holiday]]
+name = "Thanksgiving Day (closure era)"
+# Two years, and the first of them is 2012 rather than 2013: 2012-11-22 has no
+# day session and 2012-11-21 has no evening. Thanksgiving is where the closure
+# regime begins, for all four commodity roots and for equity index.
+rule = { kind = "nth_weekday", month = 11, weekday = "thursday", nth = 4 }
+effect = { kind = "closed" }
+first_year = 2012
+last_year = 2013
+source = "archive: session_profile daily CL 1m 2012-11-15 2014-03-01 (docs/SESSION_ERAS.md §5.3)"
+
+[[calendar.holiday]]
+name = "Thanksgiving Day (12:15 era)"
+# 2010-11-25 and 2011-11-24 only — 2012 is already a closure.
+rule = { kind = "nth_weekday", month = 11, weekday = "thursday", nth = 4 }
+effect = { kind = "early_close", close_local = "12:15" }
+last_year = 2011
+source = "archive: session_profile holidays CL 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
+
+[[calendar.holiday]]
 name = "Day after Thanksgiving"
-# 13:45 CT since 2024 on two observations; 12:45 CT on the twelve before it.
+# 13:45 CT since 2024 on two observations; 12:45 CT on the twelve before it,
+# which the archive shows unchanged from 2010-11-26 onwards.
 rule = { kind = "day_after_nth_weekday", month = 11, weekday = "thursday", nth = 4 }
 effect = { kind = "early_close", close_local = "13:45" }
 first_year = 2024
@@ -274,6 +475,8 @@ source = "https://www.cmegroup.com/trading-hours.html"
 
 [[calendar.holiday]]
 name = "Christmas Eve"
+# 12:45 CT on every observation the archive holds, from 2012-12-24 onwards; the
+# earlier years fall on weekends or are absorbed by the Christmas Day closure.
 rule = { kind = "fixed_date", month = 12, day = 24, observance = "actual" }
 effect = { kind = "early_close", close_local = "12:45" }
 source = "https://www.cmegroup.com/trading-hours.html"
@@ -287,20 +490,36 @@ id = "cme_globex_metals"
 description = "CME Globex COMEX metals futures (GC and its micro)"
 timezone = "America/Chicago"
 roots = ["GC", "MGC"]
-valid_from = "2015-09-21"
+valid_from = "2010-06-06"
 sources = [
   "https://www.cmegroup.com/markets/metals/precious/gold.contractSpecs.html",
   "https://www.cmegroup.com/tools-information/lookups/advisories/electronic-trading/20150914.html",
   "https://www.cmegroup.com/trading-hours.html",
+  "https://atas.net/volume-analysis/new-changes-on-cme-trading-session/ (published 2015-09-20, accessed 2026-07-31)",
 ]
 
+# --- era 1: 2010-06-06 .. 2015-09-18 -------------------------------------
+[[calendar.era]]
+# Identical to energy, and measured separately: 16:00-16:15 CT traded on all 78
+# Mon-Fri dates from 2015-06-01 to 2015-09-18 and on none of the 200 from
+# 2015-09-21, and the archive's first GC bar opens 2010-06-06 at 17:00 CT.
+from = "2010-06-06"
+open_local = "17:00"
+close_local = "16:15"
+rth_open_local = "07:20"
+rth_close_local = "12:30"
+source = "archive: session_profile window GC 1m 2015-06-01 2016-06-30 16:00 16:15 (docs/SESSION_ERAS.md §5.1); ended by https://www.cmegroup.com/tools-information/lookups/advisories/electronic-trading/20150914.html"
+
+# --- era 2: 2015-09-21 .. now --------------------------------------------
 [calendar.session]
 # Identical to energy in every measured respect — the two roots agree date for
-# date across sixteen years of the archive, on every session boundary and every
-# holiday. They are two calendars rather than one because their regular-hours
-# windows differ (COMEX gold's floor ran 07:20-12:30 CT, NYMEX crude's
-# 08:00-13:30 CT), and one shared table would have to be wrong about one of
-# them.
+# date across sixteen years of the archive, on every session boundary, every
+# era change and every holiday, including the 2012-2014 closures and the six
+# 15:15 CT pre-holiday closes of 2010-2011. They are two calendars rather than
+# one because their regular-hours windows differ (COMEX gold's floor ran
+# 07:20-12:30 CT, NYMEX crude's 08:00-13:30 CT), and one shared table would have
+# to be wrong about one of them.
+from = "2015-09-21"
 open_local = "17:00"
 close_local = "16:00"
 rth_open_local = "07:20"
@@ -311,10 +530,9 @@ source = "https://www.cmegroup.com/markets/metals/precious/gold.contractSpecs.ht
 start = "2016-01-01"
 end = "2026-01-01"
 rationale = """
-Ten whole calendar years, entirely inside the one session era this table \
-describes. Same reasoning as the energy calendar above, and deliberately the \
-same span so the two annualization factors differ only where the exchanges \
-do."""
+Ten whole calendar years, entirely inside the current session era. Same \
+reasoning as the energy calendar above, and deliberately the same span so the \
+two annualization factors differ only where the exchanges do."""
 
 [[calendar.holiday]]
 name = "New Year's Day"
@@ -345,8 +563,24 @@ source = "https://www.cmegroup.com/trading-hours.html"
 name = "Martin Luther King Jr. Day (noon era)"
 rule = { kind = "nth_weekday", month = 1, weekday = "monday", nth = 3 }
 effect = { kind = "early_close", close_local = "12:00" }
+first_year = 2015
 last_year = 2021
 source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Martin Luther King Jr. Day (closure era)"
+rule = { kind = "nth_weekday", month = 1, weekday = "monday", nth = 3 }
+effect = { kind = "closed" }
+first_year = 2013
+last_year = 2014
+source = "archive: session_profile holidays GC 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
+
+[[calendar.holiday]]
+name = "Martin Luther King Jr. Day (12:15 era)"
+rule = { kind = "nth_weekday", month = 1, weekday = "monday", nth = 3 }
+effect = { kind = "early_close", close_local = "12:15" }
+last_year = 2012
+source = "archive: session_profile holidays GC 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
 
 [[calendar.holiday]]
 name = "Presidents' Day"
@@ -359,8 +593,24 @@ source = "https://www.cmegroup.com/trading-hours.html"
 name = "Presidents' Day (noon era)"
 rule = { kind = "nth_weekday", month = 2, weekday = "monday", nth = 3 }
 effect = { kind = "early_close", close_local = "12:00" }
+first_year = 2015
 last_year = 2021
 source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Presidents' Day (closure era)"
+rule = { kind = "nth_weekday", month = 2, weekday = "monday", nth = 3 }
+effect = { kind = "closed" }
+first_year = 2013
+last_year = 2014
+source = "archive: session_profile holidays GC 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
+
+[[calendar.holiday]]
+name = "Presidents' Day (12:15 era)"
+rule = { kind = "nth_weekday", month = 2, weekday = "monday", nth = 3 }
+effect = { kind = "early_close", close_local = "12:15" }
+last_year = 2012
+source = "archive: session_profile holidays GC 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
 
 [[calendar.holiday]]
 name = "Memorial Day"
@@ -373,8 +623,24 @@ source = "https://www.cmegroup.com/trading-hours.html"
 name = "Memorial Day (noon era)"
 rule = { kind = "nth_weekday", month = 5, weekday = "monday", nth = -1 }
 effect = { kind = "early_close", close_local = "12:00" }
+first_year = 2014
 last_year = 2021
 source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Memorial Day (closure era)"
+rule = { kind = "nth_weekday", month = 5, weekday = "monday", nth = -1 }
+effect = { kind = "closed" }
+first_year = 2013
+last_year = 2013
+source = "archive: session_profile holidays GC 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
+
+[[calendar.holiday]]
+name = "Memorial Day (12:15 era)"
+rule = { kind = "nth_weekday", month = 5, weekday = "monday", nth = -1 }
+effect = { kind = "early_close", close_local = "12:15" }
+last_year = 2012
+source = "archive: session_profile holidays GC 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
 
 [[calendar.holiday]]
 name = "Juneteenth"
@@ -394,8 +660,24 @@ source = "https://www.cmegroup.com/trading-hours.html"
 name = "Independence Day (noon era)"
 rule = { kind = "fixed_date", month = 7, day = 4, observance = "nearest_weekday" }
 effect = { kind = "early_close", close_local = "12:00" }
+first_year = 2014
 last_year = 2021
 source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Independence Day (closure era)"
+rule = { kind = "fixed_date", month = 7, day = 4, observance = "nearest_weekday" }
+effect = { kind = "closed" }
+first_year = 2013
+last_year = 2013
+source = "archive: session_profile holidays GC 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
+
+[[calendar.holiday]]
+name = "Independence Day (12:15 era)"
+rule = { kind = "fixed_date", month = 7, day = 4, observance = "nearest_weekday" }
+effect = { kind = "early_close", close_local = "12:15" }
+last_year = 2012
+source = "archive: session_profile holidays GC 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
 
 [[calendar.holiday]]
 name = "Labor Day"
@@ -408,8 +690,24 @@ source = "https://www.cmegroup.com/trading-hours.html"
 name = "Labor Day (noon era)"
 rule = { kind = "nth_weekday", month = 9, weekday = "monday", nth = 1 }
 effect = { kind = "early_close", close_local = "12:00" }
+first_year = 2014
 last_year = 2021
 source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Labor Day (closure era)"
+rule = { kind = "nth_weekday", month = 9, weekday = "monday", nth = 1 }
+effect = { kind = "closed" }
+first_year = 2013
+last_year = 2013
+source = "archive: session_profile holidays GC 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
+
+[[calendar.holiday]]
+name = "Labor Day (12:15 era)"
+rule = { kind = "nth_weekday", month = 9, weekday = "monday", nth = 1 }
+effect = { kind = "early_close", close_local = "12:15" }
+last_year = 2012
+source = "archive: session_profile holidays GC 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
 
 [[calendar.holiday]]
 name = "Thanksgiving Day"
@@ -422,8 +720,24 @@ source = "https://www.cmegroup.com/trading-hours.html"
 name = "Thanksgiving Day (noon era)"
 rule = { kind = "nth_weekday", month = 11, weekday = "thursday", nth = 4 }
 effect = { kind = "early_close", close_local = "12:00" }
+first_year = 2014
 last_year = 2021
 source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Thanksgiving Day (closure era)"
+rule = { kind = "nth_weekday", month = 11, weekday = "thursday", nth = 4 }
+effect = { kind = "closed" }
+first_year = 2012
+last_year = 2013
+source = "archive: session_profile daily GC 1m 2013-11-26 2013-12-02 (docs/SESSION_ERAS.md §5.3)"
+
+[[calendar.holiday]]
+name = "Thanksgiving Day (12:15 era)"
+rule = { kind = "nth_weekday", month = 11, weekday = "thursday", nth = 4 }
+effect = { kind = "early_close", close_local = "12:15" }
+last_year = 2011
+source = "archive: session_profile holidays GC 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
 
 [[calendar.holiday]]
 name = "Day after Thanksgiving"
@@ -454,18 +768,24 @@ id = "cme_globex_fx"
 description = "CME Globex FX futures (6E and its micro)"
 timezone = "America/Chicago"
 roots = ["6E", "M6E"]
-# The session template is unchanged across the whole archive, so valid_from
-# could go back to 2010-06-06. It does not, because the holiday schedule this
-# table encodes was measured from 2015 onwards and the 2012-2015 Friday-before-
-# a-Monday-holiday 15:15 CT closes (listed in the header) have no rule. Claiming
-# 2010 would be claiming a holiday set that is known to be incomplete there.
-valid_from = "2015-09-21"
+# One session template for the whole archive, so there is no [[calendar.era]]
+# here and `valid_from` is simply the archive's first date. It moved back from
+# 2015-09-21 with D-0089, once the 2012-2014 closure
+# regime and the 2012-04-06 Good Friday were measured and encoded; what remains
+# unmodelled before 2015 is the 26 pre-holiday 15:15 CT closes listed in the
+# header, which the ZN table has always carried inside its own `valid_from` on
+# the same reasoning.
+valid_from = "2010-06-06"
 sources = [
   "https://www.cmegroup.com/markets/fx/g10/euro-fx.contractSpecs.html",
   "https://www.cmegroup.com/trading-hours.html",
 ]
 
 [calendar.session]
+# 17:00 -> 16:00 CT on every one of the sixteen years. The 2015-09-21 advisory
+# that moved CME Equity, CBOT Equity, COMEX and NYMEX from a 16:15 close did
+# not name FX, and the archive agrees: the 16:00-16:15 CT window is silent on
+# all 280 Mon-Fri dates spanning the change.
 open_local = "17:00"
 close_local = "16:00"
 rth_open_local = "07:20"
@@ -479,7 +799,9 @@ rationale = """
 Ten whole calendar years, entirely inside the only session era this product \
 has had in the archive. The 2022 disappearance of the US-holiday early close \
 moves session length on seven days a year and does not change the template, so \
-it is not an era and the span may cross it."""
+it is not an era and the span may cross it. It also starts after the 26 \
+pre-holiday 15:15 CT closes the header lists, so none of those unencoded \
+45-minute days is averaged in."""
 
 [[calendar.holiday]]
 name = "New Year's Day"
@@ -501,52 +823,149 @@ rule = { kind = "fixed_date", month = 12, day = 25, observance = "nearest_weekda
 effect = { kind = "closed" }
 source = "https://www.cmegroup.com/trading-hours.html"
 
-# The seven US holidays, which stopped being early closes for FX in 2022. MLK
-# 2022-01-17 traded to 15:58 CT — a full session — on a day ES stopped at 12:00.
-# `last_year` is what says so; there is no `first_year = 2022` counterpart,
-# because after 2021 there is nothing to encode.
+# The seven US holidays, in three regimes. FX closed at noon like everything
+# else from 2010, was fully shut over 2012-11-22..2014-02-17 like everything
+# else, went back to noon, and then stopped observing them entirely in 2022 —
+# MLK 2022-01-17 traded to 15:58 CT on a day ES stopped at 12:00. There is no
+# `first_year = 2022` entry, because after 2021 there is nothing to encode.
 
 [[calendar.holiday]]
 name = "Martin Luther King Jr. Day"
 rule = { kind = "nth_weekday", month = 1, weekday = "monday", nth = 3 }
 effect = { kind = "early_close", close_local = "12:00" }
+first_year = 2015
 last_year = 2021
 source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Martin Luther King Jr. Day (closure era)"
+rule = { kind = "nth_weekday", month = 1, weekday = "monday", nth = 3 }
+effect = { kind = "closed" }
+first_year = 2013
+last_year = 2014
+source = "archive: session_profile holidays 6E 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
+
+[[calendar.holiday]]
+name = "Martin Luther King Jr. Day (pre-closure era)"
+rule = { kind = "nth_weekday", month = 1, weekday = "monday", nth = 3 }
+effect = { kind = "early_close", close_local = "12:00" }
+last_year = 2012
+source = "archive: session_profile holidays 6E 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
 
 [[calendar.holiday]]
 name = "Presidents' Day"
 rule = { kind = "nth_weekday", month = 2, weekday = "monday", nth = 3 }
 effect = { kind = "early_close", close_local = "12:00" }
+first_year = 2015
 last_year = 2021
 source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Presidents' Day (closure era)"
+rule = { kind = "nth_weekday", month = 2, weekday = "monday", nth = 3 }
+effect = { kind = "closed" }
+first_year = 2013
+last_year = 2014
+source = "archive: session_profile holidays 6E 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
+
+[[calendar.holiday]]
+name = "Presidents' Day (pre-closure era)"
+rule = { kind = "nth_weekday", month = 2, weekday = "monday", nth = 3 }
+effect = { kind = "early_close", close_local = "12:00" }
+last_year = 2012
+source = "archive: session_profile holidays 6E 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
 
 [[calendar.holiday]]
 name = "Memorial Day"
 rule = { kind = "nth_weekday", month = 5, weekday = "monday", nth = -1 }
 effect = { kind = "early_close", close_local = "12:00" }
+first_year = 2014
 last_year = 2021
 source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Memorial Day (closure era)"
+rule = { kind = "nth_weekday", month = 5, weekday = "monday", nth = -1 }
+effect = { kind = "closed" }
+first_year = 2013
+last_year = 2013
+source = "archive: session_profile daily 6E 1m 2013-05-23 2013-05-29 (docs/SESSION_ERAS.md §5.3)"
+
+[[calendar.holiday]]
+name = "Memorial Day (pre-closure era)"
+rule = { kind = "nth_weekday", month = 5, weekday = "monday", nth = -1 }
+effect = { kind = "early_close", close_local = "12:00" }
+last_year = 2012
+source = "archive: session_profile holidays 6E 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
 
 [[calendar.holiday]]
 name = "Independence Day"
 rule = { kind = "fixed_date", month = 7, day = 4, observance = "nearest_weekday" }
 effect = { kind = "early_close", close_local = "12:00" }
+first_year = 2014
 last_year = 2021
 source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Independence Day (closure era)"
+rule = { kind = "fixed_date", month = 7, day = 4, observance = "nearest_weekday" }
+effect = { kind = "closed" }
+first_year = 2013
+last_year = 2013
+source = "archive: session_profile holidays 6E 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
+
+[[calendar.holiday]]
+name = "Independence Day (pre-closure era)"
+rule = { kind = "fixed_date", month = 7, day = 4, observance = "nearest_weekday" }
+effect = { kind = "early_close", close_local = "12:00" }
+last_year = 2012
+source = "archive: session_profile holidays 6E 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
 
 [[calendar.holiday]]
 name = "Labor Day"
 rule = { kind = "nth_weekday", month = 9, weekday = "monday", nth = 1 }
 effect = { kind = "early_close", close_local = "12:00" }
+first_year = 2014
 last_year = 2021
 source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Labor Day (closure era)"
+rule = { kind = "nth_weekday", month = 9, weekday = "monday", nth = 1 }
+effect = { kind = "closed" }
+first_year = 2013
+last_year = 2013
+source = "archive: session_profile holidays 6E 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
+
+[[calendar.holiday]]
+name = "Labor Day (pre-closure era)"
+rule = { kind = "nth_weekday", month = 9, weekday = "monday", nth = 1 }
+effect = { kind = "early_close", close_local = "12:00" }
+last_year = 2012
+source = "archive: session_profile holidays 6E 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
 
 [[calendar.holiday]]
 name = "Thanksgiving Day"
 rule = { kind = "nth_weekday", month = 11, weekday = "thursday", nth = 4 }
 effect = { kind = "early_close", close_local = "12:00" }
+first_year = 2014
 last_year = 2021
 source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Thanksgiving Day (closure era)"
+rule = { kind = "nth_weekday", month = 11, weekday = "thursday", nth = 4 }
+effect = { kind = "closed" }
+first_year = 2012
+last_year = 2013
+source = "archive: session_profile holidays 6E 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
+
+[[calendar.holiday]]
+name = "Thanksgiving Day (pre-closure era)"
+rule = { kind = "nth_weekday", month = 11, weekday = "thursday", nth = 4 }
+effect = { kind = "early_close", close_local = "12:00" }
+last_year = 2011
+source = "archive: session_profile holidays 6E 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
 
 [[calendar.holiday]]
 name = "Day after Thanksgiving"
@@ -557,6 +976,7 @@ source = "https://www.cmegroup.com/trading-hours.html"
 
 [[calendar.holiday]]
 name = "Day after Thanksgiving (12:15 era)"
+# 12:15 CT on every observation from 2010-11-26 to 2023.
 rule = { kind = "day_after_nth_weekday", month = 11, weekday = "thursday", nth = 4 }
 effect = { kind = "early_close", close_local = "12:15" }
 last_year = 2023
@@ -575,6 +995,21 @@ rule = { kind = "fixed_date", month = 12, day = 24, observance = "actual" }
 effect = { kind = "early_close", close_local = "12:15" }
 last_year = 2023
 source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.one_off]]
+date = "2010-12-31"
+name = "New Year's Eve — the only one in the archive that closed early"
+# 6E and ZN stopped at 12:15 CT; ES traded to 16:15 and CL and GC to 15:15. No
+# other New Year's Eve in sixteen years shows it, so it is a dated exception
+# rather than a rule.
+effect = { kind = "early_close", close_local = "12:15" }
+source = "archive: session_profile holidays 6E 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.4)"
+
+[[calendar.one_off]]
+date = "2012-04-06"
+name = "Good Friday with Nonfarm Payrolls"
+effect = { kind = "early_close", close_local = "10:15" }
+source = "archive: session_profile holidays 6E 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.4)"
 
 [[calendar.one_off]]
 date = "2015-04-03"
@@ -609,16 +1044,35 @@ id = "cme_globex_rates"
 description = "CME Globex CBOT US Treasury futures (ZN)"
 timezone = "America/Chicago"
 roots = ["ZN"]
-# The 17:00 CT open starts here. Sunday evenings traded from 17:30 CT through
-# 2011-09-25 and from 17:00 CT on 2011-10-02, which makes Monday 2011-10-03 the
-# first trading day this template describes.
-valid_from = "2011-10-03"
+valid_from = "2010-06-06"
 sources = [
   "https://www.cmegroup.com/markets/interest-rates/us-treasury/10-year-us-treasury-note.contractSpecs.html",
   "https://www.cmegroup.com/trading-hours.html",
 ]
 
+# --- era 1: 2010-06-06 .. 2011-09-30 -------------------------------------
+[[calendar.era]]
+# 17:30 -> 16:00 CT, a 90-minute break each day, no halt. `EVIDENCED`: across
+# the 338 Mon-Fri trading dates from 2010-06-06 to 2011-09-25, every local
+# minute from 16:01 to 17:29 has zero traded bars and 17:30 has them on 80 % of
+# dates; every Sunday in that span first trades at 17:30 and every Sunday from
+# 2011-10-02 at 17:00, with no mixed week. The 16:00 minute itself carries a
+# settlement print on 47 % of dates, which is why the close is read off Friday
+# (last traded minute 15:59) rather than off the Mon-Thu profile.
+#
+# No CME document for the boundary could be retrieved and none is cited: this
+# era rests on the archive alone, and `docs/SESSION_ERAS.md` §6 lists the page
+# that would settle it.
+from = "2010-06-06"
+open_local = "17:30"
+close_local = "16:00"
+rth_open_local = "07:20"
+rth_close_local = "14:00"
+source = "archive: session_profile minutes ZN 1m 2010-06-06 2011-09-26 15:55 17:40 and daily ZN 1m 2010-06-06 2012-03-01 Sun (docs/SESSION_ERAS.md §5.1) — UNVERIFIED against any CME publication"
+
+# --- era 2: 2011-10-03 .. now --------------------------------------------
 [calendar.session]
+from = "2011-10-03"
 open_local = "17:00"
 close_local = "16:00"
 rth_open_local = "07:20"
@@ -629,9 +1083,9 @@ source = "https://www.cmegroup.com/markets/interest-rates/us-treasury/10-year-us
 start = "2016-01-01"
 end = "2026-01-01"
 rationale = """
-Ten whole calendar years, well inside the single session era this table \
-describes and after the 2012-2015 Friday-before-a-holiday 15:15 CT closes the \
-header lists, so none of those unencoded 45-minute days is averaged in."""
+Ten whole calendar years, well inside the current session era and after the \
+2010-2015 pre-holiday 15:15 CT closes the header lists, so none of those \
+unencoded 45-minute days is averaged in."""
 
 [[calendar.holiday]]
 name = "New Year's Day"
@@ -641,6 +1095,8 @@ source = "https://www.cmegroup.com/trading-hours.html"
 
 [[calendar.holiday]]
 name = "Good Friday"
+# Closed in a normal year; the Employment-Situation years ran to 10:15 CT and
+# are dated one-offs below, which take precedence.
 rule = { kind = "good_friday" }
 effect = { kind = "closed" }
 source = "https://www.cmegroup.com/trading-hours.html"
@@ -657,25 +1113,75 @@ source = "https://www.cmegroup.com/trading-hours.html"
 # Veterans Day as a day the NYSE trades and the bond market does not — but CBOT
 # Treasury *futures* on Globex traded a full session on every Columbus Day and
 # every Veterans Day in the archive. Cash and futures are different markets and
-# this table is about the futures.
+# this table is about the futures. (The *day before* Columbus Day is a different
+# question: ZN closed 15:15 CT on 2010-10-08, 2011-10-07 and 2012-10-05, which
+# the header lists as unencoded.)
 
 [[calendar.holiday]]
 name = "Martin Luther King Jr. Day"
 rule = { kind = "nth_weekday", month = 1, weekday = "monday", nth = 3 }
 effect = { kind = "early_close", close_local = "12:00" }
+first_year = 2015
 source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Martin Luther King Jr. Day (closure era)"
+rule = { kind = "nth_weekday", month = 1, weekday = "monday", nth = 3 }
+effect = { kind = "closed" }
+first_year = 2013
+last_year = 2014
+source = "archive: session_profile daily ZN 1m 2013-01-16 2013-01-23 (docs/SESSION_ERAS.md §5.3)"
+
+[[calendar.holiday]]
+name = "Martin Luther King Jr. Day (pre-closure era)"
+rule = { kind = "nth_weekday", month = 1, weekday = "monday", nth = 3 }
+effect = { kind = "early_close", close_local = "12:00" }
+last_year = 2012
+source = "archive: session_profile holidays ZN 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
 
 [[calendar.holiday]]
 name = "Presidents' Day"
 rule = { kind = "nth_weekday", month = 2, weekday = "monday", nth = 3 }
 effect = { kind = "early_close", close_local = "12:00" }
+first_year = 2015
 source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Presidents' Day (closure era)"
+rule = { kind = "nth_weekday", month = 2, weekday = "monday", nth = 3 }
+effect = { kind = "closed" }
+first_year = 2013
+last_year = 2014
+source = "archive: session_profile holidays ZN 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
+
+[[calendar.holiday]]
+name = "Presidents' Day (pre-closure era)"
+rule = { kind = "nth_weekday", month = 2, weekday = "monday", nth = 3 }
+effect = { kind = "early_close", close_local = "12:00" }
+last_year = 2012
+source = "archive: session_profile holidays ZN 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
 
 [[calendar.holiday]]
 name = "Memorial Day"
 rule = { kind = "nth_weekday", month = 5, weekday = "monday", nth = -1 }
 effect = { kind = "early_close", close_local = "12:00" }
+first_year = 2014
 source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Memorial Day (closure era)"
+rule = { kind = "nth_weekday", month = 5, weekday = "monday", nth = -1 }
+effect = { kind = "closed" }
+first_year = 2013
+last_year = 2013
+source = "archive: session_profile holidays ZN 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
+
+[[calendar.holiday]]
+name = "Memorial Day (pre-closure era)"
+rule = { kind = "nth_weekday", month = 5, weekday = "monday", nth = -1 }
+effect = { kind = "early_close", close_local = "12:00" }
+last_year = 2012
+source = "archive: session_profile holidays ZN 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
 
 [[calendar.holiday]]
 name = "Juneteenth"
@@ -688,19 +1194,69 @@ source = "https://www.cmegroup.com/notices/ser/2021/12/SER-8887.pdf"
 name = "Independence Day"
 rule = { kind = "fixed_date", month = 7, day = 4, observance = "nearest_weekday" }
 effect = { kind = "early_close", close_local = "12:00" }
+first_year = 2014
 source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Independence Day (closure era)"
+rule = { kind = "fixed_date", month = 7, day = 4, observance = "nearest_weekday" }
+effect = { kind = "closed" }
+first_year = 2013
+last_year = 2013
+source = "archive: session_profile holidays ZN 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
+
+[[calendar.holiday]]
+name = "Independence Day (pre-closure era)"
+rule = { kind = "fixed_date", month = 7, day = 4, observance = "nearest_weekday" }
+effect = { kind = "early_close", close_local = "12:00" }
+last_year = 2012
+source = "archive: session_profile holidays ZN 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
 
 [[calendar.holiday]]
 name = "Labor Day"
 rule = { kind = "nth_weekday", month = 9, weekday = "monday", nth = 1 }
 effect = { kind = "early_close", close_local = "12:00" }
+first_year = 2014
 source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Labor Day (closure era)"
+rule = { kind = "nth_weekday", month = 9, weekday = "monday", nth = 1 }
+effect = { kind = "closed" }
+first_year = 2013
+last_year = 2013
+source = "archive: session_profile holidays ZN 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
+
+[[calendar.holiday]]
+name = "Labor Day (pre-closure era)"
+rule = { kind = "nth_weekday", month = 9, weekday = "monday", nth = 1 }
+effect = { kind = "early_close", close_local = "12:00" }
+last_year = 2012
+source = "archive: session_profile holidays ZN 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
 
 [[calendar.holiday]]
 name = "Thanksgiving Day"
 rule = { kind = "nth_weekday", month = 11, weekday = "thursday", nth = 4 }
 effect = { kind = "early_close", close_local = "12:00" }
+first_year = 2014
 source = "https://www.cmegroup.com/trading-hours.html"
+
+[[calendar.holiday]]
+name = "Thanksgiving Day (closure era)"
+# 2012-11-22 and 2013-11-28: no day session, and 2012-11-21 ends at 16:00 with
+# no evening at all.
+rule = { kind = "nth_weekday", month = 11, weekday = "thursday", nth = 4 }
+effect = { kind = "closed" }
+first_year = 2012
+last_year = 2013
+source = "archive: session_profile daily ZN 1m 2012-11-19 2012-11-27 (docs/SESSION_ERAS.md §5.3)"
+
+[[calendar.holiday]]
+name = "Thanksgiving Day (pre-closure era)"
+rule = { kind = "nth_weekday", month = 11, weekday = "thursday", nth = 4 }
+effect = { kind = "early_close", close_local = "12:00" }
+last_year = 2011
+source = "archive: session_profile holidays ZN 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.3)"
 
 [[calendar.holiday]]
 name = "Day after Thanksgiving"
@@ -718,6 +1274,20 @@ source = "https://www.cmegroup.com/trading-hours.html"
 # ES closed at 12:15 CT on 2013-07-03, 2014-07-03, 2017-07-03, 2018-07-03,
 # 2019-07-03, 2023-07-03, 2024-07-03 and 2025-07-03, and ZN traded to 16:00 CT
 # on every one of them.
+
+[[calendar.one_off]]
+date = "2010-12-31"
+name = "New Year's Eve — the only one in the archive that closed early"
+effect = { kind = "early_close", close_local = "12:15" }
+source = "archive: session_profile holidays ZN 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.4)"
+
+[[calendar.one_off]]
+date = "2012-04-06"
+name = "Good Friday with Nonfarm Payrolls"
+# ZN traded to 10:15 CT. Before D-0089 this table said
+# the day was fully closed, inside its own `valid_from`.
+effect = { kind = "early_close", close_local = "10:15" }
+source = "archive: session_profile holidays ZN 1m 2010-06-06 2016-01-01 (docs/SESSION_ERAS.md §5.4)"
 
 [[calendar.one_off]]
 date = "2012-10-29"

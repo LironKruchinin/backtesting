@@ -1357,15 +1357,270 @@ fn no_commodity_calendar_carries_the_equity_index_halt() {
     }
 }
 
-// The ZN open moved 17:30 -> 17:00 CT on Sunday 2011-10-02, which is why this
-// table's `valid_from` is the Monday after it. Answering about an earlier date
-// is legal and wrong by half an hour, and `qa` warns; what must not happen is
-// the table silently claiming to describe it.
+// ---------------------------------------------------------------------------
+// The commodity eras, D-0089
+// ---------------------------------------------------------------------------
+
+/// The four commodity tables reach the archive's first date, and each says how.
+///
+/// Before this change three of them started 2015-09-21 and the fourth
+/// 2011-10-03, so 5.3 of the archive's 16.1 years were answered by a template
+/// that did not describe them. `valid_from` is 2010-06-06 for all four now —
+/// the Sunday the archive opens, on which every one of the four has its first
+/// bar, at exactly the open its oldest era claims.
 #[test]
-fn the_rates_table_begins_where_its_open_time_does() {
+fn every_commodity_table_reaches_the_archives_first_date() {
+    let first = d(2010, 6, 6);
+    for (id, eras) in [
+        ("cme_globex_energy", vec![first, d(2015, 9, 21)]),
+        ("cme_globex_metals", vec![first, d(2015, 9, 21)]),
+        ("cme_globex_fx", vec![first]),
+        ("cme_globex_rates", vec![first, d(2011, 10, 3)]),
+    ] {
+        let cal = Calendar::by_id(id).expect("bundled");
+        assert_eq!(cal.valid_from(), first, "{id}");
+        assert_eq!(cal.era_starts(), eras, "{id}");
+    }
+}
+
+/// Energy and metals closed at 16:15 CT until 2015-09-18 and at 16:00 from
+/// 2015-09-21 — the same advisory as equity index, and NOT the same as FX or
+/// rates, which were already at 16:00 and did not move.
+///
+/// 16:05 CDT is 21:05 UTC. Friday 2014-05-16 was inside the older era, Friday
+/// 2016-05-20 inside the current one. The FX and rates rows are the control
+/// that makes the first two mean something: if the era had been added to the
+/// wrong tables, these would flip.
+#[test]
+fn the_energy_and_metals_close_moved_from_sixteen_fifteen_in_2015() {
+    let older = chicago(d(2014, 5, 16), 16, 5, 5);
+    let newer = chicago(d(2016, 5, 20), 16, 5, 5);
+    for id in ["cme_globex_energy", "cme_globex_metals"] {
+        let cal = Calendar::by_id(id).expect("bundled");
+        assert!(cal.is_open(older), "{id} traded to 16:15 CT in 2014");
+        assert!(!cal.is_open(newer), "{id} closed at 16:00 CT in 2016");
+    }
+    for id in ["cme_globex_fx", "cme_globex_rates"] {
+        let cal = Calendar::by_id(id).expect("bundled");
+        assert!(!cal.is_open(older), "{id} closed at 16:00 CT in 2014 too");
+        assert!(!cal.is_open(newer), "{id}");
+    }
+}
+
+/// The rates open moved 17:30 -> 17:00 CT on Sunday 2011-10-02, and nothing
+/// else about that session changed.
+///
+/// The boundary is asserted on the session *open instants*, because those are
+/// exact: trading day 2011-09-26 opens 17:30 CDT on the Sunday before it and
+/// trading day 2011-10-03 opens 17:00 CDT on the Sunday before that. 17:15 CDT
+/// is 22:15 UTC, and it is the half hour the change created.
+///
+/// The close is the second half of the claim and is asserted on a Friday, where
+/// a session close is legible: 15:55 CDT trades and 16:05 does not, in the
+/// older era as in the current one. FX is the control — it opened at 17:00 in
+/// both eras, so only the rates rows may move.
+#[test]
+fn the_rates_open_moved_from_seventeen_thirty_in_2011() {
     let zn = Calendar::by_id("cme_globex_rates").expect("bundled");
-    assert_eq!(zn.valid_from(), d(2011, 10, 3));
-    assert_eq!(zn.era_starts(), vec![d(2011, 10, 3)]);
+    let e6 = Calendar::by_id("cme_globex_fx").expect("bundled");
+
+    assert_eq!(
+        zn.open_intervals(d(2011, 9, 26))[0].0,
+        chicago(d(2011, 9, 25), 17, 30, 5),
+        "the last session of era 1 opens 17:30 CT"
+    );
+    assert_eq!(
+        zn.open_intervals(d(2011, 10, 3))[0].0,
+        chicago(d(2011, 10, 2), 17, 0, 5),
+        "the first session of era 2 opens 17:00 CT"
+    );
+    assert_eq!(
+        zn.session_open(d(2010, 6, 7)),
+        chicago(d(2010, 6, 6), 17, 30, 5),
+        "the archive's first ZN session"
+    );
+
+    // Away from the boundary evening the wall-clock reading agrees.
+    assert!(!zn.is_open(chicago(d(2011, 9, 25), 17, 15, 5)), "era 1");
+    assert!(zn.is_open(chicago(d(2011, 10, 9), 17, 15, 5)), "era 2");
+    assert!(!zn.is_open(chicago(d(2010, 6, 8), 17, 15, 5)));
+    assert!(zn.is_open(chicago(d(2012, 6, 6), 17, 15, 5)));
+    for evening in [d(2011, 9, 25), d(2011, 10, 2), d(2010, 6, 8)] {
+        assert!(
+            e6.is_open(chicago(evening, 17, 15, 5)),
+            "FX opened at 17:00 on {evening}"
+        );
+    }
+
+    // ONE EVENING is wrong, and it is the cost `Calendar::trading_day`
+    // documents rather than a defect this test missed: the era is chosen from
+    // the calendar date an instant falls on, because the trading day is what is
+    // being computed and the recursion has no base case. On Sunday 2011-10-02
+    // that date is still era 1's, whose open is 17:30, so 17:15 is attributed
+    // to Sunday and reads closed — while `open_intervals(2011-10-03)` above
+    // correctly opens the session at 17:00. Thirty minutes, once, at the only
+    // era boundary in the bundled tables that moves an OPEN time.
+    assert!(!zn.is_open(chicago(d(2011, 10, 2), 17, 15, 5)));
+
+    // Friday 2010-06-11, in the older era: 16:00 CT was the close then too.
+    assert!(zn.is_open(chicago(d(2010, 6, 11), 15, 55, 5)));
+    assert!(!zn.is_open(chicago(d(2010, 6, 11), 16, 5, 5)));
+}
+
+/// The 2012-2014 closure regime is the same nine dates on every CME calendar
+/// this repository holds, and it starts at Thanksgiving **2012**.
+///
+/// `EVIDENCED` twice on each date: no day session, and no session on the
+/// evening before — the Sunday before a Monday holiday, the Wednesday before
+/// Thanksgiving. D-0086 encoded it for equity index only and started it in
+/// 2013; the archive puts 2012-11-22 in it, for ES and NQ as well as for all
+/// four commodity roots.
+///
+/// The two-sided control is the year on each side: 2012-09-03 was an early
+/// close (12:15 CT for energy and metals, 12:00 for FX and rates) and
+/// 2014-05-26 was one again (12:00 CT everywhere). A rule that closed the
+/// market for the whole decade would pass the first half of this test.
+#[test]
+fn the_2012_closure_regime_covers_every_cme_calendar() {
+    let ids = [
+        "cme_globex_equity_index",
+        "cme_globex_energy",
+        "cme_globex_metals",
+        "cme_globex_fx",
+        "cme_globex_rates",
+    ];
+    for date in [
+        d(2012, 11, 22),
+        d(2013, 1, 21),
+        d(2013, 2, 18),
+        d(2013, 5, 27),
+        d(2013, 7, 4),
+        d(2013, 9, 2),
+        d(2013, 11, 28),
+        d(2014, 1, 20),
+        d(2014, 2, 17),
+    ] {
+        for id in ids {
+            let cal = Calendar::by_id(id).expect("bundled");
+            assert!(
+                matches!(cal.day_effect(date), DayEffect::Closed { .. }),
+                "{id} on {date}"
+            );
+            assert!(!cal.is_trading_day(date), "{id} on {date}");
+            assert_eq!(cal.open_intervals(date), Vec::new(), "{id} on {date}");
+        }
+    }
+    // The year after: an early close everywhere, not a closure.
+    for id in ids {
+        let cal = Calendar::by_id(id).expect("bundled");
+        assert!(
+            matches!(cal.day_effect(d(2014, 5, 26)),
+                DayEffect::EarlyClose { close_local, .. } if close_local == "12:00"),
+            "{id} on 2014-05-26"
+        );
+    }
+    // The year before. Equity index is excluded on purpose: 2012-09-03 is in
+    // its era 1, which `valid_from = 2012-11-19` says this repository does not
+    // model, and its 10:30 CT holiday closes are deliberately unencoded.
+    for (id, close) in [
+        ("cme_globex_energy", "12:15"),
+        ("cme_globex_metals", "12:15"),
+        ("cme_globex_fx", "12:00"),
+        ("cme_globex_rates", "12:00"),
+    ] {
+        let cal = Calendar::by_id(id).expect("bundled");
+        assert!(
+            matches!(cal.day_effect(d(2012, 9, 3)),
+                DayEffect::EarlyClose { close_local, .. } if close_local == close),
+            "{id} on 2012-09-03"
+        );
+    }
+}
+
+/// Before the closure regime, energy and metals closed at 12:15 CT on a US
+/// holiday and FX and rates at 12:00 — a fifteen-minute difference nobody
+/// publishes, on every holiday from the archive's first to 2012.
+#[test]
+fn the_pre_closure_holiday_close_differs_by_exchange() {
+    for date in [d(2011, 1, 17), d(2011, 11, 24), d(2012, 1, 16)] {
+        for (id, close) in [
+            ("cme_globex_energy", "12:15"),
+            ("cme_globex_metals", "12:15"),
+            ("cme_globex_fx", "12:00"),
+            ("cme_globex_rates", "12:00"),
+        ] {
+            let cal = Calendar::by_id(id).expect("bundled");
+            assert!(
+                matches!(cal.day_effect(date),
+                    DayEffect::EarlyClose { close_local, .. } if close_local == close),
+                "{id} on {date}"
+            );
+        }
+    }
+}
+
+/// The 2012 Employment-Situation Good Friday, which splits the calendars the
+/// same three ways 2023 and 2026 do.
+///
+/// It is inside `valid_from` for rates and for FX now. Before this change the
+/// rates table said 2012-04-06 was fully closed — inside its own `valid_from`,
+/// on a date the archive shows trading to 10:15 CT.
+#[test]
+fn the_2012_nonfarm_payrolls_good_friday_is_dated_on_every_table() {
+    let date = d(2012, 4, 6);
+    assert!(matches!(
+        cme().day_effect(date),
+        DayEffect::EarlyClose { close_local, .. } if close_local == "08:15"
+    ));
+    for id in ["cme_globex_rates", "cme_globex_fx"] {
+        assert!(
+            matches!(Calendar::by_id(id).expect("bundled").day_effect(date),
+                DayEffect::EarlyClose { close_local, .. } if close_local == "10:15"),
+            "{id}"
+        );
+    }
+    for id in ["cme_globex_energy", "cme_globex_metals"] {
+        let cal = Calendar::by_id(id).expect("bundled");
+        assert!(
+            matches!(cal.day_effect(date), DayEffect::Closed { .. }),
+            "{id}"
+        );
+        assert!(!cal.is_trading_day(date), "{id}");
+    }
+}
+
+/// One New Year's Eve in sixteen years closed early, and only for two products.
+///
+/// A dated one-off rather than a rule, because a rule fitted to a single
+/// observation would delete four hours from every other 31 December in the
+/// archive — all of which traded in full.
+#[test]
+fn only_one_new_years_eve_closed_early_and_only_for_fx_and_rates() {
+    for id in ["cme_globex_fx", "cme_globex_rates"] {
+        let cal = Calendar::by_id(id).expect("bundled");
+        assert!(
+            matches!(cal.day_effect(d(2010, 12, 31)),
+                DayEffect::EarlyClose { close_local, .. } if close_local == "12:15"),
+            "{id}"
+        );
+        // Every other New Year's Eve the archive holds is an ordinary session.
+        for year in [2013, 2014, 2015, 2019, 2024] {
+            assert_eq!(cal.day_effect(d(year, 12, 31)), DayEffect::Normal, "{id}");
+        }
+    }
+    for id in [
+        "cme_globex_equity_index",
+        "cme_globex_energy",
+        "cme_globex_metals",
+    ] {
+        assert_eq!(
+            Calendar::by_id(id)
+                .expect("bundled")
+                .day_effect(d(2010, 12, 31)),
+            DayEffect::Normal,
+            "{id}"
+        );
+    }
 }
 
 // ------------------------------------------------------- the session clock

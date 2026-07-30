@@ -380,7 +380,7 @@ messages on both sides.
 The protocol:
 
 1. **A branch carries a placeholder**, spelled `D-TBD(short-topic-slug)` —
-   `D-TBD(commodity-calendar-eras)`, `D-TBD(expiry-availability)`. It goes
+   `D-0089`, `D-TBD(expiry-availability)`. It goes
    everywhere the real number would: code comments, module docs, `DECISIONS.md`
    entry heading, and the commit message.
 2. **The slug is required and must be distinctive.** `D-TBD` alone is not a
@@ -597,11 +597,31 @@ reference; supersede the decision if you disagree — don't hotfix.
   same time, and not at the same hour for every product.** CME's trading-hours
   *landing page* says "Globex closed" and its per-holiday grids disagree; the
   grids win, and MLK 2024-01-15 agrees with them. What the archive adds
-  (D-0086): equity index ran **full closures** from 2013-01-21 to 2014-02-17 —
-  proved by the Sunday evenings that did not open — and 10:30 CT closes in era 1;
-  and on MLK 2022-01-17 the last traded minute was 12:00 CT for ES and ZN, 13:30
-  for CL and GC, and 15:58 for 6E, which traded a full session. One date, four
-  answers, which is why there are four commodity calendars and not one.
+  (D-0086): equity index ran **full closures** from **2012-11-22** to
+  2014-02-17 — proved by the Sunday and Wednesday evenings that did not open —
+  and 10:30 CT closes in era 1; and on MLK 2022-01-17 the last traded minute was
+  12:00 CT for ES and ZN, 13:30 for CL and GC, and 15:58 for 6E, which traded a
+  full session. One date, four answers, which is why there are four commodity
+  calendars and not one. **All four commodity products were closed on the same
+  nine dates**, and checking them against ES and NQ is what found D-0086's start
+  date off by one holiday — it read 2013-01-21, three trading days *after* the
+  equity table's own `valid_from`, so the calendar reported a normal session on a
+  day the exchange was shut (D-0089).
+- **The four commodity calendars describe 2010-06-06 onwards, and 26 dates
+  inside that span are knowingly wrong by 45 minutes**
+  (D-0089). CL and GC carry a 16:15 CT close before
+  2015-09-21 and ZN a 17:30 CT open before 2011-10-03, as `[[calendar.era]]`
+  entries; the pre-2013 holiday close was 12:15 CT for energy and metals and
+  12:00 for FX and rates. What is *not* modelled is a 15:15 CT pre-holiday close
+  on 26 dates for 6E and ZN and 6 for CL and GC, because the pattern has three
+  regimes and a hole in it. That trade is deliberate and is the D-0040 argument:
+  an unmodelled early close is reported as *missing bars*, which blames the
+  archive, and it costs ~1,200 minutes over five years — against ~20,000 minutes
+  per contract of real bars that `valid_from = 2015-09-21` reported as **outside
+  any session**, which indicts the calendar. May 2011 out-of-session counts went
+  CL 202 → 0 and GC 283 → 0. ZN's 17:30 open is the one era in these tables with
+  **no publication behind it**; its `source` says `UNVERIFIED` and
+  `docs/SESSION_ERAS.md` §6 lists what would settle it.
 - **`cme_globex_rates` has no Columbus Day and no Veterans Day**, although the
   cash Treasury market closes on both and `docs/THETADATA_PLAN.md` §8.1 records
   Veterans Day as a day the NYSE trades and the bond market does not. CBOT

@@ -2731,3 +2731,89 @@ propose a superseding entry — don't silently diverge.
   **Number assigned directly rather than as a `D-TBD(...)` placeholder**,
   because this landed on `main` through the primary session, which is what §8.2
   allows; the placeholder protocol binds branches.
+- **D-0089** (2026-07-31) — **The four commodity
+  calendars are backfilled to the archive's first date, 2010-06-06, with
+  `[[calendar.era]]` entries and three earlier holiday regimes; and D-0086's
+  equity-index Thanksgiving closure is corrected to start in 2012.** (extends
+  D-0086)
+
+  D-0086 built `cme_globex_energy`, `cme_globex_metals`, `cme_globex_fx` and
+  `cme_globex_rates` and started three of them on 2015-09-21 and the fourth on
+  2011-10-03. The archive starts 2010-06-06, so 5.3 of its 16.1 years were
+  answered by a template that did not describe them — about 145 of the first 423
+  contracts an archive-wide sweep touches. `docs/SESSION_ERAS.md` §5 is the
+  workbook; every count below is reproducible with
+  `crates/crucible-data/examples/session_profile.rs`, read-only.
+
+  **Eras.** CL and GC gain one: 17:00 → **16:15** CT from 2010-06-06 to
+  2015-09-18. ZN gains one: **17:30** → 16:00 CT from 2010-06-06 to 2011-09-30.
+  6E gains none — 17:00 → 16:00 for all sixteen years, so it has one template
+  and `valid_from` alone moves. No product ever had an intraday halt. The
+  2015-09-21 boundary is 78-of-78 dates trading 16:00–16:15 CT before it and
+  0-of-200 after, for CL and GC separately; the 2011-10-02 one is 0.00 % on
+  every minute from 16:01 to 17:29 across 338 ZN dates, then 17:30 at 80 %.
+
+  **The one third-party source, and what it is for.** ATAS, published
+  2015-09-20, accessed 2026-07-31, names the product groups the 2015 advisory
+  covered — "CME Equity, CBOT Equity, COMEX, NYMEX". The archive independently
+  says CL and GC moved and 6E and ZN did not, and CME FX and CBOT rates are
+  absent from that list. Two measurements of different kinds naming each other
+  (§7's third case). Nothing was fetched from cmegroup.com, by the same ToU
+  ruling the margin work follows.
+
+  **Holiday regimes: four, not two, and the middle one is shared.** Before 2013
+  energy and metals closed **12:15 CT** on a US holiday and FX and rates
+  **12:00** — fifteen minutes, for three years, published nowhere found. Then
+  **all four products were fully closed** on the same nine dates, 2012-11-22
+  through 2014-02-17, `EVIDENCED` twice on each (no day session *and* no session
+  on the evening before). Then the 12:00 regime D-0086 already encoded. Written
+  as `first_year`/`last_year` pairs that never overlap, so which entry fires
+  never depends on file order.
+
+  **The equity-index correction.** Checking those nine dates against ES and NQ
+  found `cme_globex.toml`'s `Thanksgiving Day (closure era)` starting in 2013
+  when 2012-11-22 was a closure too — three trading days after that table's own
+  `valid_from`, so the calendar reported a normal session on a day the exchange
+  was shut, inside the span it claims to describe. `first_year = 2012` now. The
+  four commodity tables found a bug in the equity one, which is the argument for
+  measuring the same question five ways. Measured on ESZ2012 over
+  2012-11-19..2012-12-01: coverage **88.894 % → 99.003 %**, and the month's
+  largest reported gap — 1,335 bars from 2012-11-21T23:00Z to 2012-11-22T21:15Z
+  — was the phantom session and is gone. `qa` had been printing it since D-0086
+  landed, and it read as thin data rather than as an invented trading day.
+
+  **What moving `valid_from` costs, stated because it is not zero.** 26 dates
+  for 6E and ZN and 6 for CL and GC closed at 15:15 CT before a holiday, in a
+  pattern with three regimes and a hole in it (Columbus Day in 2010, 2011 and
+  2012 but never after; Thanksgiving eve in 2010 but not 2011 or 2012; CL and GC
+  stop four years before 6E and ZN). Unencoded, listed by date. That is 45 min ×
+  26 and 60 min × 6 of session the calendar now claims and the exchange did not
+  hold — reported as *missing bars*, the error that blames the archive. Against
+  it: ~20,000 minutes per contract of **real bars** that the old `valid_from`
+  reported as *outside any session*, which is the error that indicts the
+  calendar (D-0040) and is the one this project cares about. On May 2011,
+  measured both ways five minutes apart with only the two TOML files swapped:
+  CL 202 → **0** out-of-session bars, GC 283 → **0**, ZN coverage 86.19 % →
+  **88.11 %**. Refusing to guess a rule from a three-regime pattern stays the
+  cheaper error, exactly as D-0086 said of the sixteen dates it could see.
+
+  **The remaining unverified claim, named.** ZN's 17:30 open rests on the
+  archive alone: no CME document, no third-party coverage, and no cftc.gov rule
+  filing for it was found. Its `source` field says `UNVERIFIED` in those words,
+  and `SESSION_ERAS.md` §6 lists the four questions a hand-fetch would settle
+  and refuses to construct a URL for any of them.
+
+  **One evening is wrong and is asserted rather than discovered later.**
+  `Calendar::trading_day` picks the era from the calendar date an instant falls
+  on — its own doc comment calls this a cost of at most one session per era — so
+  17:00–17:30 CT on Sunday 2011-10-02 reads closed while
+  `open_intervals(2011-10-03)` correctly opens at 17:00. Thirty minutes, once,
+  at the only bundled boundary that moves an *open* time.
+  `the_rates_open_moved_from_seventeen_thirty_in_2011` pins both halves.
+
+  **Nothing numeric moved.** Every `reference_span` is 2016-01-01..2026-01-01
+  (2022-01-01 for equity index) and every new era boundary, `first_year` and
+  one-off falls outside it, so `bars_per_year` is unchanged for all five
+  calendars. ESH2024 January 2024 is bit-identical (30,167 bars, −23.51 %, 665
+  round trips, fees $1,663.75); `demo b55747513df596ed`,
+  `combo 0e1ab52d474b862b`, `walk-forward 711e1cb34a2ee2b4` all unmoved.
