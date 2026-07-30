@@ -150,3 +150,36 @@ H-009 by design. Two papers, one idea, one trial counter.
 already exists. It is graded and queued **with** H-009 and should never be run
 without it — a vol-management result without its out-of-sample pair is exactly
 the artifact this pairing exists to prevent.
+
+---
+
+## Changelog
+
+Append-only. The registration above is never rewritten — a pre-registration
+that gets edited after the fact is not one (README §1).
+
+### 2026-07-30 — re-graded against the four grammar unlocks (D-0077…D-0080): **B → B**
+
+**What closed.** The estimator half, with H-009: `stdev(period,
+source="return")` (D-0080) and the `1d` grain (D-0077).
+
+**What still blocks.** H-009's continuous-sizing gap, since this file is a
+paired protocol and cannot outrun what it is paired to. Plus one that got
+*sharper* rather than smaller, and is the more interesting half:
+
+**The full-sample arm of this protocol is now structurally inexpressible in
+TOML, by design.** The pairing requires every H-009 result to be produced
+twice — once by the published-style full-sample method, once strictly
+point-in-time — because the gap between them is the deliverable. D-0080 makes
+every normalizer trailing-window only and states that no config can name a
+full-sample variant. So the deliberate-lookahead arm cannot be written as a
+config at all; it has to be a Rust control strategy, exactly like
+`crucible-strategies::controls::LeakyZScore`, which exists for precisely this
+purpose (CLAUDE.md §9).
+
+That is the grammar refusing to express a lookahead, which is the grammar
+working. It does mean this file's deliverable is a **control strategy plus a
+config**, not two configs, and that is a change to how the work is shaped rather
+than to how expensive it is. Recorded here so whoever takes the ticket does not
+spend an afternoon trying to write the full-sample arm in TOML and conclude the
+parser is broken.

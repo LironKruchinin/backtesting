@@ -187,3 +187,34 @@ parts of the CME schedule. The gaps are a daily grain (or a session-close
 predicate), a calendar operand supplied caller-side in the D-0071 pattern, and
 multi-contract pooling. It is the cheapest B in this sweep and has the most
 clearly named payer.
+
+---
+
+## Changelog
+
+Append-only. The registration above is never rewritten — a pre-registration
+that gets edited after the fact is not one (README §1).
+
+### 2026-07-30 — re-graded against the four grammar unlocks (D-0077…D-0080): **B → B**
+
+**What closed.** The daily grain (D-0077): `timeframes = ["1d"]` produces
+**trading-day** bars opening when the session opened, aggregated on the
+exchange's own sessions. That matters more here than elsewhere, because this
+file insists the day count be over CME trading days rather than calendar days,
+and the resampler's day is already the right kind of day.
+
+**What still blocks — the whole signal.** The feature is a **trading-day-of-
+month index counted from the end of the month**, and the grammar has no
+calendar predicate. The session readings that landed (D-0078) are *intra*-session
+clock readings — where the bar sits inside its trading day — and say nothing
+about where that day sits inside its month. README §2.1 still lists calendar
+predicates as inexpressible.
+
+This file is the extreme case in the sweep and the cleanest illustration of why
+four unlocks produced no promotions: its signal has **no price input at all**,
+so the missing operand is not one term of the rule, it is the entire rule.
+There is nothing else to build it from and nothing to approximate it with.
+
+The remaining gaps this file listed — multi-contract pooling — is unlock 5
+(README §6.2) and is still pending, so even with the calendar operand this would
+be a triage run rather than a verdict run.

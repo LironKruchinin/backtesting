@@ -141,3 +141,29 @@ and the missing code overlaps almost entirely with H-001's.
 The faithful cross-sectional version is **C** and post-M4. The file is graded on
 what we can actually do, and what we can actually do is the weaker version, so
 the weaker version is what the kill criteria judge.
+
+---
+
+## Changelog
+
+Append-only. The registration above is never rewritten — a pre-registration
+that gets edited after the fact is not one (README §1).
+
+### 2026-07-30 — re-graded against the four grammar unlocks (D-0077…D-0080): **B → B**
+
+**What closed.** Nothing load-bearing. The session-phase readings (D-0078) make
+the *reporting* half of this file — "report the overnight and intraday
+components separately" — sliceable in principle, because `is_overnight` and
+`is_rth` now name the two windows the split is taken over.
+
+**What still blocks.** Both features and the forecasting variable.
+
+- Feature 1 (previous RTH close → today's RTH open) and feature 2 (today's RTH
+  open → today's RTH close) each need **anchored reference prices**, the same
+  construct H-001 waits on.
+- Feature 3 is a moving average of **(feature 1 − feature 2)**. That needs
+  **arithmetic between operands**, which the grammar still does not have: it
+  compares operands, it does not combine them. A slot cannot be fed a
+  difference of two other quantities, so there is nothing for `sma` to smooth.
+
+Two missing constructs, not one, and the second is the harder of the two.

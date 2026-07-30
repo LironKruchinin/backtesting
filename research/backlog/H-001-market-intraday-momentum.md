@@ -165,3 +165,37 @@ time-of-day predicate, session anchors supplied caller-side as `&[i64]` keys in
 the D-0071 pattern, a forced-flatten trading window, and a window-return
 feature. It is the highest-value B in this sweep because the same four pieces
 unlock H-002, H-003, H-004 and H-014.
+
+---
+
+## Changelog
+
+Append-only. The registration above is never rewritten — a pre-registration
+that gets edited after the fact is not one (README §1).
+
+### 2026-07-30 — re-graded against the four grammar unlocks (D-0077…D-0080): **B → B**
+
+**What closed.** The trading window is now expressible. The last half-hour of
+RTH and the forced flatten at the close are:
+
+```toml
+enter_long = "is_rth > 0 and minutes_to_rth_close <= 30 and <feature 1> > 0"
+exit_long  = "minutes_to_rth_close <= 0"
+```
+
+`minutes_to_rth_close` counts toward the *scheduled* regular close, and
+`is_rth` is 1 only inside regular hours (D-0078).
+
+**What still blocks, and why the grade does not move.** `<feature 1>` above is
+not writable. The morning return is a return between two **anchored reference
+prices** — the previous RTH session's close, and the price 30 minutes after
+this session's RTH open. The grammar's operands are the *bar being decided on*
+(`open`/`high`/`low`/`close`), its `volume`, trailing-window indicator slots,
+and session clock readings. None of them captures a price **at a named past
+instant** and holds it, and there is no arithmetic to form a return from two
+such captures. Substituting a trailing-window return (`zscore(period,
+source="return")`) would test a different hypothesis with the same name, which
+§1 forbids.
+
+The gap is now precisely one construct — an anchored reference price — rather
+than the four this file originally listed.

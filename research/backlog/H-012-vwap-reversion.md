@@ -172,3 +172,39 @@ where this should live or die.
 and session anchors — on data we already own. Cheap to test, and it should be
 tested only *after* H-008, because if generic mean reversion already dies on
 costs then VWAP reversion is dead too and Gate 0c has nothing to separate.
+
+---
+
+## Changelog
+
+Append-only. The registration above is never rewritten — a pre-registration
+that gets edited after the fact is not one (README §1).
+
+### 2026-07-30 — re-graded against the four grammar unlocks (D-0077…D-0080): **B → B**
+
+**What closed — the mandatory conditioner.** This file registers session
+progress as non-optional ("an unconditional version is not an acceptable
+primary result"), and that bucketing is now writable (D-0078):
+
+```toml
+enter_long = "minutes_since_rth_open > 60 and minutes_since_rth_open <= 120 and <fade condition>"
+```
+
+**What still blocks — the feature itself.** Session-anchored cumulative VWAP is
+`Σ(typical price × volume) ÷ Σ(volume)`, **reset at each session open**. Three
+separate constructs are missing:
+
+1. the typical price `(H+L+C)/3` — arithmetic between operands;
+2. two cumulative accumulators that **reset on a session boundary** — every
+   indicator in the grammar is a fixed-length trailing window, and none is
+   session-anchored;
+3. the division of one by the other.
+
+`zscore` and `stdev` (D-0080) do not substitute: a trailing z-score of close is
+a deviation from a *rolling* mean, and this hypothesis is deviation from a
+*session-anchored volume-weighted* mean. They are different features with
+different reset behaviour, and swapping them would be a different hypothesis
+under this file's family key.
+
+The volume operand landing (D-0079) does not help either — VWAP needs volume
+*accumulated and weighted*, not compared.

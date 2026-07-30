@@ -352,8 +352,9 @@ shape of it is the sweep's main structural finding: the combo grammar is three
 indicators and six comparison operators, and almost every published intraday
 result was stated in terms of a clock the grammar could not read — until
 2026-07-30, when four of the five unlocks below landed at once. **That tally is
-the pre-unlock triage**, kept as the historical record; the re-grade against the
-grammar that now exists is recorded per file, in each file's own changelog.
+the pre-unlock triage**, kept as the historical record. It is also the
+POST-unlock tally: the re-grade against the new grammar promoted nothing (§6.4),
+and each file's changelog records why.
 
 ### 6.2 The five unlocks — four landed, and the fifth is the one that matters
 
@@ -403,6 +404,39 @@ has to do, the other half being the quantile/IC contract in
 
 **H-007 is runnable now.** Its primary test reads the cost-sensitivity sweep and
 per-round-trip PnL out of S1/S2 and needs no S0 seam.
+
+### 6.4 The 2026-07-30 re-grade: eight B files, **zero promotions**
+
+All eight grade-B files were re-graded against the merged grammar, strictly:
+a promotion required quoting the construction that expresses the file's own
+signal. None reached that bar. Each file's changelog records what closed and
+what still blocks; the tally above is unchanged.
+
+That is not a disappointing result, it is a **structural finding about what the
+unlocks were**. They delivered *conditioning* — when to be in the market, and
+how extreme a per-bar reading is. Almost every B file is blocked on *feature
+construction* instead, and the three missing constructs are:
+
+| missing construct | blocks |
+|---|---|
+| **Anchored reference price** — a price captured at a named past instant (previous RTH close; the price 30 min after the open) and held | H-001, H-002, H-004 |
+| **Arithmetic between operands** — differences, ratios, `(H+L+C)/3`; the grammar compares operands but never combines them | H-002, H-004, H-012 |
+| **Something other than a boolean entry rule** — continuous position sizing (H-009), an emitted regime label (H-004), a session-anchored accumulator (H-012, H-004), a calendar index (H-014) | H-009, H-010, H-012, H-014, H-004 |
+
+Two entries deserve reading before any of this is acted on:
+
+- **H-003 is the one to look at.** All three gaps it named are closed, and it
+  is held at B only because it never enumerated the fourteen signal families it
+  proposes to test — so a promotion would assert the expressibility of signals
+  nobody has written down. Its remaining cost is a reading task, not a build,
+  and the grading scheme has no cell for that.
+- **H-010 got sharper rather than closer.** Its full-sample comparison arm is
+  now *structurally inexpressible in TOML by design* (D-0080 admits no
+  full-sample normalizer), so it needs a Rust control strategy beside its
+  config. The grammar refusing to express a lookahead is the grammar working.
+
+The unlocks grew the set of ideas we can **state**. Unlock 5 is still the only
+one that grows the set we can **settle**.
 
 Two entries carry a warning the grade does not: **H-012** and **H-013** are
 graded on cost to test, and both have **no refereed empirical support** for

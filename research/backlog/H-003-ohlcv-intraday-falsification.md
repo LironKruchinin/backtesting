@@ -151,3 +151,43 @@ make the reproduction itself the deliverable.
 **B.** The data is owned and the span exceeds the paper's. The gaps are a 1m→5m
 resampler, a time-of-day predicate, and a volume operand — three pieces of
 code, all in M2/M3 scope, none of them requiring a purchase.
+
+---
+
+## Changelog
+
+Append-only. The registration above is never rewritten — a pre-registration
+that gets edited after the fact is not one (README §1).
+
+### 2026-07-30 — re-graded against the four grammar unlocks (D-0077…D-0080): **B → B**, and the blocker changed KIND
+
+**All three named gaps closed.** This is the only file in the sweep where that
+is true, so the reasoning is spelled out rather than summarized.
+
+- **1m→5m resampler** (D-0077): `timeframes = ["5m"]` now works. Coarse grains
+  are aggregated from the curated 1-minute archive **on read**, on the
+  exchange's own sessions, and nothing is written. The paper's native grain is
+  reachable without a purchase and without a second copy of the archive.
+- **Time-of-day predicate** (D-0078): `minutes_since_rth_open`,
+  `minutes_to_rth_close`, `is_rth` and the rest.
+- **Volume operand** (D-0079): `volume`, plus `zscore(period,
+  source="volume")` for a relative reading.
+
+**Why the grade still does not move.** Grade A asserts that a hypothesis is
+*expressible in combo TOML this week*. This file has never said what must be
+expressed: it deliberately does not restate the fourteen signal families, and
+records that pinning them from the paper "is the first task of anyone who takes
+this ticket". A promotion would therefore be asserting the expressibility of
+fourteen signals nobody has written down. Several plausible OHLCV families —
+range-relative, body-versus-shadow, close-location-within-bar — need
+**arithmetic between operands**, which the grammar still lacks, so the
+assertion is not even safe by default.
+
+**Flagged for triage rather than decided here.** The remaining blocker is no
+longer machinery, it is an unfinished registration: the cost of this ticket is
+now a reading task, not a build. The grading scheme measures cost to test and
+has no cell for that, which is a limit of the scheme rather than a fact about
+the idea. **B** is the conservative answer and the one that does not overstate
+what the grammar can do; whether this becomes A is Liron's call once the
+fourteen definitions are pinned, and it should be decided *with the paper open*,
+not from this file.

@@ -146,3 +146,40 @@ not test.
 are a volume operand, session-relative windows, and a rolling normalizer —
 the last of which is M2.5's point-in-time standardization layer and is needed
 by half this backlog regardless.
+
+---
+
+## Changelog
+
+Append-only. The registration above is never rewritten — a pre-registration
+that gets edited after the fact is not one (README §1).
+
+### 2026-07-30 — re-graded against the four grammar unlocks (D-0077…D-0080): **B → B**
+
+**What closed.** All three pieces this file named as its gaps now exist in some
+form: the volume operand (D-0079), session-relative windows (D-0078) and a
+rolling normalizer (D-0080). The grade still does not move, and the reason is
+worth stating precisely, because "the thing I asked for landed" and "my feature
+is now writable" turned out to be different claims.
+
+**What still blocks — feature by feature.**
+
+- **Feature 1, the overnight gap** (`today's RTH open ÷ previous RTH close`)
+  needs two anchored reference prices *and* a ratio between them. Neither
+  exists.
+- **Feature 2, opening volume**, is volume **summed over the first 30 RTH
+  minutes** compared against a trailing median of that same session-window
+  aggregate. The operand that landed is the *completed bar's* volume, and
+  `zscore(period, source="volume")` normalizes per-bar volume on a trailing
+  window of bars. A session-window aggregate is a different quantity: no
+  accumulator in the grammar resets on a session boundary.
+- **Feature 3** shares H-001's anchored-price gap.
+- **The output** is a discrete regime **label that other hypotheses consume**.
+  The grammar's four rules produce *positions*. There is no way for a config to
+  emit a label, which is the same shape of gap that keeps S0 refused (D-0081) —
+  and worth noticing, because a score-emitting seam is being built for exactly
+  that reason.
+
+The rolling normalizer helps this file least of the four unlocks, despite this
+file having asked for it: what it normalizes is a per-bar series, and every
+feature here is a session-window aggregate or a two-instant return.

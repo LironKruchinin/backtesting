@@ -173,3 +173,52 @@ continuous position sizing, a realized-variance indicator, and a daily decision
 grain — all code, all in M2/M3 scope, none requiring a purchase. The
 multi-asset version is post-M4; the single-instrument version graded here is
 not.
+
+---
+
+## Changelog
+
+Append-only. The registration above is never rewritten — a pre-registration
+that gets edited after the fact is not one (README §1).
+
+### 2026-07-30 — re-graded against the four grammar unlocks (D-0077…D-0080): **B → B**
+
+**What closed — two of the three named gaps.**
+
+- **The realized-variance indicator.** `stdev(period, source="return")`
+  (D-0080) is a trailing-window population standard deviation of bar-over-bar
+  returns, and the `return` source costs one extra warmup bar which is added to
+  the declared warmup, so §2.6's grid-wide alignment counts it.
+- **The daily decision grain.** `timeframes = ["1d"]` (D-0077) gives
+  trading-day bars anchored on the session open — not UTC days.
+
+Worth recording beside them: this file's own warning — that a full-sample
+variance normalization "would make this strategy look spectacular and would be
+pure lookahead" — is now **enforced by the grammar rather than by discipline**.
+D-0080's normalizers are trailing-window only, there is no full-sample variant,
+and no config can name one.
+
+**What still blocks.** The rule is `target position ∝ 1 / forecast variance`:
+**continuous position sizing**. The combo grammar's four rules are booleans and
+position size comes from a fixed `qty_contracts` in `[run]`. There is no sizing
+axis, and adding one is an engine-and-config change, not a rule-grammar one.
+
+A binary approximation — flat when `stdev` is above a threshold, on when it is
+below — *is* writable today:
+
+```toml
+[indicators.rv]
+kind = "stdev"
+period = { start = 10, end = 60, step = 10 }
+source = "return"
+
+[rules]
+enter_long = "rv < 0.004"
+exit_long  = "rv >= 0.004"
+```
+
+That is **a different hypothesis** and must not be run under this file's
+`hypothesis_family`. Volatility *timing* (binary) and volatility *scaling*
+(continuous) make different claims, have different turnover, and the paper's
+result is about the second. If the binary version is worth testing it gets its
+own file and its own family key, exactly as H-001's Globex-anchored variant does.
