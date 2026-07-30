@@ -142,6 +142,53 @@
 //! [`Price`]: crucible_core::types::Price
 //! [`ContractSpec::pnl_nano_usd`]: crucible_core::types::ContractSpec::pnl_nano_usd
 //!
+//! ## The partition key is a resolved contract, not a vendor string (D-0072)
+//!
+//! A curated partition is named after the contract whose bars it holds, spelled
+//! with a **four-digit year**: `curated/bars/GCZ2014/1m/…`, never `GCZ4`.
+//!
+//! This is not cosmetic. A CME year code has one digit, so it repeats every ten
+//! years, and **every bar window in this archive is sixteen years long**
+//! (2010-06-06 → 2026-07-28). By pigeonhole, contracts alias — and they did:
+//! `GC.FUT ohlcv-1m` wrote exactly **120 partitions = 12 month codes × 10 year
+//! digits**, and `curated/bars/GCZ4/` held December-2014 gold and
+//! December-2024 gold concatenated into one file spanning 14.5 years.
+//!
+//! **Both of this project's ordering checks were structurally blind to it.**
+//! [`PartitionWriter::push`] enforces strictly increasing `ts_open` and passed,
+//! because the two contracts trade in *disjoint sequential* periods and
+//! concatenate in perfect order. `qa`'s gap detector reported "gaps inside
+//! sessions none", because the ten-year hole falls *between* sessions, not
+//! inside one. Neither could have caught it; both have controls saying so, on
+//! the merged fixture, in this module's tests.
+//!
+//! So the key is resolved per record, against **the contract's own expiry**:
+//! [`ContractCycles::resolve`] takes the vendor symbol and the bar's `ts_open`
+//! and answers which cycle that bar printed in. The device is the one
+//! [`expiries_from_definitions`] already used to separate the two `ESM0`s of a
+//! sixteen-year `definition` file (D-0046) — one rule, now two consumers. A
+//! [`DecadeAnchor`](crate::continuous::DecadeAnchor) constant is **not** used
+//! and must never be: a constant has an answer for `GCZ4` and it is right for
+//! half the bars.
+//!
+//! Expiries come from the archived `definition` file for the root, reached
+//! through the catalog so the manifest vouches for the bytes
+//! ([`Catalog::definition_file`]). Two- and four-digit years are absolute and
+//! need no lookup — the vendor itself switches to two digits for far-dated
+//! listings (`CLZ36`), and 16 such contracts trade in the CL window.
+//!
+//! ### The one place refuse-the-whole-file is right for a *meaning*
+//!
+//! A bar whose contract cannot be resolved **refuses the file**. No fallback to
+//! a constant, no "best guess", no partition. That is deliberately unlike
+//! D-0070's spread filter, which is a *declared filter with a count* precisely
+//! because a spread is not corrupt — it is a record nothing replays yet. This
+//! is different in kind: a bar filed under the wrong contract is corruption of
+//! *meaning*, it looks exactly like correct data, and the silent path is what
+//! produced the defect in the first place. A missing or incomplete `definition`
+//! therefore fails loudly. Curated data is disposable, so a refusal costs one
+//! re-run after the definition file is acquired.
+//!
 //! ## Timestamps
 //!
 //! Pass through untouched, as UTC nanoseconds. `ohlcv`'s `ts_event` marks the
@@ -150,11 +197,16 @@
 //! never here (`ingest`'s rules, CLAUDE.md §2.1).
 //!
 //! [`PartitionWriter`]: crate::curated::PartitionWriter
+//! [`PartitionWriter::push`]: crate::curated::PartitionWriter::push
+//! [`ContractCycles::resolve`]: crate::continuous::ContractCycles::resolve
+//! [`expiries_from_definitions`]: crate::continuous::expiries_from_definitions
+//! [`Catalog::definition_file`]: crate::catalog::Catalog::definition_file
 
 use std::path::PathBuf;
 
 use crucible_core::types::TimeFrame;
 
+use crate::continuous::ContinuousError;
 use crate::curated::CuratedError;
 
 /// Vendor bar schemas this transcoder understands, and the interval each one
@@ -213,7 +265,9 @@ pub struct TranscodeOptions {
 /// One curated partition that was written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WrittenPartition {
-    /// Instrument the partition holds.
+    /// Instrument the partition holds — the **resolved** contract key with a
+    /// four-digit year (`GCZ2014`), not the vendor's one-digit spelling
+    /// (D-0072).
     pub instrument: String,
     /// Where it landed.
     pub path: PathBuf,
@@ -496,6 +550,28 @@ pub enum TranscodeError {
         /// The requested symbols [`names_a_spread`] classifies as spreads.
         symbols: Vec<String>,
     },
+    /// A record's contract could not be named without guessing which decade it
+    /// belongs to (D-0072).
+    ///
+    /// The refusal that keeps two contract cycles out of one curated partition.
+    /// Refusing the whole file is right here and nowhere near as broad as it
+    /// sounds: curated data is derived and disposable, so it costs one re-run,
+    /// while the alternative is a partition whose bars are two different
+    /// contracts and whose every ordering check passes.
+    UnresolvedContract {
+        /// Archive-relative path of the source.
+        source_file_path: String,
+        /// Zero-based index of the record within the file.
+        record_index: u64,
+        /// Product root the definition file was looked up under.
+        root: String,
+        /// Why the symbol could not be resolved, from `continuous`.
+        ///
+        /// Boxed: this is the rarest variant of an error returned on every
+        /// record path, and inlining it would widen every `Result` in the
+        /// decode loop.
+        source: Box<ContinuousError>,
+    },
     /// A curated file for this window already exists but was produced from
     /// different raw bytes.
     SourceConflict {
@@ -544,6 +620,22 @@ impl core::fmt::Display for TranscodeError {
                  one. Pass --include-spreads, or drop them from --symbols",
                 symbols.join(", ")
             ),
+            TranscodeError::UnresolvedContract {
+                source_file_path,
+                record_index,
+                root,
+                source,
+            } => write!(
+                f,
+                "{source_file_path} record #{record_index}: {source}\n       \
+                 A curated partition is named after the contract whose bars it \
+                 holds, and a one-digit CME year code repeats every ten years \
+                 while this window is sixteen years long — so a key that cannot \
+                 be resolved would merge two contracts into one file that passes \
+                 every ordering check (D-0072). Nothing was written. Check that \
+                 the `definition` schema for {root} covers this window:\n       \
+                 \x20     crucible coverage --schema definition"
+            ),
             TranscodeError::SourceConflict {
                 curated_path,
                 existing_blake3,
@@ -563,6 +655,7 @@ impl std::error::Error for TranscodeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             TranscodeError::Curated(e) => Some(e),
+            TranscodeError::UnresolvedContract { source, .. } => Some(source),
             _ => None,
         }
     }
@@ -587,6 +680,9 @@ mod imp {
     use databento::dbn::{RType, Record, SymbolIndex, UNDEF_PRICE, record::OhlcvMsg};
 
     use crate::catalog::{Catalog, ManifestRecord};
+    use crate::continuous::{
+        ContractCycles, ContractSymbol, DecadeAnchor, contract_cycles_from_definitions, parse_parts,
+    };
     use crate::curated::path::window_stem_of;
     use crate::curated::{CuratedMeta, PartitionSource, PartitionWriter, read_meta};
 
@@ -594,6 +690,66 @@ mod imp {
         RecordOutcome, SpreadsExcluded, TranscodeError, TranscodeOptions, TranscodeReport,
         WrittenPartition, names_a_spread, timeframe_for_schema,
     };
+
+    /// A vendor spelling's resolved partition key, and the window over which
+    /// that answer holds.
+    ///
+    /// A sixteen-year window resolves the same handful of spellings tens of
+    /// millions of times, and only at a decade boundary does the answer change.
+    /// Remembering the window rather than the answer alone is what makes the
+    /// reuse *provably* safe: the cached key is used only for a timestamp the
+    /// resolver itself said it covers.
+    struct ResolvedKey {
+        /// Canonical four-digit contract key.
+        key: String,
+        /// Exclusive lower bound of the window this key holds over.
+        opens: Ts,
+        /// Inclusive upper bound.
+        closes: Ts,
+    }
+
+    /// Contract cycles per product root, loaded once per run.
+    ///
+    /// A `definition` file for a sixteen-year parent key is tens of thousands
+    /// of records, and every bar window of that root needs the same answer from
+    /// it, so it is read once and shared. `BTreeMap` rather than `HashMap` for
+    /// CLAUDE.md §2.2 — nothing here reaches a result through iteration order
+    /// today, and an unordered container on a result path is a habit worth not
+    /// having.
+    #[derive(Default)]
+    struct CycleCache {
+        by_root: BTreeMap<String, ContractCycles>,
+    }
+
+    impl CycleCache {
+        /// The cycles for `root`, reading the archive's `definition` file the
+        /// first time it is asked.
+        ///
+        /// A root with no archived `definition` gets an **empty** resolver
+        /// rather than an error: an empty one answers every two- and four-digit
+        /// spelling correctly and refuses every one-digit one, which is exactly
+        /// the truth of the situation. Failing here instead would refuse files
+        /// whose symbols never needed a lookup.
+        fn cycles(
+            &mut self,
+            catalog: &Catalog,
+            root: &str,
+        ) -> Result<&ContractCycles, crate::continuous::ContinuousError> {
+            if !self.by_root.contains_key(root) {
+                let cycles = match catalog.definition_file(root) {
+                    Some(path) => {
+                        contract_cycles_from_definitions(&path, root, DecadeAnchor::DEFAULT)?
+                    }
+                    None => ContractCycles::default(),
+                };
+                self.by_root.insert(root.to_owned(), cycles);
+            }
+            Ok(self
+                .by_root
+                .get(root)
+                .expect("INVARIANT: just inserted under this key"))
+        }
+    }
 
     /// The DBN record type an interval's bars must carry.
     fn rtype_for(tf: TimeFrame) -> Option<RType> {
@@ -604,6 +760,72 @@ mod imp {
             TimeFrame::D1 => Some(RType::Ohlcv1D),
             TimeFrame::M5 | TimeFrame::M15 => None,
         }
+    }
+
+    /// Makes sure `keys` holds a partition key covering `ts` for `symbol`.
+    ///
+    /// The one place a vendor spelling becomes a curated partition key
+    /// (D-0072), and the one place that can refuse a file for not knowing which
+    /// contract a bar belongs to.
+    fn ensure_key(
+        catalog: &Catalog,
+        cycles: &mut CycleCache,
+        keys: &mut BTreeMap<String, ResolvedKey>,
+        record: &ManifestRecord,
+        symbol: &str,
+        ts: Ts,
+        index: u64,
+    ) -> Result<(), TranscodeError> {
+        if let Some(cached) = keys.get(symbol)
+            && ts > cached.opens
+            && ts <= cached.closes
+        {
+            return Ok(());
+        }
+        // A symbol that is not an outright contract keeps the vendor's
+        // spelling, and that is D-0070's rule unchanged: this predicate gates a
+        // *rename*, not an exclusion, so an unrecognised shape must still be
+        // written and visible rather than refused. It costs nothing here —
+        // aliasing is a property of the one-digit CME year code, and a string
+        // that does not parse as a contract does not have one. Every spread
+        // lands here (`ESH4-ESM4`, `CL:BF F0-G0-H0`), which is also why a
+        // spread partition is still named the vendor's way; nothing replays one
+        // (D-0070), and making them replayable means resolving their legs
+        // first.
+        let Ok(root) = parse_parts(symbol).map(|parts| parts.root.to_owned()) else {
+            keys.insert(
+                symbol.to_owned(),
+                ResolvedKey {
+                    key: symbol.to_owned(),
+                    opens: Ts(i64::MIN),
+                    closes: Ts(i64::MAX),
+                },
+            );
+            return Ok(());
+        };
+        let unresolved = |source| TranscodeError::UnresolvedContract {
+            source_file_path: record.file_path.clone(),
+            record_index: index,
+            root: root.clone(),
+            source: Box::new(source),
+        };
+        let cycles = cycles.cycles(catalog, &root).map_err(unresolved)?;
+        let (resolved, opens, closes) = cycles.resolve_window(symbol, ts).map_err(unresolved)?;
+        keys.insert(
+            symbol.to_owned(),
+            ResolvedKey {
+                key: contract_key(&resolved),
+                opens,
+                closes,
+            },
+        );
+        Ok(())
+    }
+
+    /// The curated partition key of a resolved contract: its canonical
+    /// four-digit spelling (D-0072).
+    fn contract_key(symbol: &ContractSymbol) -> String {
+        symbol.to_string()
     }
 
     /// Transcodes every manifest record matching `opts` into curated Parquet.
@@ -638,6 +860,7 @@ mod imp {
             outcomes: Vec::new(),
             include_spreads: opts.include_spreads,
         };
+        let mut cycles = CycleCache::default();
         for record in catalog.records() {
             if let Some(ids) = &opts.manifest_ids
                 && !ids.contains(&record.file_blake3)
@@ -657,18 +880,20 @@ mod imp {
             };
             report
                 .outcomes
-                .push(transcode_record(catalog.data_dir(), record, tf, opts)?);
+                .push(transcode_record(catalog, &mut cycles, record, tf, opts)?);
         }
         Ok(report)
     }
 
-    /// Transcodes one raw file into one curated partition per instrument.
+    /// Transcodes one raw file into one curated partition per contract.
     fn transcode_record(
-        data_dir: &Path,
+        catalog: &Catalog,
+        cycles: &mut CycleCache,
         record: &ManifestRecord,
         tf: TimeFrame,
         opts: &TranscodeOptions,
     ) -> Result<RecordOutcome, TranscodeError> {
+        let data_dir = catalog.data_dir();
         let Some(window_stem) = window_stem_of(&record.file_path) else {
             return Ok(RecordOutcome::Skipped {
                 source_file_path: record.file_path.clone(),
@@ -731,6 +956,10 @@ mod imp {
         let mut spread_records_skipped: u64 = 0;
         let mut spread_instruments: BTreeSet<String> = BTreeSet::new();
 
+        // Vendor spelling -> resolved partition key, with the window the answer
+        // holds over (D-0072). Populated on first sight of each contract.
+        let mut keys: BTreeMap<String, ResolvedKey> = BTreeMap::new();
+
         while let Some(msg) = decoder
             .decode_record::<OhlcvMsg>()
             .map_err(|e| undecodable(e.to_string()))?
@@ -789,16 +1018,42 @@ mod imp {
                     spread_instruments.insert(symbol.clone());
                 }
             } else {
-                let wanted = opts
-                    .symbols
-                    .as_ref()
-                    .is_none_or(|filter| filter.iter().any(|s| s == symbol));
-                if wanted && !already.contains(symbol.as_str()) {
-                    let writer = match writers.get_mut(symbol.as_str()) {
+                // The partition key is the CONTRACT, resolved against its own
+                // expiry — not the vendor's one-digit spelling, which repeats
+                // every ten years inside a sixteen-year window (D-0072).
+                // Resolved once per (symbol, key) pair and then remembered:
+                // a symbol's cycle can change within one file, but only where
+                // the file spans a decade boundary, so the cache is keyed on
+                // both the spelling and the resolved answer.
+                ensure_key(
+                    catalog,
+                    cycles,
+                    &mut keys,
+                    record,
+                    symbol.as_str(),
+                    Ts(ts_event),
+                    index,
+                )?;
+                let key = &keys
+                    .get(symbol.as_str())
+                    .expect("INVARIANT: ensure_key inserted it or returned Err")
+                    .key;
+                let wanted = opts.symbols.as_ref().is_none_or(|filter| {
+                    // Either spelling selects the contract: `--symbols ESH4`
+                    // and `--symbols ESH2024` both name it. The first is what
+                    // an operator reads off the vendor's window and may select
+                    // more than one contract; the report names every partition
+                    // written, so the breadth is visible rather than assumed.
+                    filter
+                        .iter()
+                        .any(|s| s.as_str() == symbol.as_str() || s.as_str() == key.as_str())
+                });
+                if wanted && !already.contains(key.as_str()) {
+                    let writer = match writers.get_mut(key.as_str()) {
                         Some(writer) => Some(writer),
                         None => {
                             let source = PartitionSource {
-                                instrument: InstrumentId::new(symbol.as_str()),
+                                instrument: InstrumentId::new(key.as_str()),
                                 tf,
                                 dataset: record.dataset.clone(),
                                 vendor_schema: record.schema.clone(),
@@ -809,10 +1064,10 @@ mod imp {
                             // unless asked; from different bytes it is a refusal.
                             match existing_partition(data_dir, &source, window_stem, record)? {
                                 Some(()) if !opts.force => {
-                                    already.insert(symbol.clone());
+                                    already.insert(key.clone());
                                     None
                                 }
-                                _ => Some(writers.entry(symbol.clone()).or_insert(
+                                _ => Some(writers.entry(key.clone()).or_insert(
                                     PartitionWriter::create(data_dir, source, window_stem)?,
                                 )),
                             }
@@ -972,6 +1227,15 @@ mod imp {
             first_day: (2020, time::Month::April, 20),
             last_day: (2020, time::Month::April, 21),
         };
+        /// The span a `definition` record covers — the real archive's, so the
+        /// fixtures exercise the shape the join actually has.
+        /// 2010-06-06 is epoch day 14,766; 2026-07-28 is 20,663.
+        const DEFINITION_SPAN: Window = Window {
+            start_ns: 14_766 * 86_400_000_000_000,
+            end_ns: 20_663 * 86_400_000_000_000,
+            first_day: (2010, time::Month::June, 6),
+            last_day: (2026, time::Month::July, 28),
+        };
 
         fn date_of(day: (i32, time::Month, u8)) -> time::Date {
             time::Date::from_calendar_date(day.0, day.1, day.2).expect("a real calendar date")
@@ -1042,19 +1306,67 @@ mod imp {
 
         fn catalog_for_in(dir: &TempDir, schema: &str, rel_path: &str, window: Window) -> Catalog {
             let mut catalog = Catalog::open(dir.path()).expect("open catalog");
+            append_record(&mut catalog, schema, rel_path, window, "ES.FUT");
+            catalog
+        }
+
+        fn append_record(
+            catalog: &mut Catalog,
+            schema: &str,
+            rel_path: &str,
+            window: Window,
+            parent: &str,
+        ) {
             catalog
                 .append(Acquisition {
                     dataset: "GLBX.MDP3".to_owned(),
                     schema: schema.to_owned(),
-                    symbols: vec!["ES.FUT".to_owned()],
+                    symbols: vec![parent.to_owned()],
                     range: TsRange::new(Ts(window.start_ns), Ts(window.end_ns))
                         .expect("valid range"),
                     acquired_ts: Ts(window.start_ns),
-                    databento_job_id: "TEST-JOB".to_owned(),
+                    databento_job_id: format!("TEST-JOB-{schema}-{parent}"),
                     file_path: rel_path.to_owned(),
                 })
                 .expect("append");
-            catalog
+        }
+
+        /// Plants the `definition` file a real archive holds for every root the
+        /// fixture's outright symbols name, and records it in the manifest.
+        ///
+        /// Not scaffolding: without it no bar window transcodes at all, because
+        /// a one-digit CME year code cannot say which decade it means (D-0072).
+        /// Expiries are the nominal third Friday of the delivery month — the
+        /// fallback [`nominal_expiry`](crate::continuous::nominal_expiry) exists
+        /// for exactly this, and every fixture bar here sits well inside the
+        /// resulting cycle.
+        fn plant_definitions(dir: &TempDir, catalog: &mut Catalog, symbols: &[(u32, &str)]) {
+            use crate::continuous::expiry::imp::tests::write_definitions;
+            use crate::continuous::{ContractSymbol, nominal_expiry};
+            use databento::dbn::InstrumentClass;
+
+            let mut by_root: BTreeMap<String, Vec<(String, u64)>> = BTreeMap::new();
+            for (_, symbol) in symbols {
+                let Ok(parsed) = ContractSymbol::parse(symbol) else {
+                    continue; // a spread: it carries no outright expiry
+                };
+                let expiry = u64::try_from(nominal_expiry(&parsed).0).expect("after the epoch");
+                by_root
+                    .entry(parsed.root().to_owned())
+                    .or_default()
+                    .push(((*symbol).to_owned(), expiry));
+            }
+            for (root, contracts) in by_root {
+                let parent = format!("{root}.FUT");
+                let rel =
+                    format!("raw/GLBX.MDP3/definition/{parent}/2010-06-06--2026-07-28.dbn.zst");
+                let rows: Vec<(&str, InstrumentClass, u64)> = contracts
+                    .iter()
+                    .map(|(symbol, expiry)| (symbol.as_str(), InstrumentClass::Future, *expiry))
+                    .collect();
+                write_definitions(&dir.path().join(&rel), &rows);
+                append_record(catalog, "definition", &rel, DEFINITION_SPAN, &parent);
+            }
         }
 
         fn ohlcv_1m_rtype() -> u8 {
@@ -1081,8 +1393,24 @@ mod imp {
         fn setup(symbols: &[(u32, &str)], rows: &[Row], rtype: u8) -> (TempDir, Catalog) {
             let dir = TempDir::new();
             write_dbn(&dir.path().join(RAW_PATH), symbols, rows, rtype);
-            let catalog = catalog_for(&dir, "ohlcv-1m", RAW_PATH);
+            let mut catalog = Catalog::open(dir.path()).expect("open catalog");
+            plant_definitions(&dir, &mut catalog, symbols);
+            append_record(&mut catalog, "ohlcv-1m", RAW_PATH, JAN_2024, "ES.FUT");
             (dir, catalog)
+        }
+
+        /// The bar-window outcomes of a report, with the `definition` records'
+        /// "not a bar schema" skips filtered out.
+        ///
+        /// Every fixture archive now holds a `definition` file (it has to —
+        /// D-0072), and `transcode` reports one skip per non-bar record. That
+        /// is correct and uninteresting here.
+        fn bar_outcomes(report: &TranscodeReport) -> Vec<&RecordOutcome> {
+            report
+                .outcomes
+                .iter()
+                .filter(|outcome| !outcome.source_file_path().contains("/definition/"))
+                .collect()
         }
 
         fn bars_of(dir: &TempDir, symbol: &str) -> Vec<MarketEvent> {
@@ -1157,7 +1485,7 @@ mod imp {
                 .iter()
                 .map(|row| {
                     MarketEvent::Bar(crucible_core::events::Bar {
-                        instrument: InstrumentId::new("ESH4"),
+                        instrument: InstrumentId::new("ESH2024"),
                         tf: TimeFrame::M1,
                         ts_open: Ts(row.1),
                         open: Price::from_nanos(row.2),
@@ -1173,7 +1501,7 @@ mod imp {
             let report = transcode(&catalog, &TranscodeOptions::default()).expect("transcode");
             assert_eq!(report.partitions_written(), 1);
             assert_eq!(report.rows_written(), 240);
-            assert_eq!(bars_of(&dir, "ESH4"), expected);
+            assert_eq!(bars_of(&dir, "ESH2024"), expected);
         }
 
         #[test]
@@ -1189,8 +1517,8 @@ mod imp {
             let report = transcode(&catalog, &TranscodeOptions::default()).expect("transcode");
             assert_eq!(report.partitions_written(), 2);
             assert_eq!(report.rows_written(), 5);
-            assert_eq!(bars_of(&dir, "ESH4").len(), 2);
-            assert_eq!(bars_of(&dir, "ESM4").len(), 3);
+            assert_eq!(bars_of(&dir, "ESH2024").len(), 2);
+            assert_eq!(bars_of(&dir, "ESM2024").len(), 3);
         }
 
         #[test]
@@ -1203,10 +1531,15 @@ mod imp {
             };
             let report = transcode(&catalog, &opts).expect("transcode");
             assert_eq!(report.partitions_written(), 1);
-            assert_eq!(bars_of(&dir, "ESH4").len(), 1);
+            assert_eq!(bars_of(&dir, "ESH2024").len(), 1);
             assert!(
-                ParquetBarFeed::open(dir.path(), &InstrumentId::new("ESM4"), TimeFrame::M1, None)
-                    .is_err()
+                ParquetBarFeed::open(
+                    dir.path(),
+                    &InstrumentId::new("ESM2024"),
+                    TimeFrame::M1,
+                    None
+                )
+                .is_err()
             );
         }
 
@@ -1273,7 +1606,9 @@ mod imp {
                 ohlcv_1m_rtype(),
                 APR_2020,
             );
-            let catalog = catalog_for_in(&dir, "ohlcv-1m", rel, APR_2020);
+            let mut catalog = Catalog::open(dir.path()).expect("open catalog");
+            plant_definitions(&dir, &mut catalog, &[(1, "CLK0")]);
+            append_record(&mut catalog, "ohlcv-1m", rel, APR_2020, "CL.FUT");
 
             let report = transcode(&catalog, &TranscodeOptions::default()).expect("transcode");
             assert_eq!(report.partitions_written(), 1);
@@ -1283,7 +1618,7 @@ mod imp {
                 .iter()
                 .map(|row| {
                     MarketEvent::Bar(crucible_core::events::Bar {
-                        instrument: InstrumentId::new("CLK0"),
+                        instrument: InstrumentId::new("CLK2020"),
                         tf: TimeFrame::M1,
                         ts_open: Ts(row.1),
                         open: Price::from_nanos(row.2),
@@ -1294,15 +1629,15 @@ mod imp {
                     })
                 })
                 .collect();
-            assert_eq!(bars_of(&dir, "CLK0"), expected);
+            assert_eq!(bars_of(&dir, "CLK2020"), expected);
 
             // Spelled out, so a future edit to the fixture cannot quietly
             // stop testing the thing this test is named after.
-            let MarketEvent::Bar(settle) = &bars_of(&dir, "CLK0")[2];
+            let MarketEvent::Bar(settle) = &bars_of(&dir, "CLK2020")[2];
             assert_eq!(settle.close, Price::from_nanos(-37_630_000_000));
             assert_eq!(settle.close.to_string(), "-37.63");
             assert_eq!(settle.low, Price::from_nanos(-40_320_000_000));
-            let MarketEvent::Bar(crossing) = &bars_of(&dir, "CLK0")[1];
+            let MarketEvent::Bar(crossing) = &bars_of(&dir, "CLK2020")[1];
             assert_eq!(crossing.close, Price::ZERO);
         }
 
@@ -1358,7 +1693,7 @@ mod imp {
             let (dir, catalog) = setup(&[(1, "ESH4")], &[bar], ohlcv_1m_rtype());
             let report = transcode(&catalog, &TranscodeOptions::default()).expect("transcode");
             assert_eq!(report.rows_written(), 1);
-            let MarketEvent::Bar(written) = &bars_of(&dir, "ESH4")[0];
+            let MarketEvent::Bar(written) = &bars_of(&dir, "ESH2024")[0];
             assert_eq!(written.low, Price::from_nanos(-UNDEF_PRICE));
         }
 
@@ -1376,7 +1711,7 @@ mod imp {
 
             let report = transcode(&catalog, &TranscodeOptions::default()).expect("transcode");
             assert_eq!(report.rows_written(), 2);
-            let bars = bars_of(&dir, "ESH4");
+            let bars = bars_of(&dir, "ESH2024");
             let MarketEvent::Bar(first) = &bars[0];
             assert_eq!(first.low, Price::ZERO);
             let MarketEvent::Bar(second) = &bars[1];
@@ -1402,7 +1737,7 @@ mod imp {
 
             assert_eq!(report.partitions_written(), 1);
             assert_eq!(report.rows_written(), 2);
-            assert_eq!(bars_of(&dir, "ESH4").len(), 2);
+            assert_eq!(bars_of(&dir, "ESH2024").len(), 2);
             assert!(
                 ParquetBarFeed::open(
                     dir.path(),
@@ -1570,7 +1905,7 @@ mod imp {
             let again = transcode(&catalog, &TranscodeOptions::default()).expect("transcode");
             assert_eq!(again.partitions_written(), 0);
             assert!(matches!(
-                again.outcomes.as_slice(),
+                bar_outcomes(&again).as_slice(),
                 [RecordOutcome::AlreadyCurated { partitions: 1, .. }]
             ));
             assert_eq!(again.spread_records_skipped(), 0);
@@ -1584,7 +1919,7 @@ mod imp {
             )
             .expect("transcode");
             assert_eq!(forced.partitions_written(), 1);
-            assert_eq!(bars_of(&dir, "ESH4").len(), 2);
+            assert_eq!(bars_of(&dir, "ESH2024").len(), 2);
         }
 
         // Two raw windows computing one curated path is a naming bug. Silently
@@ -1599,7 +1934,9 @@ mod imp {
                 &[one_bar(1, 0)],
                 ohlcv_1m_rtype(),
             );
-            let catalog = catalog_for(&dir, "ohlcv-1m", RAW_PATH);
+            let mut catalog = Catalog::open(dir.path()).expect("open catalog");
+            plant_definitions(&dir, &mut catalog, &[(1, "ESH4")]);
+            append_record(&mut catalog, "ohlcv-1m", RAW_PATH, JAN_2024, "ES.FUT");
             transcode(&catalog, &TranscodeOptions::default()).expect("first transcode");
 
             // Same window, different bytes, recorded under a second path so the
@@ -1637,6 +1974,217 @@ mod imp {
                 "{err}"
             );
         }
+    }
+}
+
+/// Why nothing already in this codebase could have caught D-0072.
+///
+/// Not decoration and not a regression guard: these two tests assert that the
+/// project's existing ordering and coverage checks **pass** on the merged
+/// partition the bug produced. A defect that every detector waves through is
+/// one you only find by looking, so the record of *which* detectors were blind,
+/// and structurally why, is part of the fix.
+#[cfg(test)]
+mod blind_detector_controls {
+    use crucible_core::traits::Feed;
+    use crucible_core::types::{InstrumentId, Price, TimeFrame, Ts};
+
+    use crate::calendar::Calendar;
+    use crate::curated::{BarColumns, ParquetBarFeed, PartitionSource, write_partition};
+    use crate::qa;
+    use crate::testutil::TempDir;
+
+    const DAY_NS: i64 = 86_400_000_000_000;
+    const MIN_NS: i64 = 60_000_000_000;
+    /// 2014-11-03, epoch day 16,377 — inside the December-2014 gold contract's life.
+    const NOV_2014: i64 = 16_377;
+    /// 2024-11-04, epoch day 20,031 — inside the December-2024 one's, ten years on.
+    const NOV_2024: i64 = 20_031;
+
+    /// Plants the partition the bug produced: one key holding two contracts
+    /// that traded a decade apart, concatenated.
+    ///
+    /// Bars open at 15:00 UTC (09:00 Central), which is inside the CME session
+    /// on both days, so nothing here is out of session on either side of the
+    /// hole.
+    fn plant_merged(dir: &TempDir, instrument: &str, tf: TimeFrame) {
+        let mut bars = BarColumns::default();
+        for day in [NOV_2014, NOV_2024] {
+            for minute in 0..60 {
+                bars.ts_open
+                    .push(day * DAY_NS + 15 * 3_600_000_000_000 + minute * MIN_NS);
+                for column in [
+                    &mut bars.open,
+                    &mut bars.high,
+                    &mut bars.low,
+                    &mut bars.close,
+                ] {
+                    column.push(1_200_000_000_000);
+                }
+                bars.volume.push(10);
+            }
+        }
+        write_partition(
+            dir.path(),
+            PartitionSource {
+                instrument: InstrumentId::new(instrument),
+                tf,
+                dataset: "GLBX.MDP3".to_owned(),
+                vendor_schema: "ohlcv-1m".to_owned(),
+                source_file_path: "raw/GLBX.MDP3/ohlcv-1m/GC.FUT/2010-06-06--2026-07-28.dbn.zst"
+                    .to_owned(),
+                source_file_blake3: "00".repeat(32),
+            },
+            "2010-06-06--2026-07-28",
+            &bars,
+        )
+        .expect("write")
+        .expect("rows");
+    }
+
+    // BLIND DETECTOR 1 — strictly increasing `ts_open`.
+    //
+    // `PartitionWriter::push` refuses a repeated or out-of-order `ts_open`, and
+    // `ParquetBarFeed::open` re-checks it. Both pass here, and they had to: the
+    // two contracts trade in *disjoint sequential* periods, so concatenating
+    // them produces a perfectly ordered series. Order is a statement about
+    // neighbours; aliasing is a statement about identity, and no ordering check
+    // can see it.
+    #[test]
+    fn the_ts_open_monotonicity_check_passes_on_the_merged_partition() {
+        let dir = TempDir::new();
+        plant_merged(&dir, "GCZ4", TimeFrame::M1);
+
+        let mut feed =
+            ParquetBarFeed::open(dir.path(), &InstrumentId::new("GCZ4"), TimeFrame::M1, None)
+                .expect("the writer accepted every row and the reader accepts them back");
+        let mut previous: Option<Ts> = None;
+        let mut count = 0usize;
+        while let Some(crucible_core::events::MarketEvent::Bar(bar)) = feed.next_event() {
+            if let Some(prev) = previous {
+                assert!(bar.ts_open > prev, "the merged series really is ordered");
+            }
+            previous = Some(bar.ts_open);
+            count += 1;
+        }
+        assert_eq!(count, 120, "both contracts' bars are present, in one file");
+
+        // And the span the check was happy with is 3,654 days — the thing a
+        // human would have spotted instantly and no assertion was looking at.
+        let span_days = (previous.expect("bars").0 - (NOV_2014 * DAY_NS)) / DAY_NS;
+        assert_eq!(span_days, NOV_2024 - NOV_2014);
+        assert!(
+            span_days > 3_600,
+            "one gold contract does not live ten years"
+        );
+    }
+
+    // BLIND DETECTOR 2 — gaps inside sessions.
+    //
+    // Two independent reasons it was silent, and the first is the one that
+    // applied to the live archive:
+    //
+    // 1. **No bundled calendar claims GC.** `Calendar::for_instrument` answers
+    //    only for the equity-index roots, so `qa` has no definition of
+    //    "expected" for gold at all: coverage, gaps and out-of-session bars are
+    //    every one of them skipped, and the report says `calendar none`. That is
+    //    the run in the bug report, and it printed "gaps inside sessions none"
+    //    because it never looked.
+    // 2. **The hole falls between sessions.** Even given a calendar, the check
+    //    is defined as missing bars *inside* a session; a ten-year absence is
+    //    almost entirely made of sessions that are wholly absent, which is a
+    //    coverage number, not a gap.
+    #[test]
+    fn the_gap_inside_sessions_check_passes_on_the_merged_partition() {
+        let dir = TempDir::new();
+        plant_merged(&dir, "GCZ4", TimeFrame::M1);
+
+        assert!(
+            Calendar::for_instrument(&InstrumentId::new("GCZ4"))
+                .expect("lookup")
+                .is_none(),
+            "no bundled calendar claims gold — this is reason (1), and it is why \
+             the reported run could not have found anything"
+        );
+
+        let report = qa::run(
+            dir.path(),
+            &InstrumentId::new("GCZ4"),
+            TimeFrame::M1,
+            None,
+            None,
+            &qa::QaOptions::default(),
+        )
+        .expect("qa runs");
+
+        assert!(
+            report.gaps.is_empty() && report.missing_bars == 0,
+            "the detector reports nothing: {report}"
+        );
+        assert_eq!(
+            report.expected_bars, None,
+            "there is no `expected` without a calendar"
+        );
+        assert_eq!(report.bars, 120);
+        // The one number that was visible all along, and that nothing compared
+        // against anything: the span.
+        assert_eq!(
+            report.last_ts_open.expect("bars").0 - report.first_ts_open.expect("bars").0,
+            (NOV_2024 - NOV_2014) * DAY_NS + 59 * MIN_NS
+        );
+    }
+
+    // The positive half: the same two contracts under *resolved* keys are two
+    // partitions, each spanning one hour of one day, and neither spans a decade.
+    // Same bars, same order, same everything the detectors could see — the only
+    // difference is the key (D-0072).
+    #[test]
+    fn resolved_keys_split_the_same_bars_into_two_partitions() {
+        let dir = TempDir::new();
+        let mut spans = Vec::new();
+        for (key, day) in [("GCZ2014", NOV_2014), ("GCZ2024", NOV_2024)] {
+            let mut bars = BarColumns::default();
+            for minute in 0..60 {
+                bars.ts_open
+                    .push(day * DAY_NS + 15 * 3_600_000_000_000 + minute * MIN_NS);
+                for column in [
+                    &mut bars.open,
+                    &mut bars.high,
+                    &mut bars.low,
+                    &mut bars.close,
+                ] {
+                    column.push(Price::from_points(1200).as_nanos());
+                }
+                bars.volume.push(10);
+            }
+            write_partition(
+                dir.path(),
+                PartitionSource {
+                    instrument: InstrumentId::new(key),
+                    tf: TimeFrame::M1,
+                    dataset: "GLBX.MDP3".to_owned(),
+                    vendor_schema: "ohlcv-1m".to_owned(),
+                    source_file_path:
+                        "raw/GLBX.MDP3/ohlcv-1m/GC.FUT/2010-06-06--2026-07-28.dbn.zst".to_owned(),
+                    source_file_blake3: "00".repeat(32),
+                },
+                "2010-06-06--2026-07-28",
+                &bars,
+            )
+            .expect("write")
+            .expect("rows");
+
+            let feed =
+                ParquetBarFeed::open(dir.path(), &InstrumentId::new(key), TimeFrame::M1, None)
+                    .expect("open");
+            spans.push((
+                key,
+                feed.len(),
+                (feed.last_ts_open().expect("bars").0 - feed.first_ts_open().expect("bars").0)
+                    / DAY_NS,
+            ));
+        }
+        assert_eq!(spans, vec![("GCZ2014", 60, 0), ("GCZ2024", 60, 0)]);
     }
 }
 
@@ -1691,7 +2239,7 @@ mod tests {
                     partitions: vec![
                         WrittenPartition {
                             instrument: "ESH4".to_owned(),
-                            path: PathBuf::from("curated/bars/ESH4/1m/2024-01.parquet"),
+                            path: PathBuf::from("curated/bars/ESH2024/1m/2024-01.parquet"),
                             rows: 7,
                         },
                         WrittenPartition {

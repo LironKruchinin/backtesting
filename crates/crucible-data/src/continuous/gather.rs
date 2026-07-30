@@ -161,7 +161,7 @@ mod tests {
         let gathered =
             gather_series(dir.path(), "ES", TimeFrame::M1, DecadeAnchor::DEFAULT).expect("gather");
         let names: Vec<String> = gathered.series.keys().map(ToString::to_string).collect();
-        assert_eq!(names, vec!["ESH24", "ESM24"]);
+        assert_eq!(names, vec!["ESH2024", "ESM2024"]);
         // The archive spelling survives, because it is what names a partition.
         let first = gathered
             .series

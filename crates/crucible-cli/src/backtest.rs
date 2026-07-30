@@ -33,7 +33,7 @@ use crucible_core::prelude::*;
 use crucible_data::calendar::Calendar;
 use crucible_data::catalog::TsRange;
 use crucible_data::curated::{
-    CURATED_SCHEMA_VERSION, CuratedError, ParquetBarFeed, TRANSCODER_VERSION,
+    CURATED_SCHEMA_VERSION, CuratedError, ParquetBarFeed, Resolution, TRANSCODER_VERSION,
 };
 use crucible_data::ingest::money::parse_usd_to_nano;
 use crucible_data::ingest::range_from_dates;
@@ -176,7 +176,10 @@ pub fn run(args: &BacktestArgs) -> i32 {
         }
     };
 
-    let instrument = InstrumentId::new(&args.instrument);
+    let instrument = match resolve_instrument(&dir, settings.tf, &args.instrument) {
+        Ok(id) => id,
+        Err(code) => return code,
+    };
     let mut feed = match ParquetBarFeed::open(&dir, &instrument, settings.tf, settings.range) {
         Ok(feed) => feed,
         Err(e) => {
@@ -634,6 +637,47 @@ fn path_sensitivity_note(path_sensitive_bars: usize, n_protective_exits: usize) 
          \x20 return above as one end of a range, and prefer a wider bracket or a finer\n\
          \x20 timeframe (1s bars resolve most of these) before quoting it."
     )
+}
+
+/// Turns `--instrument` into the curated contract it names, or an exit code.
+///
+/// A curated contract is keyed by its canonical four-digit spelling
+/// (`ESH2024`), but `ESH4` is what the vendor writes and what this project's
+/// own docs used, so the shorthand keeps working wherever it names exactly one
+/// contract — and **refuses where it names two** (D-0072). `GCZ4` is December
+/// 2014 gold and December 2024 gold; picking one would be the very bug the
+/// four-digit key exists to prevent, moved from the archive into the CLI.
+fn resolve_instrument(
+    dir: &std::path::Path,
+    tf: TimeFrame,
+    requested: &str,
+) -> Result<InstrumentId, i32> {
+    match crucible_data::curated::resolve_instrument(dir, tf, requested) {
+        Ok(Resolution::Exact(name)) => {
+            if name != requested {
+                println!("  instrument      {requested} -> {name}");
+            }
+            Ok(InstrumentId::new(&name))
+        }
+        Ok(Resolution::Ambiguous(names)) => {
+            eprintln!(
+                "error: --instrument {requested} names {} curated contracts: {}.\n\
+                 \x20      A one-digit CME year code repeats every ten years and this \
+                 archive spans sixteen, so it is genuinely two contracts, not one \
+                 spelled loosely (D-0072). Name the one you mean.",
+                names.len(),
+                names.join(", ")
+            );
+            Err(EXIT_USAGE)
+        }
+        // Nothing matched: leave the refusal to `ParquetBarFeed::open`, which
+        // already says "not found" and lists what is there.
+        Ok(Resolution::Missing(_)) => Ok(InstrumentId::new(requested)),
+        Err(e) => {
+            eprintln!("error: {e}");
+            Err(EXIT_FAILED)
+        }
+    }
 }
 
 /// Names what *is* transcoded, so "not found" is actionable.

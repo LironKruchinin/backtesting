@@ -536,6 +536,81 @@ pub fn list_instruments(data_dir: &Path, tf: TimeFrame) -> Result<Vec<String>, C
     Ok(out)
 }
 
+/// What a requested instrument name resolved to in the curated store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Resolution {
+    /// The name is on disk exactly as typed, or names exactly one contract.
+    Exact(String),
+    /// A shorthand that names more than one curated contract.
+    ///
+    /// Not an error this module chooses to swallow: `GCZ4` genuinely names two
+    /// contracts a decade apart (D-0072), and answering with either would be a
+    /// coin toss reported as a backtest.
+    Ambiguous(Vec<String>),
+    /// Nothing curated matches, with everything that is there to suggest.
+    Missing(Vec<String>),
+}
+
+/// Resolves an instrument name a human typed against the curated store.
+///
+/// Curated contracts are keyed by their canonical four-digit spelling
+/// (`ESH2024`, D-0072), but the vendor's one-digit spelling is what an operator
+/// reads off a symbology listing, and `ESH4` is what this project's own docs
+/// used for years. So a shorthand still works — **when it is unambiguous**:
+///
+/// - an exact directory name wins outright, with no search;
+/// - otherwise every curated contract the shorthand could name is collected,
+///   and one match resolves;
+/// - **two or more matches refuse.** `GCZ4` is December-2014 gold *and*
+///   December-2024 gold, and this project does not answer an ambiguous
+///   question with one of its answers.
+///
+/// Names that are not contracts at all (`SYN:RW`, `ES.v.0`, a spread) only ever
+/// match exactly, since they have no year to be short about.
+///
+/// # Errors
+/// [`CuratedError::Io`] or [`CuratedError::UndecodableInstrumentDir`] via
+/// [`list_instruments`].
+pub fn resolve_instrument(
+    data_dir: &Path,
+    tf: TimeFrame,
+    requested: &str,
+) -> Result<Resolution, CuratedError> {
+    let available = list_instruments(data_dir, tf)?;
+    if available.iter().any(|name| name == requested) {
+        return Ok(Resolution::Exact(requested.to_owned()));
+    }
+    let Ok(wanted) = crate::continuous::parse_parts(requested) else {
+        return Ok(Resolution::Missing(available));
+    };
+    // A shorthand names a contract whose root and month match and whose year
+    // agrees on the digits that were written — one digit means "≡ mod 10", two
+    // mean "≡ mod 100".
+    let modulus = match wanted.year_digits {
+        1 => 10,
+        2 => 100,
+        _ => return Ok(Resolution::Missing(available)),
+    };
+    let mut matches: Vec<String> = available
+        .iter()
+        .filter(|name| {
+            crate::continuous::parse_parts(name).is_ok_and(|have| {
+                have.year_digits == 4
+                    && have.root == wanted.root
+                    && have.month == wanted.month
+                    && have.year_value % modulus == wanted.year_value
+            })
+        })
+        .cloned()
+        .collect();
+    matches.sort();
+    match matches.len() {
+        0 => Ok(Resolution::Missing(available)),
+        1 => Ok(Resolution::Exact(matches.remove(0))),
+        _ => Ok(Resolution::Ambiguous(matches)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

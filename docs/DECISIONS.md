@@ -1500,3 +1500,129 @@ propose a superseding entry — don't silently diverge.
   no-quality-exemption clause buys: the gap was invisible to `fmt`, `clippy`,
   a green `cargo test --workspace --all-features`, and all three determinism
   hashes.
+- **D-0072** (2026-07-30) — **The curated partition key is an expiry-resolved
+  contract with a four-digit year (`curated/bars/GCZ2014/`), not the vendor's
+  raw symbol. A bar whose contract cannot be resolved refuses the file.**
+  *Supersedes D-0036's `{instrument}` where that instrument is a futures
+  contract; the file naming, the footer metadata, and the one-file-per-source-
+  window rule are untouched. Narrows D-0046's "the constant remains what curated
+  bar partitions parse against" — that clause was the bug.*
+  **The measurement.** A CME year code is one digit, so it repeats every ten
+  years; every bar window in this archive is sixteen years long (2010-06-06 →
+  2026-07-28). By pigeonhole, contracts alias. They did: `GC.FUT ohlcv-1m` wrote
+  exactly **120 partitions = 12 month codes × 10 year digits**, and there was not
+  one two-digit year code anywhere under `curated/bars/`. `crucible qa
+  --instrument GCZ4 --timeframe 1m` reported `span 2010-06-08T17:09:00Z ..
+  2024-12-27T18:03:00Z (310234 bars)` — a December-2014 gold contract does not
+  trade for 14.5 years. That file was Dec-2014 gold and Dec-2024 gold
+  concatenated. Decoding all seven roots' `ohlcv-1m` windows against their
+  `definition` files puts a number on the scope: **101 of GC's 120** raw outright
+  symbols have a first and a last bar belonging to *different* contracts, 111 of
+  CL's 136, 31 of NQ's 40, 31 of 6E's, 28 of ZN's, 20 of ES's — and RTY's 0,
+  because RTY only lists from 2017. `layout-check` finds **173** offending
+  directories in the live tree, which is every outright one.
+  **Why both existing detectors were structurally blind, which is the part worth
+  keeping.** `PartitionWriter::push` enforces strictly increasing `ts_open` and
+  passed, because the two contracts trade in *disjoint sequential* periods and
+  concatenate in perfect order — ordering is a statement about neighbours,
+  aliasing is a statement about identity, and no ordering check can see it.
+  `qa`'s gap detector reported "gaps inside sessions none" for two independent
+  reasons: no bundled calendar claims GC, so `qa` had no definition of "expected"
+  and skipped coverage entirely (it printed `calendar none`); and even given a
+  calendar, a ten-year absence is whole missing *sessions*, which is a coverage
+  number, not a gap *inside* one. Both facts are now asserted as tests on the
+  merged fixture (`transcode::blind_detector_controls`), so the record says which
+  detectors could not have caught it rather than leaving it to be rediscovered.
+  **The device, reused rather than paralleled.** `expiry.rs` already solved this
+  exact ambiguity on the `definition` path (D-0046, amended): a 16-year file
+  contains `ESM0` twice, and the record separates them by resolving the one-digit
+  year against **the contract's own expiry** instead of a constant. The `ohlcv`
+  path now uses the same rule through the same types — `ContractCycles::resolve`
+  takes a vendor symbol and a bar's `ts_open` and answers which cycle it printed
+  in. No second contract-symbol type was invented; `ContractSymbol`,
+  `DecadeAnchor` and `parse_parts` are shared, and the decode of a `definition`
+  file is one pass with two policies over it. A `DecadeAnchor` constant is **not**
+  a fallback and must never become one: it has an answer for `GCZ4` and it is
+  right for half the bars, which is precisely how this shipped.
+  **The window rule.** A contract owns `(previous same-family expiry, its own
+  expiry]` — same root, month code and year digit, so the previous member is
+  exactly ten years earlier. The windows tile with no gap and no overlap, so the
+  answer is unique when it exists. A family's earliest member opens
+  `CONTRACT_CYCLE_DAYS` (3,653 — the most days ten Gregorian years hold) before
+  its expiry; that bound is load-bearing only there, and nothing legitimate comes
+  near it, because the longest CME listing horizon is crude oil's nine years.
+  Measured: same-family expiry gaps in this archive run **3,647 to 3,657** days
+  (the expiry date drifts within its month), which is exactly why the
+  multi-member case uses the neighbour's expiry rather than the constant. **Every
+  outright bar in the archive resolves** — zero unresolved records across all
+  seven roots.
+  **The refusal, and why refuse-the-whole-file is right here and nowhere else.**
+  No expiry, or no cycle containing the bar, refuses the source file
+  (`TranscodeError::UnresolvedContract`). D-0070 made spread exclusion a
+  *declared filter with a count* on the argument that a spread is not corrupt —
+  it is a record nothing replays yet. This is the opposite case: a bar filed
+  under the wrong contract is corruption of *meaning*, it looks exactly like
+  correct data, and the silent path is what produced the defect. A missing
+  `definition` therefore fails loudly. Curated data is disposable, so a refusal
+  costs one re-run. All seven parents hold a 16-year `definition` file, so the
+  join is satisfiable today.
+  **What is deliberately NOT resolved.** A symbol that does not parse as an
+  outright keeps the vendor's spelling — which is D-0070's rule unchanged, since
+  this predicate gates a *rename* and an unrecognised shape must stay visible
+  rather than be refused. Every spread lands there (`ESH4-ESM4`,
+  `CL:BF F0-G0-H0`), so a spread partition written under `--include-spreads`
+  still carries the vendor's decade ambiguity. Bounded and stated rather than
+  hidden: nothing in this project replays a spread, the flag is off by default,
+  and making spreads replayable means resolving their legs first. Two- and
+  four-digit years are absolute and need no lookup at all — the vendor itself
+  switches to two digits for far-dated listings, and 16 such contracts
+  (`CLZ30`…`CLZ36`) trade in the CL window.
+  **Why four digits and not two.** Two would be arithmetically unambiguous and
+  still ambiguous to a reader: `GCZ14` is one character from the vendor's `GCZ4`,
+  and `CLZ36` is a real vendor spelling meaning 2036, so a listing mixing our
+  keys with the archive's would depend on knowing which convention wrote each
+  name. Four digits cannot collide with a CME year code, which has at most two.
+  `ContractSymbol`'s `Display` renders it and `parse` accepts 1, 2 and 4 digits —
+  a strictly widening parser, landing in the same commit as the writer, with the
+  four-digit form floored at 1970 so `ZN1234` does not parse as root `Z`, month
+  `N`, year 1234.
+  **A latent regression this found and fixed.** `calendar` carried its own
+  contract-recognition rule ("a month code and one or two year digits"), a third
+  spelling of the same idea. Under it `ESH2024` stopped being an ES contract,
+  **no calendar claimed it**, and `backtest` silently fell back to measuring
+  `bars_per_year` from the sample — changing the annualization factor and
+  therefore every Sharpe (D-0039), with nothing failing. `Calendar::governs` now
+  takes the root from `parse_parts`. One parser, one answer, and a control
+  asserting all three spellings of one contract reach the same calendar.
+  **CLI ergonomics.** `backtest --instrument ESH4` still works and prints
+  `ESH4 -> ESH2024`, because a shorthand naming exactly one curated contract is
+  not ambiguous. One that names two **refuses and lists them**: on the live
+  archive `--instrument GCZ4` now says "names 2 curated contracts: GCZ2014,
+  GCZ2024". Answering it with either would be this same bug moved from the
+  archive into the CLI. CLAUDE.md §10 is switched to the canonical spelling so
+  the documented command stops depending on how much of the archive is
+  transcoded.
+  **Executed on the live archive.** The contaminated tree was deleted (214
+  directories, 230 files, 241 MB — 173 aliased outrights, 41 spreads; `raw/`
+  untouched) and `GC.FUT ohlcv-1m` rebuilt: **221 partitions, 10,275,830 bars,
+  5,255,371 spread records across 1,308 instruments excluded** — bar and spread
+  counts *identical* to the run recorded in D-0070, so the data was re-keyed and
+  not re-counted. `GCZ2014` spans **2010-06-08T17:09:00Z .. 2014-12-29T17:44:00Z
+  (145,850 bars)** and `GCZ2024` spans **2019-06-21T11:14:00Z ..
+  2024-12-27T18:03:00Z (164,384 bars)**; 145,850 + 164,384 = **310,234**, exactly
+  what the merged `GCZ4` held, and the merged span was precisely the earlier
+  contract's start joined to the later one's end. `layout-check` is clean. The M1
+  acceptance run reproduces bit-identically — 30,167 bars, −23.51 %, 665 round
+  trips, 27.1 % win rate, $76,486.25 — and all three determinism hashes are
+  unmoved (demo `b55747513df596ed`, combo `0e1ab52d474b862b`, walk-forward
+  `711e1cb34a2ee2b4`), because `configs/combo-smoke.toml` declares `SYN:RW`,
+  which carries no year to resolve.
+  **Found and left alone.** `expiries_from_definitions` — the *roll* reader —
+  refuses the real `GC.FUT` definition file, because `GCX1` is defined twice with
+  expiries **one hour apart** (`6EM23`: seventy-two hours). D-0046 chose that
+  refusal deliberately, and a calendar roll firing on a different session is a
+  real consequence, so it is not weakened here. The *cycle* reader tolerates it
+  and refuses only `ExpiryYearConflict`, two expiries in different years, where
+  the identity itself becomes unknowable — measured at zero across all seven
+  roots. Reported rather than hotfixed: `crucible rolls --expiries auto` on GC
+  still exits 4, and superseding D-0046 is its own decision.

@@ -369,14 +369,38 @@ fn halts_and_holidays_reduce_the_annualization_factor() {
 #[test]
 fn governs_matches_contracts_but_not_neighbouring_roots() {
     let cal = shaped();
-    for yes in ["ES", "ESH4", "ESH24", "ESZ9", "ES.FUT", "ES.v.0", "NQM5"] {
+    for yes in [
+        "ES", "ESH4", "ESH24", "ESZ9", "ES.FUT", "ES.v.0", "NQM5", "ESH2024", "NQZ2010",
+    ] {
         assert!(cal.governs(yes), "{yes} should be governed");
     }
     for no in [
-        "ESG", "MES", "ESH", "ESHH4", "CL", "CLM4", "SYN:RW", "", "E",
+        "ESG", "MES", "ESH", "ESHH4", "CL", "CLM4", "SYN:RW", "", "E", "CLZ2036",
     ] {
         assert!(!cal.governs(no), "{no} should not be governed");
     }
+}
+
+// The control for the regression D-0072 nearly shipped. Curated contracts are
+// now keyed `ESH2024`, and this module used to recognise a contract by its own
+// rule — "a month code and one or two year digits" — so a four-digit key stopped
+// being an ES contract, no calendar claimed it, and `backtest` silently fell
+// back to measuring `bars_per_year` from the sample. That changes the
+// annualization factor, which changes every Sharpe (D-0039), and nothing would
+// have failed. All three spellings must name the same contract to the calendar,
+// because they name the same contract to everything else.
+#[test]
+fn every_spelling_of_one_contract_is_governed_by_the_same_calendar() {
+    let mut ids = Vec::new();
+    for spelling in ["ESH4", "ESH24", "ESH2024"] {
+        let calendar = Calendar::for_instrument(&InstrumentId::new(spelling))
+            .expect("tables parse")
+            .unwrap_or_else(|| panic!("{spelling} must be claimed by the CME equity-index table"));
+        ids.push(calendar.id().to_owned());
+    }
+    assert_eq!(ids[0], ids[1]);
+    assert_eq!(ids[1], ids[2]);
+    assert_eq!(ids[0], "cme_globex_equity_index");
 }
 
 #[test]

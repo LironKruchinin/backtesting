@@ -145,6 +145,46 @@ pub enum ContinuousError {
         /// The expiry recorded second.
         second: Ts,
     },
+    /// Two definition records for one contract expire in different *years*, so
+    /// the one-digit year cannot be resolved from the record at all.
+    ///
+    /// Weaker than [`ContinuousError::ExpiryConflict`] on purpose: an hour's
+    /// disagreement about when `GCX1` settled does not make it a different
+    /// contract, and the real archive carries such disagreements (D-0072). A
+    /// year's does.
+    ExpiryYearConflict {
+        /// The contract as the vendor spells it.
+        contract: String,
+        /// Earliest expiry recorded for it.
+        earliest: Ts,
+        /// Latest expiry recorded for it.
+        latest: Ts,
+    },
+    /// Two contracts a one-digit year code cannot tell apart are less than a
+    /// decade apart, so they are not the ten-year repeat that code describes.
+    ContractCycleCollision {
+        /// The earlier contract.
+        first: String,
+        /// The later one.
+        second: String,
+        /// Days between their expiries.
+        apart_days: i64,
+    },
+    /// A vendor symbol and a timestamp did not name one contract.
+    ///
+    /// The refusal that keeps two contract cycles out of one curated partition
+    /// (D-0072). Carries the candidates so an operator can see *why* the answer
+    /// was not unique rather than being told it was not.
+    UnresolvedContract {
+        /// The vendor symbol, as written.
+        symbol: String,
+        /// The bar timestamp the symbol had to be resolved at.
+        ts: Ts,
+        /// Contracts of this root, month and year digit that the archive's
+        /// `definition` file knows, with the expiry of each. Empty means the
+        /// definition file named none at all.
+        candidates: Vec<(String, Ts)>,
+    },
 }
 
 impl core::fmt::Display for ContinuousError {
@@ -259,6 +299,62 @@ impl core::fmt::Display for ContinuousError {
                  roll decided from that contract depends on which is true, so picking \
                  one would make the table unreproducible"
             ),
+            ContinuousError::ExpiryYearConflict {
+                contract,
+                earliest,
+                latest,
+            } => write!(
+                f,
+                "{contract} is defined expiring at {earliest} and also at {latest}, \
+                 which fall in different years. The year is what resolves a one-digit \
+                 contract code, so the definition file does not say which contract \
+                 this is — and a partition key that names the wrong decade is the \
+                 corruption this check exists to prevent"
+            ),
+            ContinuousError::ContractCycleCollision {
+                first,
+                second,
+                apart_days,
+            } => write!(
+                f,
+                "{first} and {second} share a one-digit year code but expire \
+                 {apart_days} day(s) apart. That code repeats every ten years, so two \
+                 contracts it cannot distinguish must be about a decade apart; these \
+                 are not, which means the definition file dated at least one of them \
+                 into the wrong decade. Resolving a bar against these would file it \
+                 under a contract chosen by rounding"
+            ),
+            ContinuousError::UnresolvedContract {
+                symbol,
+                ts,
+                candidates,
+            } => {
+                if candidates.is_empty() {
+                    write!(
+                        f,
+                        "{symbol} has a one-digit year and the archive's `definition` \
+                         file names no contract it could be. A one-digit year repeats \
+                         every ten years, so without an expiry to anchor it there is \
+                         no way to say which decade this bar belongs to. Acquire the \
+                         `definition` schema for this root over the same span:\n\
+                         \x20      crucible pull --schema definition --symbols <ROOT>.FUT …"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "{symbol} at {ts} matches no contract cycle. Known contracts \
+                         for this root, month and year digit: {}. A bar outside every \
+                         cycle means the definition file and the bar file disagree \
+                         about what traded, and guessing would file it under a \
+                         contract that was not trading",
+                        candidates
+                            .iter()
+                            .map(|(name, expiry)| format!("{name} (expires {expiry})"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
+            }
         }
     }
 }

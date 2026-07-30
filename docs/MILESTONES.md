@@ -99,13 +99,16 @@ deadline-driven (see `crucible-data::ingest` module docs).
       exit 4 on findings (D-0040). Its first real run corrected the calendar
       - [x] Archive layout enforced (2026-07-28): `docs/DATA_LAYOUT.md` pins
             the tree and `crucible layout-check` refuses on any departure —
-            six violation classes, each with a negative control, exit 4
-            (D-0049). Complements `verify`: shape, not bytes
+            eight violation classes, each with a negative control, exit 4
+            (D-0049, D-0072). Complements `verify`: shape, not bytes
 
 **Acceptance:** one command takes a fresh machine (with API key) to a
 validated local ES archive; the demo strategy runs on real ES 1m bars.
 *Second half met 2026-07-28:* `pull → verify → transcode → backtest` on real
 ESH4 January-2024 1m bars, 30,167 bars, −23.51% under `spread_cross`.
+*Reproduced bit-identically 2026-07-30* after D-0072 re-keyed the curated store;
+the contract is now spelled `ESH2024` and `--instrument ESH4` still resolves to
+it while it is the only ESH the store holds.
 
 ## M2 — Engine hardening + combos (~3–4 weeks)
 

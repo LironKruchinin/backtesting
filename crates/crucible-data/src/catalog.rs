@@ -758,6 +758,33 @@ impl Catalog {
             .find(|r| r.file_blake3 == file_blake3)
     }
 
+    /// Absolute path of an archived `definition` file covering `root`, or
+    /// `None` if nothing in the manifest names one.
+    ///
+    /// Goes through the manifest rather than guessing a path, so the file a
+    /// caller reads is one the catalog vouches for (D-0014). Returns the most
+    /// recently acquired match, since a later pull of the same parent key is a
+    /// superset of an earlier one.
+    ///
+    /// Two callers, and they are the reason this lives here rather than in
+    /// either of them: `crucible rolls` needs expiries to decide *when* to
+    /// roll, and `transcode` needs them to decide *which contract a bar is*
+    /// (D-0072). One lookup, one definition of "the archive's definition file".
+    #[must_use]
+    pub fn definition_file(&self, root: &str) -> Option<PathBuf> {
+        let key = format!("{root}.FUT");
+        let mut best: Option<&ManifestRecord> = None;
+        for record in &self.state.records {
+            if record.schema != "definition" || !record.symbols.contains(&key) {
+                continue;
+            }
+            if best.is_none_or(|b| record.acquired_ts > b.acquired_ts) {
+                best = Some(record);
+            }
+        }
+        best.map(|record| self.data_dir.join(&record.file_path))
+    }
+
     /// Validates the acquisition, hashes the file on disk, appends one
     /// record line to `manifest.jsonl` (single write + fsync), and returns
     /// the completed record.

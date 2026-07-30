@@ -37,7 +37,7 @@ const HEALTHY: &[&str] = &[
     "pull.lock",
     "raw/GLBX.MDP3/ohlcv-1m/ES.FUT/2024-01.dbn.zst",
     "raw/GLBX.MDP3/definition/ES.FUT/2010-06-06--2026-07-28.dbn.zst",
-    "curated/bars/ESH4/1m/2024-01.parquet",
+    "curated/bars/ESH2024/1m/2024-01.parquet",
     "curated/rolls/ES/1m/v-confirm1.json",
     "staging/",
     "delivery/GLBX-20260728-TQE7SY3VTC/condition.json",
@@ -190,7 +190,7 @@ fn detects_an_unparseable_manifest_path() {
         &[
             record("raw/GLBX.MDP3/ohlcv-1m/ES.FUT/2024-01.dbn.zst"),
             record("raw/GLBX.MDP3/ES.FUT/2024-01.dbn.zst"),
-            record("curated/bars/ESH4/1m/2024-01.parquet"),
+            record("curated/bars/ESH2024/1m/2024-01.parquet"),
         ],
     );
     let paths: Vec<&Finding> = report
@@ -228,11 +228,11 @@ fn detects_parquet_under_raw() {
 // Class 4b: a DBN file under curated/.
 #[test]
 fn detects_dbn_under_curated() {
-    let dir = build(&["curated/bars/ESH4/1m/2024-01.dbn.zst"]);
+    let dir = build(&["curated/bars/ESH2024/1m/2024-01.dbn.zst"]);
     let report = check_ok(&dir, &[]);
     assert!(
         report.findings.contains(&Finding::WrongTree {
-            path: "curated/bars/ESH4/1m/2024-01.dbn.zst".to_owned(),
+            path: "curated/bars/ESH2024/1m/2024-01.dbn.zst".to_owned(),
             found_under: "curated",
             belongs_under: "raw",
         }),
@@ -243,11 +243,11 @@ fn detects_dbn_under_curated() {
 // Class 5: a curated file outside kind/instrument/tf.
 #[test]
 fn detects_a_curated_file_at_the_wrong_depth() {
-    let dir = build(&["curated/bars/ESH4/2024-01.parquet"]);
+    let dir = build(&["curated/bars/ESH2024/2024-01.parquet"]);
     let report = check_ok(&dir, &[]);
     assert!(
         report.findings.contains(&Finding::CuratedWrongDepth {
-            path: "curated/bars/ESH4/2024-01.parquet".to_owned(),
+            path: "curated/bars/ESH2024/2024-01.parquet".to_owned(),
             depth: 3,
             expected: 4,
         }),
@@ -263,6 +263,69 @@ fn detects_an_unknown_curated_kind() {
         report.findings.contains(&Finding::UnknownCuratedKind {
             kind: "quotes".to_owned(),
         }),
+        "{report}"
+    );
+}
+
+// Class 8 (D-0072): a curated contract directory whose year is one digit. The
+// whole live `curated/bars/` tree looked like this, and every other check in
+// this file passed on it — which is why this class exists.
+#[test]
+fn detects_a_single_digit_year_curated_contract() {
+    let dir = build(&[
+        "curated/bars/GCZ4/1m/2010-06-06--2026-07-28.parquet",
+        "curated/bars/6EU6/1m/2010-06-06--2026-07-28.parquet",
+    ]);
+    let report = check_ok(&dir, &[]);
+    assert!(
+        report
+            .findings
+            .contains(&Finding::AmbiguousCuratedContract {
+                instrument: "GCZ4".to_owned(),
+                example: "GCZ2024".to_owned(),
+            }),
+        "{report}"
+    );
+    assert!(
+        report
+            .findings
+            .contains(&Finding::AmbiguousCuratedContract {
+                instrument: "6EU6".to_owned(),
+                example: "6EU2026".to_owned(),
+            }),
+        "{report}"
+    );
+    // The message has to be the whole remedy: there is no --fix (D-0049), so
+    // it must say what to type.
+    let text = report.to_string();
+    assert!(text.contains("four-digit year"), "{text}");
+    assert!(text.contains("rm -rf curated/bars"), "{text}");
+}
+
+// The other half of the control: everything that legitimately lives at that
+// level must NOT fire. A root under `rolls/` carries no year (a roll is about
+// two contracts at once, D-0045); a synthetic instrument and a spread are not
+// outright contracts at all; and a two-digit key is unambiguous even though it
+// is not the canonical spelling.
+#[test]
+fn the_ambiguous_contract_check_fires_only_on_contract_keys() {
+    let dir = build(&[
+        "curated/bars/ESH2024/1m/2024-01.parquet",
+        "curated/bars/SYN%3ARW/1s/x.parquet",
+        "curated/bars/ESH4-ESM4/1m/2024-01.parquet",
+        "curated/bars/ES.v.0/1m/x.parquet",
+        "curated/rolls/ES/1m/v-confirm1.json",
+        // A root that happens to end in a month letter and a digit would be a
+        // false positive under a laxer rule; `rolls/` is keyed by root and is
+        // not checked at all.
+        "curated/rolls/6E/1m/v-confirm1.json",
+    ]);
+    let report = check_ok(&dir, &[]);
+    assert!(
+        !report
+            .findings
+            .iter()
+            .any(|f| matches!(f, Finding::AmbiguousCuratedContract { .. })),
         "{report}"
     );
 }
@@ -306,7 +369,7 @@ fn raw_paths_parse_into_their_pieces() {
 #[test]
 fn malformed_raw_paths_are_rejected_with_a_reason() {
     for (path, needle) in [
-        ("curated/bars/ESH4/1m/x.parquet", "must start with raw/"),
+        ("curated/bars/ESH2024/1m/x.parquet", "must start with raw/"),
         (
             "raw/GLBX.MDP3/ohlcv-1m/x.dbn.zst",
             "component(s); expected 5",
@@ -330,7 +393,7 @@ fn malformed_raw_paths_are_rejected_with_a_reason() {
 #[test]
 fn the_shapes_this_codebase_writes_are_accepted() {
     let dir = build(&[
-        "curated/bars/ESH4/1m/2024-01.parquet",
+        "curated/bars/ESH2024/1m/2024-01.parquet",
         "curated/bars/SYN%3ARW/1s/x.parquet",
         "curated/bars/ESH4-ESM4/1m/2024-01.parquet",
         "curated/rolls/ES/1m/v-confirm1.json",
@@ -372,7 +435,7 @@ fn a_wrong_depth_message_names_the_depth_the_entry_should_have_had() {
     );
 
     let curated = Finding::CuratedWrongDepth {
-        path: "curated/bars/ESH4/2024-01.parquet".to_owned(),
+        path: "curated/bars/ESH2024/2024-01.parquet".to_owned(),
         depth: 3,
         expected: 4,
     };

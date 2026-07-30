@@ -10,7 +10,7 @@
 //! curated/bars/{instrument}/{tf}/{source_window_stem}.parquet
 //! ```
 //!
-//! e.g. `curated/bars/ESH4/1m/2024-01.parquet`, transcoded from
+//! e.g. `curated/bars/ESH2024/1m/2024-01.parquet`, transcoded from
 //! `raw/GLBX.MDP3/ohlcv-1m/ES.FUT/2024-01.dbn.zst`.
 //!
 //! One raw file fans out into **one curated file per instrument**, each named
@@ -98,7 +98,9 @@ mod write;
 
 pub use error::CuratedError;
 pub use meta::{CuratedMeta, PartitionSource};
-pub use read::{CuratedSource, ParquetBarFeed, list_instruments, read_meta};
+pub use read::{
+    CuratedSource, ParquetBarFeed, Resolution, list_instruments, read_meta, resolve_instrument,
+};
 pub use write::{PartitionWriter, write_partition};
 
 /// Directory under the data dir holding every curated bar partition.

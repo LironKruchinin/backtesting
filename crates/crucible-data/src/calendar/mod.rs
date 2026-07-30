@@ -363,15 +363,25 @@ impl Calendar {
         self.governs(instrument) || Self::matches_any(&self.day_level_roots, instrument)
     }
 
-    /// Whether any root in `roots` prefixes the instrument.
+    /// Whether any root in `roots` is the instrument's product root.
+    ///
+    /// The root is taken from [`parse_parts`], the one place a contract symbol
+    /// is split into root + month + year (D-0072). This module used to carry
+    /// its own rule — "a month code and one or two year digits" — and a third
+    /// spelling of the same idea is a third thing to keep in step: when curated
+    /// keys grew a four-digit year, that rule silently stopped recognising
+    /// `ESH2024` as an ES contract and the CME calendar quietly stopped
+    /// governing it, which changes the annualization factor and therefore every
+    /// Sharpe (D-0039). One parser, one answer.
+    ///
+    /// Names that are not contracts at all (`ES.FUT`, `SPY`, `VIX`, a
+    /// continuous alias) match a root only by equality, which is what they mean.
     fn matches_any(roots: &[String], instrument: &str) -> bool {
         let candidate = strip_series_suffix(instrument);
-        roots.iter().any(|root| {
-            candidate == root
-                || candidate
-                    .strip_prefix(root.as_str())
-                    .is_some_and(is_contract_suffix)
-        })
+        let root_of = crate::continuous::parse_parts(candidate)
+            .map(|parts| parts.root)
+            .unwrap_or(candidate);
+        roots.iter().any(|root| root_of == root)
     }
 
     /// Narrows this calendar to the questions it can answer about **dates**.
@@ -963,20 +973,6 @@ fn strip_series_suffix(instrument: &str) -> &str {
         Some((root, _)) => root,
         None => instrument,
     }
-}
-
-/// True when `rest` looks like a CME contract suffix: one month code followed
-/// by a one- or two-digit year.
-fn is_contract_suffix(rest: &str) -> bool {
-    let mut chars = rest.chars();
-    let Some(month) = chars.next() else {
-        return false;
-    };
-    if !"FGHJKMNQUVXZ".contains(month) {
-        return false;
-    }
-    let digits: Vec<char> = chars.collect();
-    matches!(digits.len(), 1 | 2) && digits.iter().all(char::is_ascii_digit)
 }
 
 #[cfg(test)]

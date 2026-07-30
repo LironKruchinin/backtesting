@@ -203,25 +203,33 @@ mod tests {
         }
     }
 
+    // The instrument given is the instrument filed: this module encodes a name,
+    // it does not resolve one. Which contract `ESH4` means is settled upstream,
+    // in `transcode`, against the contract's own expiry (D-0072) — so what
+    // reaches here is already the four-digit key.
     #[test]
     fn partition_paths_are_built_from_the_pieces() {
         let dir = partition_dir(
             Path::new("/data"),
-            &InstrumentId::new("ESH4"),
+            &InstrumentId::new("ESH2024"),
             TimeFrame::M1,
         )
         .expect("ok");
-        assert!(dir.ends_with("curated/bars/ESH4/1m"), "{}", dir.display());
+        assert!(
+            dir.ends_with("curated/bars/ESH2024/1m"),
+            "{}",
+            dir.display()
+        );
 
         let file = partition_file(
             Path::new("/data"),
-            &InstrumentId::new("ESH4"),
+            &InstrumentId::new("ESH2024"),
             TimeFrame::M1,
             "2024-01",
         )
         .expect("ok");
         assert!(
-            file.ends_with("curated/bars/ESH4/1m/2024-01.parquet"),
+            file.ends_with("curated/bars/ESH2024/1m/2024-01.parquet"),
             "{}",
             file.display()
         );
