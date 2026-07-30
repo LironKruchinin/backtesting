@@ -1,0 +1,158 @@
+# Topstep 100K -- Trading Combine
+#
+# An ACCOUNT, as data. Pairs with a strategy config (`configs/*-combo.toml`) to
+# form one evaluation identity; the methodology, the engine capture contract and
+# the metric battery live in `docs/ACCOUNT_EVAL_SPEC.md`. Nothing here describes
+# execution costs — those stay in the strategy config's named `[execution]` fill
+# model (CLAUDE.md §2.4), because an account rule and a cost assumption are
+# different claims and must not share a field.
+#
+# Money is a decimal STRING in USD (D-0027); the loader parses it to
+# `_nano_usd` integers. Percentages are f64 on a 0-100 scale (§4).
+#
+# VERIFICATION: every number below was read off the firm's own page on
+# 2026-07-30. Sources and access date are in `[source]`. Where the page is
+# ambiguous or silent the field is ABSENT and the gap is named in
+# `docs/ACCOUNT_EVAL_SPEC.md` §8 — this file never carries a number that was
+# inferred, remembered, or taken from an aggregator.
+#
+# DISAGREES WITH THE WORKING BASELINE (verified figure wins, both recorded):
+#   - the max loss limit is NOT a simple EOD trail. The LEVEL updates on the
+#     highest end-of-day balance; the BREACH is tested in real time on
+#     unrealized P&L. A model that only checks daily closes is wrong about
+#     this account, not approximately right about it.
+#   - there is no '5 winning days' requirement to pass the Combine. Minimum
+#     is 2 trading days. The five winning days of $150+ are an Express Funded
+#     Account PAYOUT gate, a different object.
+#   - the consistency rule is not '30% of total profit'. In the Combine it is
+#     best day <= 50% of the PROFIT TARGET, and breaching it RAISES the
+#     target rather than failing the account. The 40%-of-net-profit figure
+#     belongs to the Express Funded Consistency payout path.
+#   - the daily loss limit is OPTIONAL in the Combine and the XFA on
+#     TopstepX, automatic in the Live Funded Account.
+
+schema_version = 1
+
+[account]
+id = "topstep_100k"
+firm = "Topstep"
+product = "Trading Combine"
+phase = "evaluation"
+kind = "prop_evaluation"
+# The label the firm sells. For a prop account it is buying power,
+# not always money in the account; `starting_balance_usd` is the
+# number the threshold arithmetic uses.
+nominal_size_usd = "100000"
+starting_balance_usd = "100000"
+
+[source]
+rule_pages = [
+  "https://help.topstep.com/en/articles/8284197-trading-combine-parameters",
+  "https://help.topstep.com/en/articles/8284204-what-is-the-maximum-loss-limit",
+  "https://help.topstep.com/en/articles/10490293-daily-loss-limit-in-the-trading-combine-and-express-funded-account",
+  "https://help.topstep.com/en/articles/8284208-what-is-the-consistency-target",
+  "https://help.topstep.com/en/articles/8284233-topstep-payout-policy",
+  "https://www.topstep.com/express-funded-account-rules",
+]
+accessed_date = "2026-07-30"
+page_last_updated = "2025-06-26"
+
+[session]
+# The firm's trading day, which is NOT the exchange session. Daily PnL is
+# sliced on this day boundary via `crucible-data::calendar` (§4 pins fold
+# windows in trading days for the same reason a wall-clock day is wrong
+# here: 18:00 CT Monday is Tuesday's session).
+calendar_id = "cme_globex_equity_index"
+flat_by_local_time = "15:10"
+flat_by_timezone = "America/Chicago"
+# 'The trading day runs from 5:00 PM CT through 3:10 PM CT the
+# next calendar day' and 'All positions must be closed by 3:10 PM
+# CT'. The 17:00 CT roll is the SAME boundary
+# `cme_globex_equity_index` uses, so `Calendar::trading_day` is
+# directly reusable; the 15:10 CT flat means 15:10-16:00 CT is
+# exchange-open but firm-closed, and a strategy holding through it
+# is running a rule the account does not permit.
+
+[objective]
+profit_target_usd = "6000"
+# Does the target have to be STANDING at the close, or does touching
+# it intraday count? The two give different P(pass) and the
+# difference is not small for a strategy that gives profit back.
+target_basis = "end_of_day_balance"
+# AMBIGUOUS ON THE PAGE: the objective is worded 'Reach and
+# maintain your Profit Target', which implies a closing
+# balance but never says so. Encoded as the stricter reading,
+# which lowers P(pass); flagged in ACCOUNT_EVAL_SPEC §8 and
+# must be reported both ways until the firm is asked.
+min_trading_days = 2
+
+[drawdown]
+# THE consequential section. Two independent axes, conflated by the
+# industry's 'intraday vs EOD' shorthand and separated here:
+#   ratchet_basis -- what advances the threshold UPWARD
+#   breach_basis  -- what is tested AGAINST the threshold
+# Both firms whose pages state it test the breach on intraday
+# unrealized equity; only the ratchet differs. See ACCOUNT_EVAL_SPEC
+# §2 for the threshold formula every firm's worked example satisfies.
+amount_usd = "3000"
+ratchet_basis = "highest_daily_closing_equity"
+# The threshold stops rising once it reaches this level, measured
+# as cumulative PnL from `starting_balance_usd` (so 0 = the
+# starting balance). Reached when peak equity is this level plus
+# `amount_usd`.
+ratchet_lock_at_cum_pnl_usd = "0"
+breach_basis = "equity_including_unrealized"
+breach_effect = "fail_account"
+# 'The MLL updates at the end of each trading day but is
+# monitored in real time throughout the session. Both realized
+# and unrealized P&L count toward it.' And: 'Once it reaches
+# your starting balance, it locks permanently.'
+# The XFA states the same geometry from a $0 balance with the
+# MLL starting at -$3000 and locking at $0 -- identical in
+# cumulative-PnL space, which is why the spec models every
+# account there (ACCOUNT_EVAL_SPEC §2).
+
+[daily_loss_limit]
+enforced = true
+amount_usd = "2000"
+basis = "equity_including_unrealized"
+# A DLL is a LOCKOUT, not a breach: the day ends, the account
+# lives. Modelling it as a breach overstates failure; ignoring it
+# lets a day keep losing that the firm would have stopped.
+effect = "lockout_rest_of_day"
+# Optional in the Combine and in an XFA on TopstepX; automatic
+# in the Live Funded Account and applied to an XFA on other
+# platforms. Enforced here because that is the strictest
+# documented configuration -- but note the effect on P(pass) is
+# NOT sign-definite (a lockout caps a bad day AND truncates a
+# good one), so this is a declared choice, not a conservative
+# one. ACCOUNT_EVAL_SPEC §4.1 requires the headline to be
+# reported with the DLL on and off.
+# 'Account stays eligible for funding. Resume tomorrow.'
+
+[position_limit]
+max_contracts = 10
+micros_per_contract = 10
+scaling = "none"
+# 10 minis or 100 micros; 'Micros and minis count at a 10:1
+# ratio.' Fixed in the Combine. The XFA scales by balance.
+# Automated strategies are permitted 'with conditions' --
+# verified, and not true at every firm in this directory.
+
+[consistency]
+rule = "best_day_vs_profit_target"
+threshold_pct = 50.0
+effect = "raise_profit_target"
+# 'Your single best day of profit must stay at or below 50% of
+# your Profit Target. If it exceeds that, your Profit Target
+# increases.' New target = best day / 0.50. Their worked
+# example: $1,200 best day on $2,800 total = 43%, met.
+# Best day locks at 15:10 CT and losses never reset it -- so
+# this is a constraint on the PATH, not on the total, and a
+# strategy with one huge day can reach the target and still
+# not pass (ACCOUNT_EVAL_SPEC §4.4).
+# Payout gates for the funded phase, recorded not modelled:
+# Standard path = 5 winning days of $150+ net, up to 50% of
+# balance capped at $5000, 90/10 split, minimum $125;
+# Consistency path = 3 trading days and largest day <= 40% of
+# total net profit.
