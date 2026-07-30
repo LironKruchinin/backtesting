@@ -726,6 +726,15 @@ reference; supersede the decision if you disagree — don't hotfix.
   permutation and truncation harnesses' job. The day the expectation flips to
   `Kill` is the day a detector was watched firing on a defect planted before it
   existed.
+
+  **That flip IS M3's acceptance test**, not a step towards one:
+  `docs/MILESTONES.md` reads "a deliberately-leaky test strategy is caught by
+  the permutation/truncation harnesses (negative-control test)", and the
+  strategy already exists and is already registered as uncaught. So there is
+  nothing to *build* for that clause beyond the harnesses themselves — and
+  changing `Verdict::Iterate` to `Verdict::Kill` in that test by any route
+  other than a harness catching it would tick the milestone's last box with a
+  lie in it.
 - **The leak fixture uses seed 29 rather than the smoke config's 42**, and that
   is confound removal rather than fixture-fitting. Buy-and-hold is a *criterion*,
   and a random walk's drift across any particular set of test windows is
@@ -735,9 +744,62 @@ reference; supersede the decision if you disagree — don't hotfix.
   measuring eighteen seeds, and chosen in the direction that makes the *gates'*
   job easiest.
 
+  **The general rule, because this will look like seed-shopping to a future
+  reader and the difference is a direction, not a degree:** fixture parameters
+  may be selected to **isolate the phenomenon under test, provided the
+  selection is documented and biases against the machinery, never for it**. A
+  negative control's job is to document what the machinery *cannot* see;
+  picking the seed where it accidentally could would overstate gate power,
+  which is the same error as quoting the best combo in a grid. Choosing seed 29
+  *removed* a confound that was helping the gates by accident — so the recorded
+  failure is a floor on how bad the blind spot is, not a cherry-picked ceiling.
+  A selection that moved the other way would be exactly the thing this project
+  exists to catch, and the test is easy to apply: ask which side of the
+  comparison the choice flatters.
+
 ---
 
 ## 10. Commands
+
+### Exit codes — one contract, because these run unattended
+
+Every command shares the same five, and the shape is what a **scheduler** needs
+rather than what a shell prompt needs. `pull` and `funnel` are the two that
+run on a timer, and they are the two that use all of it.
+
+| code | meaning | who returns it |
+|---|---|---|
+| 0 | did the work; nothing needs a human | all |
+| 2 | usage or config error — nothing ran | every command that takes arguments or a config |
+| 3 | **refused on the money gate**: the quote exceeded `--max-cost-usd`, or `--execute` came without one (D-0024) | `pull` |
+| 4 | ran, and **found something you must look at** — or failed partway | `verify`, `qa`, `layout-check`, `transcode`, `symbol-supplement`, and the data-unreadable path of every replay command |
+| 5 | **completed, and the answer is one you must not read as success** | `pull`, `funnel` |
+
+Code 5 is the one worth understanding, because the two commands that return it
+mean different things by it and both mean "come back":
+
+- **`pull` exits 5** when vendor jobs are still processing. The data is bought,
+  journalled and downloadable for 30 days — but a cron that reads "still
+  processing" as success never returns for it (D-0034). Re-running the
+  identical command resumes and submits nothing twice.
+- **`funnel` exits 5** when **every combo was killed** (D-0075). That is not a
+  failure — most ideas must die, and cheaply, which is the entire point of the
+  funnel. It is not success either: a scheduled sweep that reported exit 0 for
+  "the whole grid is dead" would be indistinguishable from one reporting exit 0
+  for "we have a candidate", and the difference is the only thing the run was
+  for. Exactly the argument `qa`'s exit 4 makes about a 61 %-coverage archive.
+
+So the honest cron line for a funnel sweep treats 0 and 5 as *both* normal and
+tells them apart, rather than `|| true`-ing the difference away:
+
+```bash
+crucible funnel --config configs/idea.toml --out results
+case $? in
+  0) notify "survivors — read results/scorecard-*.html" ;;
+  5) log "grid fully killed; nothing to review" ;;
+  *) alert "funnel broke" ;;
+esac
+```
 
 ```bash
 cargo test --workspace                          # everything
