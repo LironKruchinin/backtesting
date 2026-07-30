@@ -2382,3 +2382,34 @@ propose a superseding entry — don't silently diverge.
   parses, 24 runs read as voided, and `trials_for("null-harness-sma-cross")`
   reads **0**. `results/` is gitignored, so this is an archive action and not a
   commit.
+- **D-0084** (2026-07-30) — **Sample adequacy is `admission`, not `S0`: a
+  pre-trial admission check gets its own label, because it was squatting on the
+  name of a gate that is refused at load.**
+  **The squat.** `assess` initialized `decided_at = Stage::S0` and tagged both
+  adequacy criteria `Stage::S0`, from before the predictor stage existed. The
+  result was a report that could print "killed at s0" for a combo with too few
+  sessions, while a config declaring `stages = ["s0"]` was **refused** in the
+  same build (D-0075). Two different things wore one name, and the one a reader
+  meets first is the one that never runs.
+  **The fix.** `Stage::Admission`, ordered first so `decided_at` still sorts in
+  evaluation order, rendering as `admission`. It is **not declarable**:
+  `Stage::from_str` deliberately has no `"admission"` arm, so a config can
+  neither ask for the adequacy check nor skip it — a check you can decline is
+  not an admission check. `the_four_declarable_stages_still_round_trip` pins the
+  four spellings a config may use and `a_config_cannot_declare_admission_as_a_
+  stage` pins the refusal.
+  **Why the distinction earns its keep.** "Not enough evidence to judge" and
+  "judged and found wanting" are different verdicts about an idea, and the
+  second is much the more flattering thing to report when the first is true.
+  That is also why the scorecard now carries a legend saying so in the Verdicts
+  section rather than leaving a reader to infer what `admission` means.
+  **The funnel determinism hash did NOT move, and that is a measurement rather
+  than a hope.** `verdict_hash` hashes `decided_at`, so the rename reaches it —
+  but only for a combo actually decided there. Every combo of
+  `configs/combo-smoke.toml` **passes** adequacy (316 pooled round-trips against
+  5 required, 8 sessions against 4) and dies at `s1`, so the pinned hash stays
+  **`2f430893d2a79a8f`**. The reach was proven rather than assumed, on a config
+  built to fail adequacy (`min_oos_trades = 100000`): under the old label it
+  hashes `1b6ac5e72c106c0b` and under the new one `8c6d9ed042df24b3`. So the
+  label is live in the hash, the null harness simply never visits it — and no
+  re-pin was manufactured to make the change look bigger than it is.

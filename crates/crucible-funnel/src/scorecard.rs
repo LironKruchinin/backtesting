@@ -295,7 +295,12 @@ fn write_verdicts(h: &mut String, report: &FunnelReport) {
     h.push_str(
         "<section><h2>Verdicts</h2><p class=\"dim\">In grid-index order, never ranked by \
          out-of-sample performance: a table sorted by the number you are about to quote is a \
-         selection step wearing a report's clothes.</p><div class=\"wrap\"><table><thead><tr>\
+         selection step wearing a report's clothes.</p><p class=\"dim\"><b>decided at</b>: \
+         <code>admission</code> is not a gate — it is the pre-trial sample-adequacy check, and a \
+         combo killed there was never judged on its merits at all, only found too small to judge. \
+         <code>s1</code> and <code>s2</code> are the gates this build runs; a combo cannot be \
+         decided at <code>s0</code> or <code>s3</code>, which are refused at load.</p>\
+         <div class=\"wrap\"><table><thead><tr>\
          <th>combo</th><th>parameters</th><th>verdict</th><th>decided at</th><th>OOS return</th>\
          <th>OOS Sharpe</th><th>trades</th><th>sessions</th></tr></thead><tbody>",
     );

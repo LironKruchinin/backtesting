@@ -79,10 +79,24 @@ impl fmt::Display for Verdict {
     }
 }
 
-/// A funnel gate.
+/// Where a verdict was decided.
+///
+/// Four of these are the funnel's declarable **gates** (S0..S3, §4). The fifth,
+/// [`Stage::Admission`], is not a gate and cannot be declared: it is the
+/// pre-trial check that asks whether there is enough evidence to judge at all.
+/// It was called `S0` until 2026-07-30, which was a label squat from before the
+/// predictor stage existed — a scorecard could read "killed at S0" for a combo
+/// with too few sessions while a config declaring `s0` was refused at load
+/// (D-0084).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Stage {
+    /// **Not a gate.** Sample adequacy, checked before any stage runs: too few
+    /// pooled out-of-sample round-trips or sessions to judge anything.
+    ///
+    /// Ordered first so `decided_at` still sorts in evaluation order. Never
+    /// parsed from a config — see [`Stage::from_str`].
+    Admission,
     /// Signal triage. Not implemented.
     S0,
     /// Free-fill coarse screen.
@@ -97,7 +111,7 @@ impl Stage {
     /// Whether this build can run the stage.
     #[must_use]
     pub const fn is_implemented(self) -> bool {
-        matches!(self, Stage::S1 | Stage::S2)
+        matches!(self, Stage::Admission | Stage::S1 | Stage::S2)
     }
 
     /// What the stage still needs, for the refusal message.
@@ -112,7 +126,7 @@ impl Stage {
                 "S3 is deflated Sharpe, PBO/CSCV, the permutation nulls and the cross-instrument \
                  rhyme check — `crucible-funnel::stats`, which is still a module-doc spec"
             }
-            Stage::S1 | Stage::S2 => "",
+            Stage::Admission | Stage::S1 | Stage::S2 => "",
         }
     }
 }
@@ -120,6 +134,7 @@ impl Stage {
 impl fmt::Display for Stage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Stage::Admission => "admission",
             Stage::S0 => "s0",
             Stage::S1 => "s1",
             Stage::S2 => "s2",
@@ -137,6 +152,8 @@ impl FromStr for Stage {
             "s1" => Ok(Stage::S1),
             "s2" => Ok(Stage::S2),
             "s3" => Ok(Stage::S3),
+            // Deliberately absent: "admission". It is a pre-trial check, not a
+            // gate, so a config cannot ask for it or skip it (D-0084).
             other => Err(CriteriaError::UnknownStage {
                 found: other.to_owned(),
             }),
@@ -493,14 +510,14 @@ impl Assessment {
 #[must_use]
 pub fn assess(criteria: &Criteria, evidence: &Evidence) -> Assessment {
     let mut reasons: Vec<Reason> = Vec::new();
-    let mut decided_at = Stage::S0;
+    let mut decided_at = Stage::Admission;
 
     // Sample adequacy first, under its own heading: "not enough evidence" and
     // "the evidence is bad" are different verdicts about an idea, and
     // reporting the second when the first is true is the commoner mistake.
     let adequacy = vec![
         check(
-            Stage::S0,
+            Stage::Admission,
             evidence.oos_trades >= criteria.min_oos_trades,
             format!(
                 "{} pooled out-of-sample round-trip(s), {} required",
@@ -508,7 +525,7 @@ pub fn assess(criteria: &Criteria, evidence: &Evidence) -> Assessment {
             ),
         ),
         check(
-            Stage::S0,
+            Stage::Admission,
             evidence.oos_sessions >= criteria.min_oos_sessions,
             format!(
                 "{} pooled out-of-sample session(s), {} required",
@@ -729,17 +746,48 @@ mod tests {
     /// Sample adequacy decides before performance does — and both adequacy
     /// criteria are reported, not just the first to fail.
     #[test]
-    fn too_few_trades_is_killed_at_s0_with_every_adequacy_reason_reported() {
+    fn too_few_trades_is_killed_at_admission_with_every_adequacy_reason_reported() {
         let mut e = passing();
         e.oos_trades = 3;
         e.oos_sessions = 4;
         let a = assess(&criteria(), &e);
         assert_eq!(a.verdict, Verdict::Kill);
-        assert_eq!(a.decided_at, Stage::S0);
+        assert_eq!(a.decided_at, Stage::Admission);
         assert_eq!(a.reasons.len(), 2, "both adequacy criteria are evaluated");
         assert!(a.reasons.iter().all(|r| !r.passed));
         // And nothing downstream was judged on a sample that small.
-        assert!(a.reasons.iter().all(|r| r.stage == Stage::S0));
+        assert!(a.reasons.iter().all(|r| r.stage == Stage::Admission));
+        // The label is the point of D-0084: this reads `admission`, and a
+        // config declaring a stage by that name is still refused, because
+        // admission is a pre-trial check rather than a gate.
+        assert_eq!(a.decided_at.to_string(), "admission");
+    }
+
+    /// `admission` is not a declarable gate, and the refusal names it as an
+    /// unknown stage rather than accepting it (D-0084). A config that could
+    /// declare the admission check could also *skip* it.
+    #[test]
+    fn a_config_cannot_declare_admission_as_a_stage() {
+        let e = "admission".parse::<Stage>();
+        assert!(
+            matches!(e, Err(CriteriaError::UnknownStage { .. })),
+            "{e:?}"
+        );
+    }
+
+    /// Every declarable spelling still round-trips, so the new variant did not
+    /// disturb the four that configs actually use.
+    #[test]
+    fn the_four_declarable_stages_still_round_trip() {
+        for (text, stage) in [
+            ("s0", Stage::S0),
+            ("s1", Stage::S1),
+            ("s2", Stage::S2),
+            ("s3", Stage::S3),
+        ] {
+            assert_eq!(text.parse::<Stage>().expect("parses"), stage);
+            assert_eq!(stage.to_string(), text);
+        }
     }
 
     /// The cheapest kill available: not clearly positive even cost-free.

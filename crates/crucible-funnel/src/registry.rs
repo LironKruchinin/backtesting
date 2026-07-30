@@ -1029,7 +1029,10 @@ mod tests {
                 account_id: None,
                 combo_index: 0,
                 hypothesis_family: "fam".to_owned(),
-                decided_at: Stage::S0.to_string(),
+                // An adequacy kill, so it is decided at `admission` — not at
+                // `s0`, which is a gate no combo in this build can be decided
+                // at because it is refused at load (D-0084).
+                decided_at: Stage::Admission.to_string(),
                 verdict: Verdict::Kill,
                 reasons: vec!["3 OOS trades < 30".to_owned()],
                 trials_at_decision: 1,
