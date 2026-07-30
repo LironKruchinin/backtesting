@@ -18,7 +18,7 @@ file and that module disagree, they are both wrong until someone fixes both.
 Everything below is those two rules applied to a particular tree. Together they
 buy three things that are easy to undervalue until they are gone:
 
-- `rm -rf curated/bars/ESH4` is complete and obviously correct. You do not have
+- `rm -rf curated/bars/ESH2024` is complete and obviously correct. You do not have
   to reason about what else was in there.
 - A glob is safe. `curated/bars/*/1m/*.parquet` cannot sweep up a neighbouring
   instrument, a different timeframe, or a different kind of data.
@@ -107,16 +107,17 @@ one-line change and a decision-log entry.
 
 **Derived, disposable, freely deleted and rebuilt from `raw/`.**
 
-The path is the research question. A backtest asks for "ESH4, 1-minute bars"; it
-never asks for "GLBX.MDP3's `ohlcv-1m` for ESH4". The vendor and the vendor
-schema are *provenance*, and they live inside the file — Parquet key-value
-metadata carries the dataset, the vendor schema, and the `file_blake3` of the
-raw file it came from (D-0036).
+The path is the research question. A backtest asks for "the March 2024 E-mini,
+1-minute bars"; it never asks for "GLBX.MDP3's `ohlcv-1m` for ESH2024". The
+vendor and the vendor schema are *provenance*, and they live inside the file —
+Parquet key-value metadata carries the dataset, the vendor schema, and the
+`file_blake3` of the raw file it came from (D-0036).
 
 - `{kind}` — a closed set (`KNOWN_CURATED_KINDS`). Today `bars` and `rolls`.
 - `{instrument}` — one instrument, percent-encoded (`SYN:RW` → `SYN%3ARW`),
   because `:` is a legal instrument character and an illegal Windows filename,
   and mapping it to `_` would file `SYN:RW` and `SYN_RW` together (D-0036).
+  A **contract** is spelled with a four-digit year — see below.
 - `{grain}` — the timeframe for aggregated kinds (`1m`, `1s`); a date partition
   for tick kinds, which have no timeframe.
 
@@ -124,12 +125,49 @@ Shapes pinned **now**, so the later work lands pre-separated instead of being
 retrofitted into `bars/`:
 
 ```text
-curated/bars/ESH4/1m/2024-01.parquet            today
+curated/bars/ESH2024/1m/2024-01.parquet         today
 curated/rolls/ES/1m/v-confirm1.json             today  (root, not contract — a
                                                         roll is about two at once)
-curated/trades/ESH4/2024-01/…                   M4: tick trades, date-partitioned
-curated/book/ESH4/2024-01/…                     M4: MBO-derived book snapshots
+curated/trades/ESH2024/2024-01/…                M4: tick trades, date-partitioned
+curated/book/ESH2024/2024-01/…                  M4: MBO-derived book snapshots
 ```
+
+### A contract key carries a **four-digit** year (D-0072)
+
+`curated/bars/ESH2024/`, never `curated/bars/ESH4/`. This is not tidiness; it is
+the fix for a silent-corruption bug that had already reached the archive.
+
+A CME year code is **one digit**, so it repeats every ten years. Every bar
+window bought for this archive is **sixteen years** long (2010-06-06 →
+2026-07-28). By pigeonhole, contracts alias — and they did. `GC.FUT ohlcv-1m`
+wrote exactly **120 partitions = 12 month codes × 10 year digits**, and
+`curated/bars/GCZ4/1m/…` held December-2014 gold and December-2024 gold
+concatenated into one file spanning **14.5 years**. Rebuilt with resolved keys,
+the same 10,275,830 bars land in **221** partitions, and `GCZ2014` (145,850
+bars, 2010-06-08 → 2014-12-29) and `GCZ2024` (164,384 bars, 2019-06-21 →
+2024-12-27) sum to exactly the 310,234 the merged file held.
+
+**Nothing already here could have found it.** The strictly-increasing `ts_open`
+check passed, because the two contracts trade in disjoint sequential periods and
+concatenate in perfect order. The gap-inside-sessions check reported nothing,
+because no bundled calendar claims gold, so `qa` had no definition of "expected"
+and never looked — and even given one, a ten-year absence is whole missing
+sessions, which is a coverage number, not a gap *inside* a session. Both facts
+are asserted as tests, on the merged fixture, in `crucible-data::transcode`.
+
+The year is resolved per record against **the contract's own expiry**, read from
+the archived `definition` file for its root — never against a `DecadeAnchor`
+constant, which has an answer for `GCZ4` and is right for half the bars. A bar
+whose contract cannot be resolved **refuses the whole file**: unlike D-0070's
+spread exclusion, which is a declared filter because a spread is merely a record
+nothing replays yet, this is corruption of *meaning* that looks exactly like
+correct data.
+
+Two- and four-digit years are absolute and need no lookup — the vendor itself
+switches to two digits for far-dated listings (`CLZ36`), and 16 such contracts
+trade in the CL window. A key that is not a contract at all (`SYN%3ARW`, a
+spread) keeps the vendor's spelling, because it has no delivery year to resolve;
+`curated/rolls/` is keyed by **root** and carries no year either.
 
 ---
 
@@ -152,7 +190,7 @@ the two trees are indexed by different questions:
 | mutability | immutable forever | rebuilt at will |
 | vendor | in the **path** | in the **file metadata** |
 
-**If `curated/` adopted `raw/`'s order** — `curated/GLBX.MDP3/ohlcv-1m/ESH4/1m/…`
+**If `curated/` adopted `raw/`'s order** — `curated/GLBX.MDP3/ohlcv-1m/ESH2024/1m/…`
 — then the vendor and vendor schema would be baked into every research path.
 Two things immediately break. Derived data does not have one source: a
 continuous series spans many contracts and many raw files, and 5-minute bars
@@ -160,7 +198,7 @@ aggregated from 1-minute bars have a source that is itself derived. And the day
 the same bars are re-bought from a different vendor, or re-derived at a
 different schema, the tree either duplicates or lies.
 
-**If `raw/` adopted `curated/`'s order** — `raw/bars/ESH4/…` — the purchase
+**If `raw/` adopted `curated/`'s order** — `raw/bars/ESH2024/…` — the purchase
 tuple is destroyed. You can no longer tell what you bought from whom; coverage
 subtraction needs an index instead of a listing; the parent key `ES.FUT` has
 nowhere to live, because it is not an instrument. And because raw is immutable,
@@ -244,6 +282,7 @@ hash correctly at the wrong path, and a file at the right path can be corrupt.
 | 5 | a curated file outside `kind/instrument/grain` | invariant 1, and `rm -rf` stops being safe |
 | 6 | a curated kind outside the known set | the same typo argument as row 2, on the research side |
 | 7 | anything unrecognized at the archive root | the tree grew something nobody decided on |
+| 8 | a `curated/bars/` contract whose year is one digit | it can hold two contracts a decade apart, in perfect `ts_open` order, and every other check passes (D-0072) |
 
 Every finding is reported — filesystem findings in walk order, manifest
 findings in record order — because an operator deciding whether a tree is

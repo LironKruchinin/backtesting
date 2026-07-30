@@ -89,7 +89,10 @@ pub use adjust::{
     unadjusted_offsets,
 };
 pub use error::ContinuousError;
-pub use expiry::{NO_EXPIRY_SOURCE, NOMINAL_EXPIRY_SOURCE, nominal_expiries, nominal_expiry};
+pub use expiry::{
+    CONTRACT_CYCLE_DAYS, ContractCycles, NO_EXPIRY_SOURCE, NOMINAL_EXPIRY_SOURCE, nominal_expiries,
+    nominal_expiry,
+};
 pub use feed::{ContinuousFeed, ContinuousSegment};
 pub use gather::{GatheredSeries, gather_series};
 pub use roll::{
@@ -97,7 +100,9 @@ pub use roll::{
     RollTableInput, build_roll_table, read_roll_table, roll_table_path, write_roll_table,
 };
 pub use session::{ContractSeries, SessionAccumulator, SessionBar, series_of};
-pub use symbol::{ContractSymbol, DEFAULT_ANCHOR_YEAR, DecadeAnchor, MonthCode};
+pub use symbol::{
+    ContractSymbol, DEFAULT_ANCHOR_YEAR, DecadeAnchor, MonthCode, SymbolParts, parse_parts,
+};
 
 #[cfg(feature = "databento")]
-pub use expiry::expiries_from_definitions;
+pub use expiry::{contract_cycles_from_definitions, expiries_from_definitions};
