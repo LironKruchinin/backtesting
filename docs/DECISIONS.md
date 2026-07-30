@@ -933,3 +933,82 @@ propose a superseding entry — don't silently diverge.
   streams. One value is pinned by test — changing the derivation changes every
   seed in every stored result, which is a decision-log event rather than a
   refactor.
+- **D-0065** (2026-07-30) — **`Inventory::append` retries a sharing violation
+  ten times over ~4.5 s before failing; observing a run must not be able to end
+  it.** On Windows `Get-Content` and `System.IO.StreamReader` open with
+  `FileShare.Read`, which denies writers, so a reader merely counting lines makes
+  the next append fail with `os error 32` — and a failed inventory append ends
+  the tranche, correctly, because a placed file with no inventory line is an
+  orphan. Why now: on 2026-07-30 a progress count taken by this agent killed a
+  live T0 run 2 h 41 m and 830 requests in. Resume made the loss cheap, and that
+  is precisely the trap — "resume is free" turned a fragile interface into an
+  acceptable one, and the same glance would have cost far more inside T1's larger
+  payloads. Only the sharing violation is retried (`ERROR_SHARING_VIOLATION` 32,
+  `ERROR_LOCK_VIOLATION` 33): a missing directory or a permission denial does not
+  clear on its own, and a retry loop over those would delay the report by five
+  seconds and teach nothing. The predicate is `#[cfg(windows)]` because POSIX has
+  no mandatory sharing and errno 32 is `EPIPE` there — retrying *that* would
+  paper over an unrelated failure. Bounded, not infinite: a genuinely stuck
+  holder must fail the run rather than hang it, and the exhausted error names the
+  cause and points at `RUNBOOK_BLITZ.md`'s observation table. Both halves are
+  tested against a real `share_mode(0)` handle — a retry nobody has watched
+  survive a lock is decoration, and one nobody has watched give up is a hang
+  waiting to happen. `ShutdownBlockReasonCreate` during active runs is recorded
+  in the RUNBOOK as a candidate, not built.
+- **D-0066** (2026-07-30) — **The manifest's `symbols` list is incomplete for
+  CL.FUT and ZN.FUT, the cause is a validation rule and not a serialization
+  limit, and the repair is an append-only supplement — M1-close-block, not a
+  hotfix.** Quantified by `cargo run -p crucible-data --features databento
+  --example sym_audit`, which re-reads each archived file's DBN metadata and
+  classifies every observed symbol with the *same* `catalog::is_valid_symbol` the
+  append used: **21,736 of 108,696 observed symbols are absent from the manifest
+  (20.00 %), across 8 of 33 lines**. It is confined to two roots — CL.FUT 9,427
+  observed / 7,120 recorded (2,307 dropped) and ZN.FUT 3,335 observed / **208
+  recorded** (3,127 dropped, 94 %) — and appears once per schema that pulled all
+  seven parents (`definition`, `ohlcv-1m`, `ohlcv-1s`, `statistics`: 5,434 each).
+  ES/NQ/RTY/GC/6E drop nothing. **The mechanism is not the manifest format.**
+  `symbols` is already a JSON array (`"symbols":["ES.FUT","ESH4",…]`) and `serde`
+  round-trips a space perfectly well, so nothing here needs format evolution,
+  versioned records, or escaping. The disqualifier is the **space** in CME's
+  exotic spread names (`CL:BF F0-G0-H0`, `UD:ZN: TL 0110987001`), rejected by
+  `validate_symbols`'s whitespace ban; colons pass, since only `validate_file_path`
+  rejects those. That ban exists because "symbols appear inside ingest's path
+  template" — but `plan.rs` builds `raw/{dataset}/{schema}/{key}/{stem}.dbn.zst`
+  from the **requested key alone**. Only `symbols[0]` is ever a path component;
+  the rest are pure coverage data that never touch the filesystem. So the rule is
+  over-broad, and the fix is to narrow its scope rather than change the format:
+  full path-safety for the key, and non-empty/ASCII/no-control for the recorded
+  coverage symbols. **Recovery source is the archive, not `delivery/`.** The
+  delivery support files carry no resolved symbology — `metadata.json` holds only
+  the request (`symbols:["CL.FUT"]`), `manifest.json` a file list, `condition.json`
+  per-date conditions. The resolved set lives in each `.dbn.zst`'s own DBN header:
+  immutable, already checksummed by `verify`, and the exact source the original
+  append read. A supplement record is still the right vehicle, because the
+  manifest is append-only and an existing line must not be rewritten — the
+  correction references the original line's blake3 and the archive stays
+  immutable. **No silent era exists:** `merge_symbols`, `dropped_symbols` and
+  `is_valid_symbol` all landed together in `05eeed1` (2026-07-27), the commit that
+  created the execute path, so every append that dropped a symbol printed the
+  warning — the records were lost with the stdout, not never written. Consequence
+  until repaired: `coverage` reads those 21,736 symbols as missing and would buy
+  them again, which is the re-buy bug D-0033 exists to prevent. §9's closing
+  sentence may be written before the repair lands, with the exception named: "every
+  plan item appended" stays true; "the manifest tells the whole truth per
+  contract" has a known, quantified exception in CL.FUT and ZN.FUT.
+  **Approved fix, four specifics.** (1) *Narrow the predicate to the one place a
+  symbol is a path component* — the requested key. Array members accept vendor
+  symbols verbatim; no escaping and no format change, because there was never a
+  format problem. (2) *Supplement records are sourced from the DBN headers through
+  the same decoder `transcode` uses* — never a second parser. A forensic parser
+  that disagreed with the production one would write a manifest nobody can
+  reproduce, which is the failure D-0031 already pinned for the decoder/client
+  pair. (3) *Negative control, mandatory* (CLAUDE.md §7): plant a spaced symbol and
+  assert it survives `append` **and** round-trips through `coverage` — a
+  completeness fix whose test only checks the append proves half of nothing, since
+  coverage credit is what was actually broken. (4) *Post-repair `sym_audit` reads
+  0 dropped archive-wide, and the §9 exception clause is deleted in the same
+  commit* — it stops being true, and a caveat that outlives its cause is how a doc
+  starts lying. `examples/sym_audit.rs` is kept for exactly this: it is the
+  completion proof, not scaffolding. Severity is the justification and was
+  unknowable before the audit — **ZN.FUT at 94 % missing** is the number that made
+  this a close-blocker rather than a cleanup.

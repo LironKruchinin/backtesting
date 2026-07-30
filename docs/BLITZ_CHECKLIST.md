@@ -164,6 +164,13 @@ cargo run -p crucible-cli --features databento -- \
 ```
 
 - [ ] `statistics` exit 0 · `verify` clean
+      *(2026-07-30: all seven parents **appended** — `6E` on 07-29, the other six
+      adopted under their original `GLBX-20260729-*` job ids on 07-30, nothing
+      re-submitted. Box stays open only because `verify` has not been re-run
+      since; do that once T0 stops competing for disk I/O. **Note when you do:**
+      on a re-run, `--end` must be the date the jobs were submitted with
+      (`2026-07-29`), not today — a wider window is a different intent id and
+      mints new jobs instead of collecting the paid ones.)*
 
 ## 4. After each tranche — verify, then curate
 

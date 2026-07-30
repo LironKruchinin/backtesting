@@ -307,3 +307,83 @@ The three earlier definition intents (`ES`, `NQ`, `RTY`) are a separate run —
 submitted 2026-07-28 15:56, appended 19:53–19:54 the same day, ahead of the
 subscription, as §3 states. Per-intent timestamps come from `jobs.jsonl`, which
 is the arbiter whenever the narrative and the checklist disagree.
+
+### Recorded: the 2026-07-30 01:21 shutdown — operator Liron
+
+System event 1074 at 01:21:40, initiator `StartMenuExperienceHost.exe` (the
+Start-menu power button) on behalf of `Liron\liron`. It ended a live T0 tranche
+and left six `statistics` jobs uncollected. **Attributed: Liron** — a Claude-side
+**HTTP 529** read as a failure state (the agent session looked dead, so the
+machine went off for the night), on top of the nightly habit below. First reported
+as not-his and recorded as such; the correction is kept visible rather than
+overwritten, per the 03:47 precedent that capture and reading stay separate.
+
+The forensics are retained because what they proved stays true: access was
+**console-only** — every session logon in the window is `Source Network Address:
+LOCAL`, and TeamViewer's own log records `RemoteSession Count: 0` at shutdown. The
+elevated Security-log check is retired; it tested a remote-operator hypothesis
+that is now settled. Full evidence table in `THETADATA_PLAN.md` §9.
+
+> **Operational rule: a Claude/API failure never endangers an acquisition;
+> power-off does.** `theta-pull` and `pull` are separate OS processes with their
+> own sockets — a 529, a dropped session or a hung agent does not touch them.
+> **When Claude looks dead, leave the machine alone.** Confirm the tranche is
+> alive instead: look for `crucible` and `java` in Task Manager, or count files
+> under `external/thetadata/options` twice a minute apart. Shutting down because
+> the *assistant* looks stuck is the one move that turns a harmless upstream
+> outage into hours of lost acquisition.
+
+This machine is powered off nightly between 23:00 and 02:50 — **24 such shutdowns
+in 45 days** — so an overnight shutdown is *expected load* for a multi-day
+tranche, not an incident. That is why `ShutdownBlockReasonCreate` is now a pre-T1
+item rather than a nice-to-have.
+
+## Observing a live acquisition
+
+**Never read a live append-only file with a default reader.** On Windows,
+`Get-Content` and `New-Object System.IO.StreamReader($path)` open with
+`FileShare.Read`, which **denies writers**. While that handle is open the
+acquisition's own append fails with `os error 32`, and for `theta-pull` a failed
+inventory append ends the run — correctly, since a placed file with no inventory
+line is an orphan.
+
+This is not hypothetical. On **2026-07-30** a line count taken to report
+progress killed a T0 run 2 h 41 m and 830 requests in. The run resumed for free,
+which is exactly why it is worth saying plainly: *resume being free is not a
+licence to die on observation.*
+
+`Inventory::append` now retries a sharing violation ten times over ~4.5 s
+(`APPEND_ATTEMPTS`), so a brief reader is survived. That is a safety net, not a
+permission slip — a reader that holds the file longer still ends the run.
+
+Safe ways to watch a run, in preference order:
+
+| Want | Do |
+|---|---|
+| Progress rate | Count output files — `Get-ChildItem external/thetadata/options -Recurse -Filter *.parquet` never touches the inventory |
+| Percentage / current request | Read the pull's **own stdout log**, which it writes for this purpose |
+| Actual inventory lines | Open share-friendly, or read a copy (below) |
+
+```powershell
+# Share-friendly: the writer keeps working.
+$fs = [System.IO.File]::Open($p,'Open','Read','ReadWrite')
+$sr = New-Object System.IO.StreamReader($fs)
+# ... read ...
+$sr.Close(); $fs.Close()
+
+# Or snapshot first, then read the copy however you like.
+Copy-Item $p "$env:TEMP\inv-snapshot.jsonl"
+```
+
+The same rule applies to `manifest.jsonl` and `jobs.jsonl` during a `pull`.
+
+**Pre-T1 item (promoted from idea):** call `ShutdownBlockReasonCreate` while a
+tranche is active, so a Start-menu shutdown shows "acquisition in progress"
+instead of silently killing hours of work. It would have turned the 2026-07-30
+01:21 shutdown into a prompt rather than a next-morning forensic. Promoted on
+evidence, not taste: 24 shutdowns in 45 nights is the machine's climate, and T1's
+tranches run longer than T0's. The block is deliberately *advisory* — the operator
+can still proceed — because the failure being fixed is an invisible collision, not
+an unauthorised one. Open question recorded in `THETADATA_PLAN.md` §8: whether
+`crucible-data` may own the Win32 call, or whether it belongs in the CLI beside
+`SystemClock` as another sanctioned OS touch (D-0032).

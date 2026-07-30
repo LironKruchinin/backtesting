@@ -39,9 +39,46 @@
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use super::error::ThetaError;
 use super::validate::{Reconciliation, ValidationReport};
+
+/// How many times [`Inventory::append`] tries to open the file before failing.
+///
+/// A reader holding a deny-share handle makes the append's `open` fail with
+/// `ERROR_SHARING_VIOLATION`, and that is what most "just check the progress"
+/// one-liners do on Windows: `Get-Content` and `System.IO.StreamReader` both
+/// open with `FileShare.Read`, which denies writers. The contention lasts
+/// milliseconds; the run it killed was two and a half hours old and 830
+/// requests in (2026-07-30). Resume being free is not a licence to die on
+/// observation — a glance at progress must not be able to end a multi-day
+/// tranche.
+///
+/// Ten attempts at [`APPEND_RETRY_PAUSE`] spans ~4.5 s of contention, which is
+/// far longer than any reader that is merely counting lines, and still bounded
+/// so a genuinely stuck holder fails the run instead of hanging it.
+pub const APPEND_ATTEMPTS: u32 = 10;
+
+/// Pause between the attempts [`APPEND_ATTEMPTS`] allows.
+pub const APPEND_RETRY_PAUSE: Duration = Duration::from_millis(500);
+
+/// Whether an I/O error is "another process holds this file with a deny-share
+/// handle".
+///
+/// `ERROR_SHARING_VIOLATION` (32) and `ERROR_LOCK_VIOLATION` (33). Gated to
+/// Windows on purpose: POSIX has no mandatory sharing, so nothing there raises
+/// these on `open`, and errno 32 is `EPIPE` — retrying *that* would paper over
+/// an unrelated failure rather than a transient reader.
+#[cfg(windows)]
+fn is_sharing_violation(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(32 | 33))
+}
+
+#[cfg(not(windows))]
+fn is_sharing_violation(_error: &std::io::Error) -> bool {
+    false
+}
 
 /// Schema version of an inventory line.
 ///
@@ -295,6 +332,8 @@ impl Inventory {
     /// record that a power cut turns into a file the next run will not know it
     /// already has.
     ///
+    /// A sharing violation on the open is retried — see [`APPEND_ATTEMPTS`].
+    ///
     /// # Errors
     /// [`ThetaError::Io`] if the directory, the file, or the write fails.
     pub fn append(&self, record: &InventoryRecord) -> Result<(), ThetaError> {
@@ -305,15 +344,7 @@ impl Inventory {
                 source,
             })?;
         }
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .map_err(|source| ThetaError::Io {
-                path: self.path.clone(),
-                during: "opening the inventory for append",
-                source,
-            })?;
+        let mut file = self.open_for_append()?;
         let mut line = record.to_json_line();
         line.push('\n');
         file.write_all(line.as_bytes())
@@ -327,6 +358,47 @@ impl Inventory {
             during: "flushing the inventory",
             source,
         })
+    }
+
+    /// Opens the inventory for append, retrying a sharing violation.
+    ///
+    /// Only a sharing violation is retried. Everything else — a missing
+    /// directory, a permission denial, a read-only volume — fails on the first
+    /// attempt, because those do not clear on their own and a retry loop would
+    /// only delay the report by five seconds.
+    ///
+    /// # Errors
+    /// [`ThetaError::Io`] once the attempts are spent, carrying the last real
+    /// OS error so the cause stays visible.
+    fn open_for_append(&self) -> Result<std::fs::File, ThetaError> {
+        let mut attempts_left = APPEND_ATTEMPTS;
+        loop {
+            let source = match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)
+            {
+                Ok(file) => return Ok(file),
+                Err(source) => source,
+            };
+            attempts_left -= 1;
+            let shared = is_sharing_violation(&source);
+            if attempts_left == 0 || !shared {
+                return Err(ThetaError::Io {
+                    path: self.path.clone(),
+                    during: if shared {
+                        "opening the inventory for append: another process held a deny-share \
+                         handle for the whole retry window. Observe a live acquisition with a \
+                         FileShare.ReadWrite open, a copy, or a file count — never a plain \
+                         Get-Content (docs/RUNBOOK_BLITZ.md)"
+                    } else {
+                        "opening the inventory for append"
+                    },
+                    source,
+                });
+            }
+            std::thread::sleep(APPEND_RETRY_PAUSE);
+        }
     }
 
     /// The `request` string of every complete record, for a resume diff.

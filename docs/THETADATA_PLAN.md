@@ -387,6 +387,20 @@ five-minute stalls are gone. Those were real operational costs.
 hedging — 0.25 req/s is the *heaviest* root at its heaviest era, while VIX, RUT,
 DIA and NDX chains are a fraction of SPY's. No single number is honest here.
 
+**Unattributed: the 2026-07-30 recovery to 1.1–1.8 req/s.** After a reboot and a
+**fresh Terminal**, the resumed tranche sustained 1.11–1.80 req/s on QQQ
+`eod`/`greeks_eod` — 4–7× the 0.20–0.25 req/s the same driver measured the night
+before. Two candidate causes changed at the same time and this run cannot
+separate them: (a) **Terminal degradation over uptime** — the 2026-07-29 process
+had been up 8+ h and was emitting `RST_STREAM … PROTOCOL_ERROR` bursts at 23:18
+and 01:00 before it was killed; (b) **root/era mix** — SPY 2021 chains are
+materially larger than QQQ 2019–2023. Logged rather than chased. **T1 must not
+project from either figure until they are separated**, which takes one
+experiment: re-run the same SPY-2021 slice against a freshly started Terminal. If
+(a) dominates, periodically restarting the Terminal is free throughput and
+belongs in the RUNBOOK; if (b) does, 0.25 req/s stands as the heavy-root floor
+and the 1.1–1.8 figure is not a ceiling anyone should plan against.
+
 **Serial acquisition measures 0.84–0.96 req/s**, so the first driver — which
 called `fetch` per request and never `fetch_batch` — was leaving roughly 3× on
 the table while projecting 5.3.
@@ -568,20 +582,30 @@ behaviour so a fix must consciously flip it. **Consequence: equity
 it is fixed.** `is_trading_day` is untouched, so day-level coverage and every
 T0 reconciliation edge are unaffected (D-0059).
 
-**Before T1** — measured SPX/QQQ/IWM per-day sizes · Databento blitz at terminal
-state (`statistics` still at `submitted`) · **streaming completions in the
-acquisition driver**.
+**Before T1** — measured SPX/QQQ/IWM per-day sizes · manifest symbol
+completeness for CL.FUT and ZN.FUT (D-0066, M1-close-block) ·
+**`ShutdownBlockReasonCreate` while a tranche is live**.
 
-*Streaming completions, deferred to pre-T1 deliberately.* `run_tranche` fetches
-in chunks of 8 and waits for the whole chunk, so it still pays the slowest draw
-in each — bounded now, but not zero. The fix is to process each response as it
-arrives rather than by chunk, which is safe because **resume keys on the request
-string and not on position**: nothing anywhere requires results to be handled in
-order. It is *not* worth doing mid-T0. A healthy acquisition running at
-1.33–1.68 req/s finishes overnight unattended, and restarting it to chase the
-measured 3.04 req/s ceiling risks hours to save hours. T1 is where the change
-pays: far more requests, far larger payloads, and §7.2's whole-chain 1-minute
-days are exactly the shape whose tail latency a chunk barrier amplifies worst.
+*`ShutdownBlockReasonCreate`, pre-T1.* Promoted from candidate on evidence: **24
+Start-menu shutdowns in 45 nights**, clustered 23:00–02:50 (§9). That is not an
+outlier risk to be accepted, it is the machine's climate, and T1's tranches are
+longer than T0's. A live acquisition must register a shutdown-block reason so the
+button shows "acquisition in progress" instead of silently ending hours of work —
+the block is *advisory* (the operator can still proceed), which is the point: the
+failure mode being fixed is an invisible collision, not an unauthorised one. Needs
+one Win32 call and a decision on whether `crucible-data` may own it, or whether it
+belongs in the CLI beside `SystemClock` as another sanctioned OS touch (D-0032).
+
+*Streaming completions: done.* Built, deployed and measured — see §5.2. The gain
+came in under the 1.5× threshold, so the Terminal is accepted as the bottleneck;
+streaming is kept for its operational properties (continuous writes, a kill that
+loses only the in-flight requests, no five-minute stalls) rather than for
+throughput.
+
+*The Databento blitz reached terminal state on 2026-07-30*: all seven
+`statistics` parents are appended, so §9's open row is closed. What remains
+before the closing sentence is `verify` + `layout-check` and the D-0066
+exception, not an acquisition.
 
 ### 8.0 T0 does not block M1 close
 
@@ -622,7 +646,7 @@ ends.
 | Item | Status | Blocks |
 |---|---|---|
 | July-3rd conditional early close | six phantom 13:00 closes; test asserts the current wrong behaviour so a fix must flip it (D-0059) | the **session-hours layer** — equity `bars_per_year`, T1 intraday minute grids |
-| Streaming completions | driver still barriers per chunk of 8 | nothing; **pre-T1** throughput |
+| Manifest symbol completeness | 21,736 of 108,696 observed symbols absent, CL.FUT + ZN.FUT only; cause and repair designed (D-0066) | **M1 close**; `coverage` would re-buy those symbols |
 
 ---
 
@@ -638,14 +662,79 @@ an intent count measures attempts, not the plan.
 | `ohlcv-1s` × 7 | 7 | appended |
 | `definition` × 7 | 7 | appended |
 | `mbo`/`tbbo`/`trades` ES | 3 | appended |
-| **`statistics` × 7** | 7 | **`submitted` — open** |
+| **`statistics` × 7** | 7 | **appended** (2026-07-30) |
 
 `statistics` had **no intent at all** until 2026-07-29; quoted at **$0.0000**
 (5.42 GiB; metered would be $5.4168 at $1.00/GB — a flat-rate entitlement is
 active). Submitted under `--max-cost-usd 0.00`, which refuses rather than bills
 if the entitlement lapses.
 
-**The blitz closing sentence is not yet written.** It reads "33 intents, every
-plan item appended, zero gaps" only after `statistics` appends and `verify` +
-`layout-check` are clean and `BLITZ_CHECKLIST` §3 is ticked — not on intent
-count.
+`6E.FUT` appended 2026-07-29 18:29; the remaining six were still `submitted` when
+the machine went down at 01:21:40 (see **the shutdown, unattributed** below), and
+the poller had already exited at its own 480-minute timeout (exit 5, resumable by
+design — D-0034). The
+2026-07-30 re-run **adopted all six under their original `GLBX-20260729-*` job
+ids** — `submitted 0 job(s)` — which is the D-0034/D-0029 resume path doing
+exactly what it promises: nothing re-submitted, nothing bought twice. The entitle-
+ment was still live at re-run (metered estimate $5.0943, vendor quote $0.0000).
+
+### The 2026-07-30 01:21 shutdown — attributed, and the rule it produced
+
+**System event 1074 at 01:21:40**, initiator `StartMenuExperienceHost.exe` (the
+Start-menu power button — not a scheduler, not `shutdown.exe`, not Windows Update,
+which attribute to `MoUsoCoreWorker.exe` / `TrustedInstaller.exe` as the same log
+shows them doing on 07-29 06:59–07:02), on behalf of `Liron\liron`, type
+`power off`, reason `Other (Unplanned)`.
+
+**Operator: Liron.** Initially reported as not-his, then resolved: a **Claude-side
+HTTP 529 read as a failure state** — the agent session looked dead, so the machine
+was shut down for the night, on top of the documented nightly habit below. The
+first reading was wrong and is recorded as wrong rather than quietly overwritten,
+because §0.3 is about keeping the capture separate from the reading of it, and a
+reading that changed is exactly the case that discipline exists for.
+
+> **The rule this produced: a Claude/API failure never endangers an acquisition;
+> power-off does.** A 529, a dropped session, a hung agent — none of those touch
+> a running tranche. `theta-pull` and `pull` are separate OS processes holding
+> their own sockets to the Terminal and the vendor; they neither know nor care
+> that the agent driving the conversation stopped answering. Shutting the machine
+> down because the *assistant* looks stuck is the one action that converts a
+> harmless upstream outage into hours of lost acquisition. **When Claude looks
+> dead, leave the machine alone** — check `crucible`/`java` in Task Manager, or
+> count files under `external/thetadata/options`, and the tranche will be found
+> running.
+
+**The forensics are kept, because what they proved stays true.** Access was
+**console-only** — this was not remote, and that remains worth having on record:
+
+| Check | Finding |
+|---|---|
+| Session that issued it | TS-LocalSessionManager 23 + 54: console **Session ID 1** logged off 01:21:59, "received system shutdown message" |
+| RDP used? | **No.** Every session logon on 07-28, 07-29 and 07-30 reports `Source Network Address: LOCAL`. No 21/25 with an IP anywhere in the window |
+| RDP exposed? | `fDenyTSConnections = 0`, listening on **`0.0.0.0:3389`** — unused, but open; being closed on its own merits |
+| TeamViewer? | Installed, service running — but its own log at shutdown: `ClearAllRemoteSessions(): **RemoteSession Count: 0**`, and only 14 lines in the whole 00:00–01:59 window, all shutdown sequence |
+
+The elevated Security-log check (4624/4778/4779) is **retired, not outstanding**:
+it existed to test a remote-operator hypothesis that the attribution has settled.
+
+**The habit is the climate, not an outlier.** Over 45 days there are **24
+`StartMenuExperienceHost` shutdowns from this account**, clustered in the
+23:00–02:50 window, the nearest neighbours being **07-25 at 01:21:09** and
+**06-27 at 01:20:55** — within a minute of the same wall-clock time; 07-28 at
+04:01:02 is the identical signature. So an overnight power-off is **expected load
+for a multi-day tranche, not an incident**, and T0/T1 planning must assume it.
+That is what promotes `ShutdownBlockReasonCreate` from idea to **pre-T1 item**
+(§8): a tranche has to make its own existence visible at the moment the button is
+pressed, because that is the moment the habit and the acquisition collide.
+
+**The blitz closing sentence, and the exception it must name.** "33 intents,
+every plan item appended, zero gaps" is now true of the *acquisition* — every
+plan item is appended and `BLITZ_CHECKLIST` §3's pull rows are done. It is **not
+yet written**, because it still needs `verify` + `layout-check` clean, and
+because "zero gaps" would be false as stated: **D-0066** records that 21,736 of
+108,696 observed symbols are absent from the manifest for CL.FUT and ZN.FUT. The
+sentence must therefore read "every plan item appended" *and* carry the
+exception — the manifest does not yet tell the whole truth per contract, and
+`coverage` would re-buy those symbols. Per §0.1, the smaller true number: 33
+intents appended, one known and quantified symbol-completeness gap, `verify` not
+yet re-run.

@@ -196,3 +196,73 @@ fn a_non_finite_ratio_writes_null_rather_than_invalid_json() {
     assert_eq!(format_ratio(f64::INFINITY), "null");
     assert_eq!(format_ratio(2.0), "2.000");
 }
+
+// The two halves of the retry, and they must both be asserted: a retry loop
+// nobody has seen survive a real lock is decoration, and one nobody has seen
+// give up is a hang waiting to happen.
+//
+// Windows-only because the failure is Windows-only: these tests open with
+// `share_mode(0)`, and POSIX has no mandatory sharing to reproduce.
+#[cfg(windows)]
+mod deny_share {
+    use super::*;
+    use std::os::windows::fs::OpenOptionsExt;
+
+    /// Opens `path` denying every other handle — what `Get-Content` and
+    /// `System.IO.StreamReader` do by default, and what killed a live run.
+    fn deny_share_handle(path: &std::path::Path) -> std::fs::File {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(path)
+            .expect("the exclusive reader must open")
+    }
+
+    #[test]
+    fn append_survives_a_transient_deny_share_reader() {
+        let dir = TempDir::new();
+        let inventory = Inventory::open(dir.path());
+        // The file must exist for a reader to lock it at all.
+        inventory.append(&record("seed")).expect("seed appends");
+
+        let path = inventory.path().to_path_buf();
+        let held = deny_share_handle(&path);
+        let releaser = std::thread::spawn(move || {
+            // Well inside the ~4.5 s window, well outside one attempt.
+            std::thread::sleep(std::time::Duration::from_millis(1200));
+            drop(held);
+        });
+
+        inventory
+            .append(&record("survived"))
+            .expect("a glance at progress must not kill the run");
+        releaser.join().expect("releaser thread");
+
+        let requests = inventory.completed_requests().expect("readable");
+        assert_eq!(requests, vec!["seed".to_owned(), "survived".to_owned()]);
+    }
+
+    #[test]
+    fn append_still_fails_on_a_persistent_deny_share_reader() {
+        let dir = TempDir::new();
+        let inventory = Inventory::open(dir.path());
+        inventory.append(&record("seed")).expect("seed appends");
+
+        // Held across the whole call: the attempts are spent and never succeed.
+        let _held = deny_share_handle(inventory.path());
+        let error = inventory
+            .append(&record("doomed"))
+            .expect_err("a permanent holder must end the run, not hang it");
+
+        match error {
+            ThetaError::Io { during, source, .. } => {
+                assert!(
+                    during.contains("deny-share"),
+                    "the message must name the cause: {during}"
+                );
+                assert_eq!(source.raw_os_error(), Some(32), "sharing violation");
+            }
+            other => panic!("expected an Io error, got {other:?}"),
+        }
+    }
+}
