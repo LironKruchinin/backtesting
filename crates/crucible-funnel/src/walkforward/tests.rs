@@ -689,6 +689,81 @@ fn day_slicing_and_fold_attribution_reconcile_to_the_nanodollar() {
     assert_eq!(dollars(summed), -150);
 }
 
+/// **A planted daily-loss-limit breach lands on the same day in both
+/// consumers.** The reconciliation above shows the two agree about every day's
+/// PnL; this shows the agreement survives the question the boundary exists
+/// for, which is the one that is asked of a *named* day.
+///
+/// The fixture's only losing session is day 7's −$150 round-trip (module
+/// docs), so a $100 daily loss limit has exactly one answer. Computed twice,
+/// from opposite ends:
+///
+/// - **account-sliced** — scan `AccountSeries::days` for a
+///   `close_pnl_nano_usd` at or below −$100. Answer: day **7**.
+/// - **fold-attributed** — never look at a `DayRecord`: take each day's bar
+///   range from `FoldPlan` and ask `RunTrace::window` what the equity did
+///   across it. Answer: day **7**, and −$150 to the nanodollar.
+///
+/// And it is out-of-sample: day 7 sits in fold 1's *test* window, so the
+/// breach is one a report would quote.
+///
+/// One producer of "which day", so one date. Two producers is how a breach
+/// lands on 2024-07-08 in the walk-forward report and 2024-07-09 in the
+/// account report, with neither of them looking wrong on its own.
+#[test]
+fn a_planted_daily_loss_limit_breach_lands_on_the_same_day_in_both_consumers() {
+    /// The planted limit, in whole dollars.
+    const DLL_USD: i64 = 100;
+
+    let ev = events();
+    let keys = day_keys(ev.len());
+    let g = grid(IntAxis::Fixed(2));
+    let plan = FoldPlan::build(&keys, g.max_warmup_bars(), fold_spec()).expect("the fixture plans");
+    let (result, series) = replay_capturing(&ev, &keys);
+    let trace = RunTrace::new(&result.equity, &result.closed_trades, &result.fee_events);
+
+    // The account-sliced answer: the capture's own day records.
+    assert_eq!(
+        days_losing_at_least(&series, DLL_USD),
+        vec![7],
+        "the capture must find exactly one breaching session"
+    );
+    assert_eq!(dollars(day_pnl(&series, 7)), -150);
+
+    // The fold-attributed answer: the same question asked of the windows the
+    // fold machinery cuts, without consulting a `DayRecord` at all.
+    let mut by_fold_machinery: Vec<i64> = Vec::new();
+    for (d, &key) in plan.days().iter().enumerate() {
+        let s = trace.window(
+            plan.day_start_bar(d)..plan.day_start_bar(d + 1),
+            CASH,
+            PER_YEAR,
+        );
+        let pnl = s.final_equity_nano_usd - s.initial_equity_nano_usd;
+        if pnl <= -DLL_USD * 1_000_000_000 {
+            by_fold_machinery.push(key);
+            assert_eq!(
+                pnl,
+                day_pnl(&series, key),
+                "day {key} breached by a different amount in the two consumers"
+            );
+        }
+    }
+    assert_eq!(
+        by_fold_machinery,
+        vec![7],
+        "the two consumers must name the same breaching day"
+    );
+
+    // Out-of-sample: fold 1's test window is the one that holds it.
+    let fold1 = &plan.folds()[1];
+    assert!(
+        plan.days()[fold1.test.days.clone()].contains(&7),
+        "the planted breach must land in a test window, or it is not a number \
+         any report would quote"
+    );
+}
+
 /// **The negative control the ruling earns.** Hand ONE consumer a wall-clock
 /// slicer and the reconciliation breaks — with the daily-loss question landing
 /// on a day the other consumer does not have.
