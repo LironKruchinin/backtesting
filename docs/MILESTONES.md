@@ -45,11 +45,21 @@ deadline-driven (see `crucible-data::ingest` module docs).
             missing, 0 dropped archive-wide (D-0068)
       - [x] CLI wiring: `clap`, `--execute`, `--max-cost-usd`, exit codes
             (0 done / 2 usage / 3 refused / 4 failed / 5 resumable)
-- [ ] Bootstrap pulls: 16y `ohlcv-1s`/`ohlcv-1m` + `definition` + `statistics`
-      for the seven-parent basket in `docs/DATA_PLAN.md` — the acquisition
-      itself, run against a live Standard subscription per
-      `docs/RUNBOOK_BLITZ.md` and `docs/BLITZ_CHECKLIST.md`. Tooling is done;
-      this box is the shopping trip
+- [x] Bootstrap pulls (2026-07-30): 16y `ohlcv-1s`/`ohlcv-1m` + `definition` +
+      `statistics` for the seven-parent basket in `docs/DATA_PLAN.md` — the
+      acquisition itself, run against a live Standard subscription per
+      `docs/RUNBOOK_BLITZ.md` and `docs/BLITZ_CHECKLIST.md`. Tooling was done;
+      this box was the shopping trip. **33 intents, every plan item appended**,
+      each carrying `intended → submitted → downloaded → appended` in
+      `jobs.jsonl`: `ohlcv-1m` 9 (ES split ×3), `ohlcv-1s` 7, `definition` 7,
+      `statistics` 7, and one each of `mbo`/`tbbo`/`trades` on ES. 21.30 GiB
+      across 33 raw files; `verify` re-hashed all 33 clean and `layout-check`
+      reported the tree clean, both exit 0 on 2026-07-30. The seven `statistics`
+      parents were the last in: quoted **$0.0000** under a flat-rate
+      entitlement, six of them adopted on re-run under their original
+      `GLBX-20260729-*` job ids with `submitted 0 job(s)`, so nothing was bought
+      twice (D-0029/D-0034). The per-contract half of the record needed the
+      D-0068 repair before it told the whole truth
       - [x] `definition`, 16y, ES/NQ/RTY (2026-07-28): pulled ahead of the
             subscription because the roll table needs expiries. Quoted
             **$0.0000** — a flat-rate entitlement was already active on the
