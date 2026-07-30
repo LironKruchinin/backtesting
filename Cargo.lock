@@ -525,6 +525,7 @@ dependencies = [
  "crucible-data",
  "crucible-engine",
  "crucible-strategies",
+ "rand_chacha",
  "rayon",
  "serde",
  "serde_json",
