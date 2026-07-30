@@ -100,6 +100,44 @@
 //!                | "is_rth" | "is_overnight" | "is_post_rth"
 //! ```
 //!
+//! ## Rolling normalizers (D-0080)
+//!
+//! Two more kinds, `zscore` and `stdev`, each over a declared **source**:
+//!
+//! ```toml
+//! [indicators.stretch]
+//! kind = "zscore"
+//! period = 20
+//! source = "close"     # "close" | "volume" | "return" — required, no default
+//!
+//! [indicators.vol]
+//! kind = "stdev"
+//! period = 20
+//! source = "return"    # realized volatility, in return units
+//! ```
+//!
+//! They are the answer to the two things the grammar most obviously could not
+//! say: "this bar is two sigmas below its own recent range" (no arithmetic
+//! between operands, so `(close - bb.mid)/(bb.upper - bb.mid)` is unwritable)
+//! and "volume is twice its recent average" (an absolute `volume > 1000` means
+//! something different on every grain).
+//!
+//! **They are point-in-time by construction, and there is no full-sample
+//! counterpart** — see `crate::indicators::rolling`. No `IndicatorKind` is a
+//! full-sample statistic, so no config can name one; the leak in
+//! [`crate::controls::LeakyZScore`] is reachable from Rust, on purpose, and
+//! unreachable from TOML.
+//!
+//! Three details that move numbers:
+//!
+//! - `source` is **required** and is part of the slot's identity, not one of
+//!   its axes: it does not expand, and two slots differing only in it are two
+//!   different features that must not share a config hash (D-0012).
+//! - `source = "return"` costs **one extra warmup bar** — a return needs two
+//!   closes — and that bar is declared, so §2.6 aligns the whole grid on it.
+//! - `period` must be at least 2. A one-bar window has zero spread, so every
+//!   reading over it is 0/0; the refusal names the slot at config-load time.
+//!
 //! ## The volume operand (D-0079)
 //!
 //! `volume` is the completed bar's traded size in **contracts**, and it is a

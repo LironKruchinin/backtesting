@@ -574,6 +574,22 @@ reference; supersede the decision if you disagree — don't hotfix.
   2.0000000000000004, so the *number of points* on the axis — and with it the
   combo count, every combo index, and every trial charged to the hypothesis
   family — would depend on floating-point accumulation. Write the values out.
+- **There is no full-sample z-score in `crucible-strategies::indicators`, and
+  adding one is not a convenience** (D-0080). Every statistic there is a
+  trailing window behind `Indicator::update`, which takes one bar; no
+  constructor takes a series, and no `IndicatorKind` names a full-sample
+  variant, so `controls::LeakyZScore` stays reachable from Rust and unreachable
+  from TOML. The property is truncation invariance, and its control is a
+  full-sample function written **inside the test file** — the only place it may
+  exist.
+- **`zscore` returns `None` on a flat window while `stdev` returns `0.0`**
+  (D-0080). The z-score's numerator and denominator are both zero, and `None`
+  is what the grammar already means by "no opinion"; a deviation of zero is a
+  real answer. Neither is a NaN caught downstream by accident.
+- **`source = "return"` adds a bar to `Grid::max_warmup_bars`** (D-0080). A
+  return needs two closes, and the bar is declared rather than absorbed so §2.6
+  aligns the whole grid on it — otherwise a mixed-source grid would start its
+  return combos one bar late while reporting they started with everyone else.
 - **A combo config whose rules read the session clock is REFUSED against a
   synthetic feed**, rather than run with those rules silent (D-0078). A
   `minutes_since_open < 30` with no calendar behind it has no opinion on any

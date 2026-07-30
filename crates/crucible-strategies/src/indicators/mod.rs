@@ -8,10 +8,12 @@
 
 mod bollinger;
 mod ema;
+mod rolling;
 mod sma;
 
 pub use bollinger::{Bollinger, BollingerBands};
 pub use ema::Ema;
+pub use rolling::{RollingSource, RollingStdev, RollingZScore};
 pub use sma::Sma;
 
 #[cfg(test)]

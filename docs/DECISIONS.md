@@ -2105,3 +2105,75 @@ propose a superseding entry — don't silently diverge.
   volume picking up the signal offset → the signal-space test; `volume` removed
   from the reserved list → the reservation test *and* the slot-shadowing
   refusal; the operand rewired to read the close → three tests at once.
+- **D-0080** (2026-07-30) — **Rolling normalizers exist and a full-sample one is
+  not expressible — by construction, not by discipline.**
+  `crucible-strategies::indicators::rolling` adds `RollingZScore` and
+  `RollingStdev` over a declared `RollingSource` (`close`, `volume`, `return`),
+  and the combo grammar gains `kind = "zscore"` and `kind = "stdev"`. They
+  answer the two things the grammar most obviously could not say: "this bar is
+  two sigmas below its own recent range" — unwritable, because there is no
+  arithmetic between operands, so `(close - bb.mid)/(bb.upper - bb.lower)` has
+  no spelling — and "volume is twice its recent average", which an absolute
+  `volume > 1000` (D-0079) cannot mean on more than one grain.
+  **The §2.1 defence is structural.** A normalized feature is where lookahead
+  usually enters a research pipeline, and it enters by convenience: the series
+  is in memory, `mean()` and `std()` are one call each, and the z-score is
+  standardized against a mean the market had not produced. So everything here
+  is a private trailing window behind `Indicator::update`, which takes **one
+  bar** and returns a reading for **that** bar. There is no constructor over a
+  slice, no `fit`, no two-pass anything, and no `IndicatorKind` that names a
+  full-sample statistic — so `controls::LeakyZScore`, the planted defect, stays
+  reachable from Rust and unreachable from TOML. A test enumerates the five
+  kinds so that adding a sixth fails until someone answers "does it look at
+  anything it has not been shown yet?".
+  **The property, and the planted control.** The claim is **truncation
+  invariance**: a reading at bar *i* is a function of bars *i−period+1 … i*
+  alone, so appending bars after *i* cannot change it. Both halves are asserted
+  together, because only the pair is a diagnosis (§7): the rolling readings over
+  a 100-bar prefix are **bit-identical** to the first hundred readings over the
+  200-bar series, and the full-sample readings over the same prefix move by more
+  than a full sigma. The full-sample function is written **in the test file and
+  nowhere else** — the only way to compare against the defect is to build it
+  where it cannot escape. On a trending fixture the two statistics differ by
+  more than two sigma at the same bar, and the first warm bar reads deeply
+  negative under the full-sample statistic (which "knows" the series climbs for
+  180 more bars) and ordinary under the rolling one. That difference **is** the
+  lookahead, measured rather than asserted.
+  **The control has a control.** Rewriting the test's leaky reference as an
+  *expanding* window — past-only, still causal — drops the measured movement to
+  exactly **0** and both assertions fail. So the detector is measuring
+  future-dependence and not accumulator noise, sample size, or the fixture.
+  **`source` is required and is part of a slot's identity**, not one of its
+  axes: it does not expand, and a 20-bar z-score of price and a 20-bar z-score
+  of volume are different features that must not share a config hash (D-0012).
+  It is rendered into the canonical form, and a CLI test asserts all three
+  sources hash differently. There is no default, because "the z-score of what"
+  is not a detail; an unknown spelling is refused naming the slot and listing
+  the three that exist.
+  **`source = "return"` costs one extra warmup bar** — a return needs two
+  closes — and the bar is *declared* rather than absorbed, so §2.6 aligns the
+  whole grid on it. A grid mixing sources would otherwise start its
+  return-based combos one bar late while reporting that they started with
+  everyone else.
+  **`period >= 2`, refused at config-load time** naming the slot. A one-bar
+  window has zero spread, so every reading over it is 0/0.
+  **A flat window has no z-score and does have a deviation.** The z-score is
+  `None` — the grammar's "no opinion", the same answer an unwarm slot gives —
+  because the numerator and the denominator are both zero; the standard
+  deviation is `0.0`, because that is a real answer. Returning a NaN and letting
+  the operand's finiteness filter catch it would work by accident.
+  **A z-score is shift-invariant**, so unlike `close > 4500` it is safe on a
+  back-adjusted series (D-0076): the offset cancels between the value and the
+  window's mean. Asserted to 1e-9 rather than bit-exactly, and the difference is
+  worth stating — the rolling accumulator sums values around 350 differently
+  from values around 100, which is the drift `indicators` already accepts until
+  the M2 Welford/rebase task. A numerics gap, not a semantics one.
+  **Each control was watched firing** (§7). Seven mutations, seven catches: the
+  window read before it was full → four tests; the return source declaring no
+  extra warmup → three; a flat window returning NaN instead of no-opinion →
+  three; the volume source reading the close → the source-selection test, which
+  carries its own control (the same bars' closes are flat, so a source being
+  ignored would answer twice the same way); the source dropped from the
+  canonical form → the identity test; the grid's warmup ignoring the source →
+  the alignment test; and the leaky reference made causal → the planted control
+  itself, above.

@@ -51,8 +51,11 @@ Grade A is a narrow envelope, and it is narrow on purpose. As of 2026-07-30 a
 combo config can express **only** this:
 
 - **Indicators:** `sma` (period), `ema` (period), `bollinger` (period, k →
-  fields `.mid`, `.upper`, `.lower`). That is the complete list
-  (`crucible-strategies::combo::spec`).
+  fields `.mid`, `.upper`, `.lower`), `zscore` (period, source) and `stdev`
+  (period, source) where source is `close` / `volume` / `return` (D-0080). That
+  is the complete list (`crucible-strategies::combo::spec`), and every one of
+  them is a trailing-window statistic — there is no full-sample variant, and no
+  config can name one.
 - **Operands:** a numeric constant, a price field (`open`, `high`, `low`,
   `close`) of the completed bar, its `volume` in contracts (D-0079), an
   indicator slot, or a **session clock reading** — `minutes_since_open`, `minutes_to_close`,
@@ -78,7 +81,7 @@ most common reason a paper's signal is grade B rather than A:
 |---|---|
 | ~~Time of day / session position~~ | **Expressible since 2026-07-30** (D-0078). `minutes_since_rth_open > 0 and minutes_since_rth_open <= 30` is the first half-hour of RTH; `minutes_to_close <= 30` is the last half-hour of the session, early closes included. Needs a bundled calendar, so a synthetic feed is refused. An *opening range* still is not: it needs a rolling high/low over a window, not a clock. |
 | ~~Volume~~ | **Expressible since 2026-07-30** (D-0079). `volume` is the completed bar's traded size in contracts — an absolute figure, so a threshold has to be chosen for the grain. A *relative* one ("twice the 20-day average") needs the rolling normalizer, not the operand. |
-| **Arithmetic between operands** | Only *comparisons*. You cannot write `(bb.upper - bb.lower) > x`, so no width, ratio, spread, or normalized-deviation term. |
+| **Arithmetic between operands** | Only *comparisons*. You cannot write `(bb.upper - bb.lower) > x`, so no width, ratio or spread term. **A normalized deviation no longer needs one** — `zscore` (D-0080) is that term as a slot — but a general expression still cannot be built. |
 | **Calendar predicates** | Day-of-week, day-of-month, turn-of-month, holiday proximity. Grade B (the calendar exists in `crucible-data`; the grammar cannot reach it). |
 | **Stops / targets** | The engine has brackets (D-0069) but the combo grammar cannot declare one. Both grid commands print a zero path-sensitive count and say why. |
 | **Multi-timeframe / multi-instrument** | One of each per config, by design. |
@@ -256,6 +259,7 @@ retired and the decision that did it.
 | bar resampler | §2.2's first structural blocker; `5m`/`15m`/`1h`/`1d` are replayable | D-0077 |
 | time-of-day / session predicates | §2.1's "Time of day / session position" row | D-0078 |
 | volume operand | §2.1's "Volume" row | D-0079 |
+| rolling normalizer | the *normalized-deviation* half of §2.1's "Arithmetic between operands" row; volume and volatility become relative rather than absolute | D-0080 |
 
 Grade tally: **2 A · 8 B · 5 C**. That distribution is the honest one, and the
 shape of it is the sweep's main structural finding: the combo grammar is three
@@ -263,8 +267,8 @@ indicators and six comparison operators, and almost every published intraday
 result is stated in terms of a clock the grammar cannot read. Four pieces of
 code — a **time-of-day predicate**, a **1m→5m/daily resampler**, a **volume
 operand**, and a **rolling normalizer** — would move most of the B column into
-A. They are the highest-leverage work in this directory, and none of them costs
-a purchase.
+A. **All four landed on 2026-07-30** (D-0077 … D-0080); §6.1 says which row each
+one retired, and the grades above are unchanged because re-grading is triage.
 
 Two entries carry a warning the grade does not: **H-012** and **H-013** are
 graded on cost to test, and both have **no refereed empirical support** for

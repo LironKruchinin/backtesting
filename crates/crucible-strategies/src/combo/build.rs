@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crucible_core::prelude::*;
 
-use crate::indicators::{Bollinger, Ema, Sma};
+use crate::indicators::{Bollinger, Ema, RollingStdev, RollingZScore, Sma};
 
 use super::grid::Combo;
 use super::rules::{EvalCtx, Expr, RuleSet, SessionPosition, SlotOut};
@@ -29,6 +29,8 @@ enum SlotState {
     Sma(Sma),
     Ema(Ema),
     Bollinger(Bollinger),
+    ZScore(RollingZScore),
+    Stdev(RollingStdev),
 }
 
 impl SlotState {
@@ -39,6 +41,12 @@ impl SlotState {
             IndicatorParams::Bollinger { period, k } => {
                 SlotState::Bollinger(Bollinger::new(period, k))
             }
+            IndicatorParams::ZScore { period, source } => {
+                SlotState::ZScore(RollingZScore::new(period, source))
+            }
+            IndicatorParams::Stdev { period, source } => {
+                SlotState::Stdev(RollingStdev::new(period, source))
+            }
         }
     }
 
@@ -47,6 +55,8 @@ impl SlotState {
             SlotState::Sma(i) => i.update(bar).map(SlotOut::Scalar),
             SlotState::Ema(i) => i.update(bar).map(SlotOut::Scalar),
             SlotState::Bollinger(i) => i.update(bar).map(SlotOut::Bands),
+            SlotState::ZScore(i) => i.update(bar).map(SlotOut::Scalar),
+            SlotState::Stdev(i) => i.update(bar).map(SlotOut::Scalar),
         }
     }
 }
