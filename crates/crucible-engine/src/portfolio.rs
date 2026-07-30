@@ -487,6 +487,63 @@ mod tests {
         assert_eq!(t[0].closed_ts, Ts(2));
     }
 
+    /// The same claim as the fixture above, on a fixture that can actually
+    /// see it fail.
+    ///
+    /// **Why this exists.** Deleting the two reset lines in `apply_fill` and
+    /// running the fixture above leaves it *green*: there, the second
+    /// episode's MAE (−$1,000) is deeper than the first's (−$500) and both
+    /// MFEs are $0, so the running extremes come out identical whether or not
+    /// they were reset. It asserts the right numbers and detects nothing —
+    /// exactly the decoration CLAUDE.md §7 is about. This fixture makes the
+    /// *first* episode the wider pair on **both** sides, so inheriting either
+    /// one is visible.
+    ///
+    /// ES, $50/point, 1 contract, no fees. `excursion = episode_net +
+    /// unrealized`, and `episode_net` is $0 at every mark below.
+    ///
+    /// | event | position | unrealized | excursion |
+    /// |---|---|---|---|
+    /// | buy 1 @ 100, Ts(1) | long 1 | — | — |
+    /// | mark 120 | long 1 | +20 × 50 = +$1,000 | **+$1,000** |
+    /// | mark  80 | long 1 | −20 × 50 = −$1,000 | **−$1,000** |
+    /// | sell 2 @ 100, Ts(2) | short 1 @ 100 | closes leg 1 at (100 − 100) × 50 = $0 | |
+    /// | mark 101 | short 1 | (100 − 101) × 50 = −$50 | **−$50** |
+    /// | mark  98 | short 1 | (100 − 98) × 50 = +$100 | **+$100** |
+    /// | buy 1 @ 99, Ts(3) | flat | closes at (100 − 99) × 50 = +$50 | |
+    ///
+    /// Round-trip 1: net $0, MAE −$1,000, MFE +$1,000.
+    /// Round-trip 2: net +$50, MAE **−$50**, MFE **+$100** — and if the reset
+    /// were missing it would report −$1,000 / +$1,000, a round-trip that was
+    /// twenty times further offside than it ever went.
+    #[test]
+    fn a_flip_does_not_inherit_the_previous_episodes_excursions() {
+        let mut p = Portfolio::new(es_spec(), 0);
+        p.apply_fill(&fill_at(Ts(1), Side::Buy, 1, 100.0, 0));
+        p.mark(Price::from_points(120));
+        p.mark(Price::from_points(80));
+        p.apply_fill(&fill_at(Ts(2), Side::Sell, 2, 100.0, 0));
+        p.mark(Price::from_points(101));
+        p.mark(Price::from_points(98));
+        p.apply_fill(&fill_at(Ts(3), Side::Buy, 1, 99.0, 0));
+
+        let t = p.closed_trades();
+        assert_eq!(t[0].net_nano_usd, 0);
+        assert_eq!(t[0].mae_nano_usd, -1_000_000_000_000);
+        assert_eq!(t[0].mfe_nano_usd, 1_000_000_000_000);
+
+        assert_eq!(t[1].net_nano_usd, 50_000_000_000);
+        assert_eq!(
+            t[1].mae_nano_usd, -50_000_000_000,
+            "the second episode inherited the first one's drawdown"
+        );
+        assert_eq!(
+            t[1].mfe_nano_usd, 100_000_000_000,
+            "the second episode inherited the first one's run-up"
+        );
+        assert_eq!(t[1].opened_ts, Ts(2));
+    }
+
     /// A scale-out banks money mid-episode, and the excursion has to see it.
     ///
     /// Buy 2 @ 100, no fees. Sell 1 @ 110: +10 × 50 = +$500 realized, still
