@@ -264,14 +264,14 @@ The quant-research payload. Specs live in `crucible-funnel` module docs.
       out-of-sample worst-day close/trough pairs join the scorecard. **The
       bootstrap evaluator — breach probability, P(pass), payout cadence — is
       `ACCOUNT_EVAL_SPEC.md` §4 and is the next block *of that spec***; M3's
-      first block is the S0 predictor seam below (D-0077), and the two share a
+      first block is the S0 predictor seam below (D-0081), and the two share a
       block bootstrap rather than competing for the slot
 - [x] HTML scorecards with the mandatory honesty box (2026-07-30):
       self-contained, no JavaScript and no network, and `render` **refuses to
       produce a file at all** when any honesty-box field is empty. The three
       sections this build cannot compute are rendered as named holes rather
       than omitted
-- [ ] **The S0 predictor seam — M3's first block** (D-0077). A score-emitting
+- [ ] **The S0 predictor seam — M3's first block** (D-0081). A score-emitting
       evaluation path with forward-return joins: a signal emits a continuous
       score per bar, the seam joins it to the return over configured horizons
       ahead, buckets, and reports — no orders, no fills, no equity curve. This

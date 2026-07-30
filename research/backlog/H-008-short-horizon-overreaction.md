@@ -14,7 +14,7 @@ created: 2026-07-30
 > funnel's **S0**, which is **refused at load** in this build: the combo
 > grammar's rules produce *positions*, not a continuous score to bucket
 > forward returns by (`crucible-funnel::stages`). Closing it means **the S0
-> predictor seam** — named, and scheduled as M3's first block (D-0077,
+> predictor seam** — named, and scheduled as M3's first block (D-0081,
 > `docs/MILESTONES.md`) — and **this file is its first consumer and half its
 > specification.**
 >
@@ -251,7 +251,7 @@ smaller than our costs"* — the most common true answer in short-horizon resear
 and the one a backtest-first approach is worst at reaching. Reaching it requires
 measuring forward returns **without** trading, so building the seam is not
 overhead for this hypothesis; it is the hypothesis. As the S0 predictor seam's
-first consumer (D-0077), this file specifies half of what that seam has to do:
+first consumer (D-0081), this file specifies half of what that seam has to do:
 bucket forward returns at 1/5/10/20 minutes conditional on a signal, with a
 block bootstrap over sessions, and report the result in ticks so it can be
 compared against the spread. The other half is the quantile/IC contract in

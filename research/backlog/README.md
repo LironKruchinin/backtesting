@@ -159,7 +159,7 @@ S0 is **not implemented**: a config declaring it is refused at load, because
 forward returns by* (`crucible-funnel::stages`).
 
 Closing that gap now has a name and a place in the plan: **the S0 predictor
-seam** (D-0077) — a score-emitting evaluation path with forward-return joins,
+seam** (D-0081) — a score-emitting evaluation path with forward-return joins,
 which is the M2.5 predictor workbench arriving *as* the funnel's S0 rather than
 beside it, so its report carries a trial count and a registry row instead of
 standing outside the thing that counts. It is **M3's first block**
@@ -185,7 +185,7 @@ the grading scheme is structurally blind to, because the grades measure cost to
 express and this measures whether we are allowed to look yet.
 
 That is also the reason it is scheduled first rather than merely noticed
-(D-0077): S0-refused stops the **front** of the funnel, so for these six the
+(D-0081): S0-refused stops the **front** of the funnel, so for these six the
 block is not a delay that a faster machine shortens — no route to a verdict
 exists that does not pass through it. Every other open M3 item improves an
 answer this build already produces.
@@ -347,7 +347,7 @@ it is not pending work (§2.2).
 predictor-first measurement — the funnel's **S0** — which is refused at load
 because the combo grammar produces positions rather than a continuous score
 (§2.4). Running its Gate 1 first would break the registered order, so it waits.
-It is the **S0 predictor seam's first consumer and its specification** (D-0077):
+It is the **S0 predictor seam's first consumer and its specification** (D-0081):
 what that file asks for in Gate 0 and Gate 0b — forward returns bucketed at
 1/5/10/20 minutes, a block bootstrap over sessions, and the effect size in
 **ticks** so it can be compared against the spread — is half of what the seam

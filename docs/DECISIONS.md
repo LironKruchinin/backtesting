@@ -1889,7 +1889,7 @@ propose a superseding entry — don't silently diverge.
   eight days before expiry is an operator's parameter, not a sourced CME
   convention, and a `.c` alias with two stored tables refuses rather than picks.
   `raw/` untouched; roll tables are curated and disposable (D-0045).
-- **D-0077** (2026-07-30) — **The S0 predictor seam is named as the next build,
+- **D-0081** (2026-07-30) — **The S0 predictor seam is named as the next build,
   and the M2.5 predictor workbench arrives AS the funnel's S0 rather than
   beside it.** Why: S0 is the only outstanding item that makes a *refused*
   question askable; everything else outstanding makes an answer we already

@@ -911,7 +911,7 @@ bottom is the fastest way to see what a verdict is made of. Then
 `crucible-funnel::stages` for the criteria and why `Graduate` is unreachable,
 `crucible-funnel::registry` for the five contract rules and why the backend is
 JSONL, and `crucible-strategies::controls` for the two benchmarks and the
-planted leak. M3 owes **two builds, in this order** (D-0077): first the **S0
+planted leak. M3 owes **two builds, in this order** (D-0081): first the **S0
 predictor seam** — score-emitting evaluation with forward-return joins, the
 M2.5 predictor workbench arriving *as* S0 — because S0-refused stops the front
 of the funnel for every predictor-shaped idea and no other open item unblocks

@@ -216,7 +216,7 @@ Point-in-time rule extended: all feature standardization uses rolling
 statistics only.
 **Exit:** one signal family (Volume Profile open-location) evaluated
 predictor-first, with a report worth sending to an external reviewer.
-**Where this actually lands (D-0077):** not as a workbench beside the funnel.
+**Where this actually lands (D-0081):** not as a workbench beside the funnel.
 The benchmark module and the sample-size gates already shipped inside M3 (the
 two mandatory controls; `min_oos_trades` / `min_oos_sessions`), and the
 remaining piece — the score-emitting seam and the forward-return join —
