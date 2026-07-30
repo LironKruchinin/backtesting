@@ -533,13 +533,16 @@ parameter** (−50 % as shipped), not anybody's rule, and every quoted ruin
 probability prints it. Two `personal_*` runs at different thresholds are two
 runs, and the second one is a trial.
 
-`[margin]` is empty in all four files, and **filling it is a human task**. CME
-performance bonds change by clearing advisory several times a year, so a constant
-pasted into a config is a dated observation and never a spec value; and CME's
-Data Terms of Use forbid automated retrieval while their site blocks it outright,
-so no automated process in this project may fill the field in. Absent means
-**the contract-count cap is unmodelled**, the report says so, and no default is
-substituted.
+`[margin]` was **populated by hand on 2026-07-30** from CME Group's **SPAN2
+outright export** (`margins-span2-outright.xlsx` and companion CSVs), and the
+risk-of-ruin headline is **UNBLOCKED**. It stays a human task on every refresh:
+CME's Data Terms of Use forbid automated retrieval while their site blocks it
+outright, so no automated process in this project may touch it, and performance
+bonds move by clearing advisory several times a year. Eleven products are
+encoded — ES/MES, NQ/MNQ, RTY/M2K, CL/MCL, GC, 6E, ZN — each with its
+`as_of_date`. **Absent still means the contract-count cap is unmodelled**, the
+report still says so, and no default is ever substituted; that path is now
+unused rather than deleted.
 
 **Which number is wanted, and how to break the tie.** The **exchange maintenance
 margin** is the baseline, because it is the conservative figure: it is larger
@@ -548,10 +551,31 @@ rather than flatters what the account could have held. Broker day-margins are a
 **future refinement**, not the baseline — they are smaller, broker-specific, and
 revocable intraday at the broker's discretion, which makes them a worse thing to
 pin a research constant to. **Where the two differ, the conservative (larger)
-figure is chosen.** Whoever pastes the numbers pastes
-`initial_margin_per_contract_usd`, `maintenance_margin_per_contract_usd` and
-`as_of_date` together; a figure without its date is not a figure, because the
-rate it came from has already moved.
+figure is chosen.**
+
+**Both sides are stored, not pre-flattened.** Where the export splits long from
+short — every CME product above except GC, 6E and ZN, which quote one figure —
+`maintenance_long_usd` and `maintenance_short_usd` are both recorded, and the
+conservative rule picks the larger side **for the position's direction** at
+evaluation time. Storing only the maximum would be a smaller file and worse
+data: it would answer a question about a short with a number derived from a
+long. Where the source quotes one figure, both sides carry it because the source
+says they are equal, not because a split was averaged away.
+
+**Initial margin is a convention and is flagged as one.** The SPAN2 outright
+export carries maintenance only. `initial_long_usd` / `initial_short_usd` are
+**1.1 × maintenance** — the CME speculator convention — and every row says so in
+`initial_basis`. It is **not a measurement**, and any result that turns on it
+must say so until a sourced figure replaces it. This is the one number in the
+account layer that is conventional rather than cited, which is exactly why it
+carries its own field rather than hiding inside the value.
+
+Two practical notes for the next hand-fetch. CME exports key on **clearing
+code**, and Globex symbols differ: `EC` = 6E (Euro FX), `21` = ZN (10-Year
+T-Note). And **MGC/M6E were absent from the exports** — those are optional
+future rows, **not gaps** in what was fetched; nothing was dropped. The micros
+that *are* present (MES, MNQ, M2K, MCL) are what let the 25k tier size in micros
+rather than being unable to hold a single mini.
 
 `personal_*` is the control arm and that is its real job: every difference
 between `personal_50k` and a prop account of the same size, same strategy, same
@@ -801,20 +825,29 @@ directory for the axis §7.0 is about. Product targeting is an M4 decision made
 against rules re-verified then. That is a fact about the product, not a caveat
 about the model.
 
-**CME margins**, for `personal_*`: **nothing encoded.** CME's site returns
-"This IP address is blocked due to suspected web scraping activity" and its Data
-Terms of Use forbid automated retrieval, so no figure was read; and performance
-bonds change by clearing advisory several times a year, so even a correctly-read
-figure is a dated observation, not a constant. `[margin]` is empty, says why,
-and names the pages a human should read.
+**CME margins**, for `personal_*`: **RESOLVED 2026-07-30 — by a human, which
+was always the only available path.** No figure was ever read by this project:
+CME's site returns "This IP address is blocked due to suspected web scraping
+activity" and its Data Terms of Use forbid automated retrieval. The refusal to
+guess held, and the numbers arrived from a hand-fetched **SPAN2 outright
+export** — eleven products with both margin sides where the export splits them,
+`as_of_date 2026-07-30`, and `initial_*` flagged as the 1.1× speculator
+convention rather than a sourced figure. **Risk-of-ruin is unblocked.** The
+standing part of this entry is that performance bonds move by clearing advisory
+several times a year, so what is encoded is a **dated observation, not a
+constant** — re-fetch by hand and move `as_of_date`. This is no longer an open
+question; it is a maintenance obligation.
 
 ---
 
 ## 8. Open questions — refused rather than guessed
 
-**These stay open.** None of the twelve is to be closed by inference, by
-plausibility, or by the absence of a contrary statement — only by reading a page
-that answers it, with an access date, or by asking the firm. An item resolved
+**These stay open.** Eleven of the original twelve remain; **CME margins closed
+on 2026-07-30**, and it closed the only way an item here may — a human read the
+source and pasted it with its date, not by inference. None of the eleven is to
+be closed by inference, by plausibility, or by the absence of a contrary
+statement — only by reading a page that answers it, with an access date, or by
+asking the firm. An item resolved
 here without a source is worse than the item, because it stops looking like a
 gap. Where an item has a *provisional* encoding (a target basis, an Apex lock
 variant), the encoded value is the stricter reading, the alternative is named,

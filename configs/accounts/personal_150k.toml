@@ -12,7 +12,7 @@
 #
 # VERIFICATION: there is no firm and there are no firm rules to verify. The one
 # number a cash account would need from an outside authority is the margin
-# requirement, and `[margin]` explains why it is empty rather than guessed
+# requirement, and `[margin]` carries hand-fetched CME maintenance margins
 # (accessed 2026-07-30).
 #
 # The control arm. No firm, no profit target, no threshold, nothing to breach
@@ -22,8 +22,9 @@
 # ACCOUNT RULE and nothing else. That is the comparison the prop numbers only
 # mean something inside of.
 #
-# `[ruin]` replaces breach probability. `[margin]` is deliberately empty and
-# says why.
+# `[ruin]` replaces breach probability. `[margin]` was populated by hand on
+# 2026-07-30 from CME's SPAN2 outright export, so the contract-count cap
+# is modelled rather than unmodelled.
 
 schema_version = 1
 
@@ -93,24 +94,166 @@ threshold_cum_pnl_pct = -50.0
 basis = "equity_including_unrealized"
 
 [margin]
-# DELIBERATELY EMPTY, AND A HUMAN TASK. CME performance bonds change
-# by clearing advisory (several times a year), so a number pasted
-# here would be a stale constant wearing a spec's clothes -- and
-# CME's Data Terms of Use forbid automated retrieval while their site
-# blocks it outright, so no automated process may fill this in.
+# POPULATED 2026-07-30, BY HAND. Source: CME Group **SPAN2 outright
+# export** (`margins-span2-outright.xlsx` and companion CSVs), fetched by
+# a human on 2026-07-30. It could not be fetched any other way: CME's
+# Data Terms of Use forbid automated retrieval and their site blocks it
+# outright, so no automated process may refresh these. They change by
+# clearing advisory several times a year -- re-fetch by hand and move
+# `as_of_date` when they do.
 #
-# WHICH NUMBER IS WANTED: the EXCHANGE MAINTENANCE margin, as the
-# conservative baseline. Broker day-trading margins are far smaller
-# and are a future refinement, not the baseline -- and where the two
-# differ, the conservative (larger) figure is chosen, because it caps
-# position size lower and so understates rather than flatters what
-# the account could hold. Paste it with `as_of_date`, by hand:
-#   initial_margin_per_contract_usd = "..."
-#   maintenance_margin_per_contract_usd = "..."
-#   as_of_date = "YYYY-MM-DD"
-# Or leave them absent and accept that the contract-count cap is
-# unmodelled -- which is what absent MEANS here. It must never be
-# silently defaulted.
-#   https://www.cmegroup.com/markets/equities/sp/e-mini-sandp500.margins.html
-#   https://www.cmegroup.com/markets/equities/sp/micro-e-mini-sandp-500.margins.html
-#   https://www.cmegroup.com/solutions/risk-management/performance-bonds-margins.html
+# WHICH NUMBER THIS IS: the EXCHANGE MAINTENANCE margin, the conservative
+# baseline. Broker day-trading margins are far smaller and are a future
+# refinement, not the baseline -- where the two differ the conservative
+# (larger) figure wins, because it caps position size lower and so
+# understates rather than flatters what the account could hold.
+#
+# BOTH SIDES ARE KEPT, NOT PRE-FLATTENED. Where the export splits long
+# from short, both are recorded and the conservative rule picks the
+# larger side *for the position's direction* at evaluation time. Storing
+# only the max would be a smaller file and worse data: it would answer a
+# question about a short with a number derived from a long.
+#
+# INITIAL MARGIN IS NOT SOURCED. The SPAN2 outright export carries
+# maintenance only. `initial_*_usd` below is **1.1 x maintenance**, the
+# CME speculator convention -- `initial_basis` says so on every row. It
+# is a CONVENTION, NOT A MEASUREMENT, and any result that turns on it
+# must say so until a sourced figure replaces it.
+#
+# CLEARING CODES: CME exports key on clearing code, and Globex symbols
+# differ. `EC` = 6E (Euro FX); `21` = ZN (10-Year T-Note). Recorded so
+# the next hand-fetch can find the same rows.
+#
+# MICROS: MES/MNQ/M2K/MCL are present, which is what lets the 25k tier
+# size in micros rather than being unable to hold one mini. MGC and M6E
+# were ABSENT from the exports -- that is an optional future row, NOT a
+# gap in what was fetched. Nothing was dropped.
+
+[[margin.product]]
+symbol = "ES"
+name = "E-mini S&P 500"
+contract_month = "2026-09"
+maintenance_long_usd = "25145"
+maintenance_short_usd = "22554"
+initial_long_usd = "27659.50"
+initial_short_usd = "24809.40"
+initial_basis = "1.1x_maintenance_cme_speculator_convention_not_sourced"
+as_of_date = "2026-07-30"
+
+[[margin.product]]
+symbol = "MES"
+name = "Micro E-mini S&P 500"
+contract_month = "2026-09"
+maintenance_long_usd = "2514"
+maintenance_short_usd = "2255"
+initial_long_usd = "2765.40"
+initial_short_usd = "2480.50"
+initial_basis = "1.1x_maintenance_cme_speculator_convention_not_sourced"
+as_of_date = "2026-07-30"
+
+[[margin.product]]
+symbol = "NQ"
+name = "E-mini Nasdaq-100"
+contract_month = "2026-09"
+maintenance_long_usd = "37539"
+maintenance_short_usd = "35687"
+initial_long_usd = "41292.90"
+initial_short_usd = "39255.70"
+initial_basis = "1.1x_maintenance_cme_speculator_convention_not_sourced"
+as_of_date = "2026-07-30"
+
+[[margin.product]]
+symbol = "MNQ"
+name = "Micro E-mini Nasdaq-100"
+contract_month = "2026-09"
+maintenance_long_usd = "3754"
+maintenance_short_usd = "3569"
+initial_long_usd = "4129.40"
+initial_short_usd = "3925.90"
+initial_basis = "1.1x_maintenance_cme_speculator_convention_not_sourced"
+as_of_date = "2026-07-30"
+
+[[margin.product]]
+symbol = "RTY"
+name = "E-mini Russell 2000"
+contract_month = "2026-09"
+maintenance_long_usd = "10656"
+maintenance_short_usd = "10145"
+initial_long_usd = "11721.60"
+initial_short_usd = "11159.50"
+initial_basis = "1.1x_maintenance_cme_speculator_convention_not_sourced"
+as_of_date = "2026-07-30"
+
+[[margin.product]]
+symbol = "M2K"
+name = "Micro E-mini Russell 2000"
+contract_month = "2026-09"
+maintenance_long_usd = "1066"
+maintenance_short_usd = "1015"
+initial_long_usd = "1172.60"
+initial_short_usd = "1116.50"
+initial_basis = "1.1x_maintenance_cme_speculator_convention_not_sourced"
+as_of_date = "2026-07-30"
+
+[[margin.product]]
+symbol = "CL"
+name = "Crude Oil (WTI)"
+contract_month = "2026-09"
+maintenance_long_usd = "8220"
+maintenance_short_usd = "7909"
+initial_long_usd = "9042.00"
+initial_short_usd = "8699.90"
+initial_basis = "1.1x_maintenance_cme_speculator_convention_not_sourced"
+as_of_date = "2026-07-30"
+
+[[margin.product]]
+symbol = "MCL"
+name = "Micro Crude Oil (WTI)"
+contract_month = "2026-09"
+maintenance_long_usd = "824"
+maintenance_short_usd = "793"
+initial_long_usd = "906.40"
+initial_short_usd = "872.30"
+initial_basis = "1.1x_maintenance_cme_speculator_convention_not_sourced"
+as_of_date = "2026-07-30"
+
+[[margin.product]]
+symbol = "GC"
+name = "Gold"
+contract_month = "2026-08"
+# The export gives ONE maintenance figure, not a long/short split, so
+# both sides carry the same value -- equal because the source says so,
+# not because the split was averaged away. 07/2026 read $20,174 and is
+# expiring; 08/2026 is the live front month and is what is encoded.
+maintenance_long_usd = "20182"
+maintenance_short_usd = "20182"
+initial_long_usd = "22200.20"
+initial_short_usd = "22200.20"
+initial_basis = "1.1x_maintenance_cme_speculator_convention_not_sourced"
+as_of_date = "2026-07-30"
+
+[[margin.product]]
+symbol = "6E"
+name = "Euro FX"
+clearing_code = "EC"
+# Banded 08-09/2026: the export quotes one figure across both months.
+contract_month = "2026-08"
+maintenance_long_usd = "2100"
+maintenance_short_usd = "2100"
+initial_long_usd = "2310.00"
+initial_short_usd = "2310.00"
+initial_basis = "1.1x_maintenance_cme_speculator_convention_not_sourced"
+as_of_date = "2026-07-30"
+
+[[margin.product]]
+symbol = "ZN"
+name = "10-Year T-Note"
+clearing_code = "21"
+# Banded 09/2026-03/2027: the export quotes one figure across the band.
+contract_month = "2026-09"
+maintenance_long_usd = "1875"
+maintenance_short_usd = "1875"
+initial_long_usd = "2062.50"
+initial_short_usd = "2062.50"
+initial_basis = "1.1x_maintenance_cme_speculator_convention_not_sourced"
+as_of_date = "2026-07-30"
