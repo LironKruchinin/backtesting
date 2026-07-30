@@ -77,6 +77,42 @@ impl PriceField {
     }
 }
 
+/// The completed bar's traded volume, in contracts (D-0079).
+///
+/// Deliberately **not** a [`PriceField`] variant, though it is the fifth OHLCV
+/// column: a price field is read in signal space and carries the
+/// `signal_offset` a stitched series applies (D-0076), and volume has no such
+/// space. Folding it in would give the offset an operand it must not touch, and
+/// the compiler would not notice.
+///
+/// Contracts, not a normalized figure. `volume > 1000` on a 1-minute ES bar and
+/// on a daily one mean very different things, and turning volume into a ratio
+/// needs a trailing window — a rolling statistic, which is
+/// [`crate::indicators`]' business and not an operand's.
+///
+/// Exact to 2^53 contracts as an `f64`, which is eleven orders of magnitude
+/// past any bar this archive holds; §2.3 puts indicator space in `f64` and
+/// nothing here reaches accounting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VolumeField;
+
+impl VolumeField {
+    /// The config spelling.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        "volume"
+    }
+
+    fn of(self, bar: &Bar) -> f64 {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "indicator space (§2.3); exact below 2^53 contracts"
+        )]
+        let volume = bar.volume as f64;
+        volume
+    }
+}
+
 /// Which named session a bar's interval closed inside.
 ///
 /// A mirror of `crucible_data::calendar::SessionId`, and a mirror on purpose:
@@ -267,6 +303,8 @@ pub enum Operand {
     },
     /// A session-relative clock reading (D-0078).
     Session(SessionField),
+    /// The completed bar's traded volume, in contracts (D-0079).
+    Volume(VolumeField),
 }
 
 impl Operand {
@@ -281,6 +319,7 @@ impl Operand {
             // same reason an unwarm slot is: a rule silently reading `false`
             // would take a position on the absence of a clock.
             Operand::Session(field) => field.of(ctx.session?),
+            Operand::Volume(field) => field.of(ctx.bar),
         };
         v.is_finite().then_some(v)
     }
@@ -506,6 +545,7 @@ fn render_operand(operand: &Operand, slots: &[SlotDecl], out: &mut String) {
             out.push_str(field.suffix());
         }
         Operand::Session(field) => out.push_str(field.name()),
+        Operand::Volume(field) => out.push_str(field.name()),
     }
 }
 
@@ -726,6 +766,8 @@ pub(crate) const RESERVED: &[&str] = &[
     "not",
     "crosses_above",
     "crosses_below",
+    // The bar's fifth OHLCV column (D-0079).
+    "volume",
     // The session operands (D-0078). A slot named after one would shadow it
     // and the rule would silently mean something else.
     "minutes_since_open",
@@ -994,6 +1036,15 @@ impl Parser<'_> {
                 Some(f) => Err(RuleError {
                     position: pos,
                     message: format!("{name} is a price, and has no field {f:?}"),
+                }),
+            };
+        }
+        if name == VolumeField.name() {
+            return match field {
+                None => Ok(Operand::Volume(VolumeField)),
+                Some(f) => Err(RuleError {
+                    position: pos,
+                    message: format!("{name} is a bar field, and has no field {f:?}"),
                 }),
             };
         }
@@ -1360,3 +1411,6 @@ mod tests {
 
 #[cfg(test)]
 mod session_tests;
+
+#[cfg(test)]
+mod volume_tests;

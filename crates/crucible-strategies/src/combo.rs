@@ -92,12 +92,26 @@
 //! unary      := "not" unary | "(" expr ")" | comparison
 //! comparison := operand ("<" | "<=" | ">" | ">=" | "crosses_above"
 //!                        | "crosses_below") operand
-//! operand    := number | price_field | session_field | slot ("." field)?
+//! operand    := number | price_field | "volume" | session_field
+//!             | slot ("." field)?
 //! price_field   := "open" | "high" | "low" | "close"
 //! session_field := "minutes_since_open" | "minutes_to_close"
 //!                | "minutes_since_rth_open" | "minutes_to_rth_close"
 //!                | "is_rth" | "is_overnight" | "is_post_rth"
 //! ```
+//!
+//! ## The volume operand (D-0079)
+//!
+//! `volume` is the completed bar's traded size in **contracts**, and it is a
+//! bar field like `close` with one difference that is the reason it is a
+//! separate operand rather than a fifth `PriceField`: price fields are read in
+//! signal space and carry the `signal_offset` a stitched series applies
+//! (D-0076), and a contract count has no signal space. Folding it in would give
+//! the offset an operand it must not touch, and nothing would catch it.
+//!
+//! Contracts, not a normalized figure: `volume > 1000` means different things
+//! on a 1-minute bar and a daily one, and turning volume into a ratio needs a
+//! trailing window — a rolling statistic, which is an indicator's job.
 //!
 //! ## Session operands (D-0078)
 //!

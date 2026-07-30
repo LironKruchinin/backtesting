@@ -230,3 +230,37 @@ fn a_missing_session_is_silent_rather_than_false() {
     assert_eq!(fires("not minutes_since_open < 30", s), Some(false));
     assert_eq!(fires("minutes_since_open < 30", s), Some(true));
 }
+
+/// Warmup boundary: a session operand is warm on bar 0, so it adds nothing to
+/// the grid's warmup (§2.6). The one extra bar belongs to the crossover.
+#[test]
+fn a_session_operand_adds_no_warmup() {
+    use crate::combo::spec::{ComboSpec, IndicatorSpec, IntAxis};
+
+    let grid = |rule: &str| {
+        ComboSpec::new(
+            vec![(
+                "trend".to_owned(),
+                IndicatorSpec::Ema {
+                    period: IntAxis::Fixed(7),
+                },
+            )],
+            &RuleSource {
+                enter_long: Some(rule.to_owned()),
+                ..RuleSource::default()
+            },
+            Qty(1),
+        )
+        .expect("valid spec")
+        .expand()
+        .expect("expands")
+    };
+
+    assert_eq!(grid("minutes_since_open > 30").max_warmup_bars(), 7);
+    assert_eq!(grid("is_rth > 0").max_warmup_bars(), 7);
+    assert_eq!(grid("close < trend").max_warmup_bars(), 7);
+    assert_eq!(
+        grid("minutes_since_open crosses_above 30").max_warmup_bars(),
+        8
+    );
+}

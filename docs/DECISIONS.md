@@ -2071,3 +2071,37 @@ propose a superseding entry — don't silently diverge.
   **Not in scope:** calendar predicates (day-of-week, day-of-month,
   turn-of-month). They need a different key — a position in a *month* of
   trading days rather than in a session — and belong with their own entry.
+- **D-0079** (2026-07-30) — **`volume` is a rule operand, and it is its own
+  operand rather than a fifth `PriceField`.** `Bar::volume` has reached the
+  engine since M0; what was missing was a way to name it in a rule, which made
+  every volume-conditioned idea grade B for the want of one line of grammar.
+  **Why not a `PriceField` variant.** A price field is read in *signal space*
+  and carries the `signal_offset` a stitched continuous series applies to every
+  price (D-0076). A contract count has no signal space, and there is no
+  arithmetic in which adding points to contracts is meaningful. Adding a
+  `PriceField::Volume` would route volume through
+  `Bar::signal_*()` and the compiler would not notice, because both sides are
+  `f64` by then. A separate operand makes the mistake unrepresentable, which is
+  the same argument `AdjustedPrice` makes about `Price` (D-0042) at a smaller
+  scale. The control is a two-sided test: on one bar carrying a +20 point
+  offset, `close` reads 120 and `volume` reads its own 137, and the same bar
+  with no offset reads 100 — so the 120 is the offset arriving rather than the
+  fixture.
+  **Contracts, not a normalized figure.** `volume > 1000` means very different
+  things on a 1-minute ES bar and on a daily one, and that is the operator's
+  problem to state, not the grammar's to smooth over. Turning volume into a
+  ratio — "twice the 20-day average" — needs a trailing window, which is a
+  rolling statistic and belongs to `crucible-strategies::indicators`, not to an
+  operand.
+  **`f64` is exact here** to 2^53 contracts, eleven orders of magnitude past any
+  bar this archive holds, and nothing on this path reaches accounting (§2.3).
+  **`volume` is reserved**, so a slot cannot shadow it, and it renders as itself
+  in the canonical form so a config hash covers it (D-0012).
+  **It adds no warmup.** Volume is available on bar 0, so a rule reading it
+  starts when its indicators do — pinned by test, because a silent lengthening
+  of `Grid::max_warmup_bars` would shorten every combo's evaluation window for a
+  reason nobody wrote down (§2.6).
+  **Each control was watched firing** (§7). Three mutations, three catches:
+  volume picking up the signal offset → the signal-space test; `volume` removed
+  from the reserved list → the reservation test *and* the slot-shadowing
+  refusal; the operand rewired to read the close → three tests at once.
