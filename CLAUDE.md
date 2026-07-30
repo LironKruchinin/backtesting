@@ -369,11 +369,53 @@ Two smaller rules fall out of the same incident:
   opposite of what the commit claims, and these three files are the ones a
   future session trusts without re-deriving. Commit 4297fbb is that failure.
 
+### 8.2 Decision numbers are allocated at MERGE, by the primary session
+
+**A subagent never allocates a decision number.** Concurrent branches cannot
+see each other's `docs/DECISIONS.md`, so two of them appending "the next free
+number" both pick the same one — and the collision is invisible until merge,
+by which time the number is in code comments, doc prose, test names and commit
+messages on both sides.
+
+The protocol:
+
+1. **A branch carries a placeholder**, spelled `D-TBD(short-topic-slug)` —
+   `D-TBD(commodity-calendar-eras)`, `D-TBD(expiry-availability)`. It goes
+   everywhere the real number would: code comments, module docs, `DECISIONS.md`
+   entry heading, and the commit message.
+2. **The slug is required and must be distinctive.** `D-TBD` alone is not a
+   placeholder, it is a collision waiting to happen the moment two branches use
+   it; the slug is what makes the rewrite mechanical and greppable.
+3. **The primary session assigns the number at merge**, from the next free one
+   *at that moment*, and rewrites every placeholder **in the merge commit** —
+   not in a follow-up. A tree that carries both `D-TBD(x)` and `D-0091` for the
+   same decision is the stale-reference problem §8.1's third bullet is about.
+4. **`grep -r "D-TBD"` on `main` must return nothing.** If it returns something,
+   a merge forgot step 3.
+
+**The motivating record — four collisions, all on merge, all avoidable:**
+
+| number | claimants | resolution |
+|---|---|---|
+| **D-0077** | resampler · session eras · S0 predictor seam | resampler kept it; seam → D-0081; eras → D-0086 |
+| **D-0085** | S0 caller · expiry-availability rule | caller kept it; expiry renumbers at merge |
+
+Three squatters on one number, then a fourth collision on a second number
+within two days. Each cost a renumber commit touching every reference — ten
+files for the seam, eleven for the eras — and each was discovered only because
+someone read the log before merging. The next one would be discovered by a
+reader in six months wondering why D-0085 describes two unrelated things.
+
+The rule is cheap and the failure is not: a placeholder costs one `sed` at
+merge; a collision costs an archaeology session.
+
 Hard NEVERs (in addition to §2):
 - Never commit market data, `results/`, or anything matching `.gitignore`'s
   data patterns — including `.env`, which is where the API key now lives
   locally (D-0022). Never hardcode or log `DATABENTO_API_KEY`: it is read
   from the process environment, at the last moment, by bin targets only.
+- Never allocate a decision number on a branch — placeholders only, assigned at
+  merge by the primary session (§8.2).
 - Never merge into a working tree another process is using, and never merge
   into `main` from a subagent (§8.1).
 - Never mutate or delete files under the raw archive (`raw/`) from code.
