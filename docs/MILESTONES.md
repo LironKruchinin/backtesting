@@ -36,7 +36,13 @@ deadline-driven (see `crucible-data::ingest` module docs).
             (D-0028..D-0035)
       - [x] `ManifestRecord.symbols` = requested key ∪ raw symbols observed in
             the delivered DBN metadata (the assumption the validation slice
-            exists to prove)
+            exists to prove). Held for five of seven parents only until
+            2026-07-30: the symbol predicate banned whitespace for every symbol
+            rather than only for the requested key, so CME's spaced spread names
+            were dropped and 21,736 of 108,696 observed symbols never reached
+            the manifest (D-0066). Predicate narrowed, and the eight affected
+            records credited by appended supplement lines — `sym_audit` reads 0
+            missing, 0 dropped archive-wide (D-0068)
       - [x] CLI wiring: `clap`, `--execute`, `--max-cost-usd`, exit codes
             (0 done / 2 usage / 3 refused / 4 failed / 5 resumable)
 - [ ] Bootstrap pulls: 16y `ohlcv-1s`/`ohlcv-1m` + `definition` + `statistics`

@@ -421,6 +421,15 @@ pub fn verify() -> i32 {
         }
     };
     let records = catalog.records().len();
+    // Supplements are named but not re-hashed: they carry symbols, not bytes
+    // (D-0066). Saying so keeps `verify`'s count honest about what it read.
+    let supplements = catalog.supplements().len();
+    if supplements > 0 {
+        println!(
+            "manifest also carries {supplements} symbol supplement(s), which name no \
+             bytes to verify (D-0066)"
+        );
+    }
     if report.is_clean() {
         println!("archive clean: {records} record(s) re-hashed, no findings");
         return 0;

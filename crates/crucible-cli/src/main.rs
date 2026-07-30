@@ -9,8 +9,13 @@
 //!
 //! The archive path is `pull` (buy and verify raw DBN) → `verify` (re-hash it)
 //! → `transcode` (raw into curated Parquet) → `backtest` (replay it). Only
-//! `pull` can spend money, and only `pull` and `transcode` need the
-//! `databento` feature.
+//! `pull` can spend money, and only `pull`, `transcode` and
+//! `symbol-supplement` need the `databento` feature.
+//!
+//! `verify` and `layout-check` ask whether the archive holds the bytes and the
+//! shape it claims; `symbol-supplement` asks whether the manifest lists the
+//! symbols those bytes declare, which is the completeness question a missing
+//! symbol turns into a second purchase (D-0066).
 //!
 //! `combo` is the same replay path driven by a config rather than by flags:
 //! it expands a TOML parameter grid and runs every point on one shared bar
@@ -37,6 +42,7 @@ mod layout_check;
 mod pull;
 mod qa;
 mod rolls;
+mod supplement;
 mod theta;
 mod transcode;
 mod walkforward;
@@ -67,7 +73,8 @@ ENVIRONMENT:\n\
 TYPICAL ORDER:\n\
 \x20 pull -> verify -> transcode -> qa -> backtest\n\
 \n\
-NOTE: `pull` and `transcode` need a build with the Databento client:\n\
+NOTE: `pull`, `transcode` and `symbol-supplement` need a build with the\n\
+\x20 Databento client (they decode DBN):\n\
 \x20 cargo run -p crucible-cli --features databento -- pull ...\n\
 \n\
 PLANNED (see docs/MILESTONES.md):\n\
@@ -103,6 +110,8 @@ enum Command {
     Verify,
     /// Check the archive tree against docs/DATA_LAYOUT.md.
     LayoutCheck,
+    /// Check (and with --execute, repair) manifest symbol completeness.
+    SymbolSupplement(supplement::SupplementArgs),
     /// Build curated Parquet bars from the raw DBN archive.
     Transcode(transcode::TranscodeArgs),
     /// Replay curated bars through the reference strategy.
@@ -143,6 +152,7 @@ fn main() {
         Some(Command::Pull(args)) => pull::run(&args),
         Some(Command::Verify) => pull::verify(),
         Some(Command::LayoutCheck) => layout_check::run(),
+        Some(Command::SymbolSupplement(args)) => supplement::run(&args),
         Some(Command::Transcode(args)) => transcode::run(&args),
         Some(Command::Backtest(args)) => backtest::run(&args),
         Some(Command::Combo(args)) => combo::run_cmd(&args),

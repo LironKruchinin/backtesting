@@ -1084,3 +1084,77 @@ propose a superseding entry — don't silently diverge.
   ($4,000, not $4,500 — corroborated by their own $154,100 safety net) and
   Topstep's consistency rule (best day ≤ 50 % of the *profit target*, not 30 % of
   total profit).
+- **D-0068** (2026-07-30) — **D-0066 as shipped: the symbol predicate is split in
+  two, `manifest.jsonl` gains a second line kind, and the archive's 21,736
+  missing symbols are credited by 8 appended supplement records. Repair
+  complete — `sym_audit` reads 0 missing and 0 dropped over 108,696 observed
+  symbols.** *Implements D-0066; changes two of its details, both recorded
+  below.*
+  **The predicate.** `validate_symbols` is gone, replaced by two rules with
+  different jobs. `validate_coverage_symbol` — non-empty, ASCII, no control
+  characters — governs a record's `symbols[1..]` and every
+  `CoverageRequest.symbols` member: spaces and colons pass verbatim, because
+  `CL:BF F0-G0-H0` is a real CME spread name and no member of those lists is
+  ever a path component. `validate_symbol_key` adds full path safety (no
+  separator, no colon, no whitespace, not `.`/`..`) and governs `symbols[0]`,
+  the requested key, whose letter now matches `validate_file_path`'s
+  per-component rules exactly — so a key this accepts can always be archived,
+  and one it rejects is rejected before money moves rather than after. The
+  colon ban is new for keys (the old rule banned only separators and
+  whitespace); it is inside D-0066's "full path safety" because
+  `validate_file_path` has always refused colons, and no existing key contains
+  one. Public API: `is_valid_symbol` now means the coverage rule (its callers —
+  `execute::merge_symbols`, `sym_audit` — want exactly that), and
+  `check_symbol_key` is new, returning `Result` rather than `bool` because its
+  caller refuses a pull over it and a refusal must say why.
+  **Difference 1 from D-0066: the money guard moved instead of narrowing in
+  place.** D-0066 read as though `coverage` would keep the strict rule for
+  `symbols[0]`. It cannot: a coverage *query* has no key — its first element is
+  just the first symbol someone asked about — and specific (3) requires
+  `coverage("CL:BF F0-G0-H0")` to answer rather than refuse. So `coverage` now
+  applies the loose rule to every member, and the strict check lives in
+  `ingest::plan`, which is the one place a symbol becomes a directory name. It
+  runs *before* the free `dataset_range` call, so an unarchivable key now costs
+  nothing at all, where D-0020's placement made it cost a coverage round trip.
+  D-0020's property is preserved and strengthened: `plan.rs`'s new control
+  asserts the provider is never touched.
+  **The supplement record.** `manifest.jsonl` now holds `ManifestRecord` lines
+  and `SymbolSupplement` lines: `{schema_version, supplements_blake3,
+  added_symbols, source, recorded_ts, reason}`, where `supplements_blake3` is
+  the target's manifest id (D-0014) and doubles as the **structural
+  discriminator** — no record has that field, no supplement has `file_path`, and
+  both are `deny_unknown_fields`, so neither can be read as the other. A reader
+  that knows nothing of supplements therefore *hard-errors* rather than
+  under-reporting coverage, which is the failure being fixed; that loudness is
+  why the supplement went into `manifest.jsonl` rather than into a side file
+  beside it. `source` is a closed enum (`dbn_metadata`), not free text, for
+  D-0049's reason. `coverage` unions record symbols with supplements naming the
+  record's id, so a caller sees one truth, while `records()` still returns
+  exactly what acquisition time wrote and `supplements()` says what was learned
+  later. Corrections add only: a supplement pointing at an id no *earlier* line
+  carries is a hard error at load and at append (a dangling correction credits
+  nothing, silently), one adding nothing already credited is refused (an
+  append-only log earns trust by having no noise in it), and identical bytes at
+  two paths share an id and are both credited — their DBN headers are the same
+  bytes, so their symbology is the same symbology. `verify` ignores supplements
+  because they name no bytes, and says so in its output.
+  **Difference 2 from D-0066: `sym_audit` grew a column, because "0 dropped"
+  turned out not to be the completion proof.** Loosening the predicate takes
+  `dropped` to 0 on its own, while the 8 old records still credited 21,736
+  symbols fewer than their files declare — so the audit would have printed the
+  success number over the unfixed state. It now reports `missing` (observed
+  minus credited, the number `coverage` would re-buy) beside `dropped` (what the
+  predicate refuses, the mechanism), and reads the archive through
+  `Catalog::open` + `credited_symbols` instead of parsing manifest lines itself:
+  one parser, the production one, per D-0066 specific (2).
+  **Executed on the live archive** with `crucible symbol-supplement --execute`
+  (new command, dry run by default, exit 4 when it finds something like `verify`
+  and `qa`): 8 lines appended crediting 2,307 CL.FUT + 3,127 ZN.FUT symbols per
+  schema across `ohlcv-1m`/`ohlcv-1s`/`definition`/`statistics`, 0 unrecordable,
+  0 undecodable. The 33 original lines occupy the same 1,167,298 bytes they did
+  before the append. Post-repair: `sym_audit` 108,696 observed / 108,696
+  credited / 0 missing / 0 dropped; `layout-check` clean; `verify` clean; demo
+  hash `b55747513df596ed`, unchanged. One test's semantics changed on purpose:
+  `coverage_rejects_invalid_request` used to assert `"ESU6 "` was refused, and
+  now asserts a spaced vendor symbol is *answered* — that assertion was the bug,
+  written down.

@@ -582,8 +582,7 @@ behaviour so a fix must consciously flip it. **Consequence: equity
 it is fixed.** `is_trading_day` is untouched, so day-level coverage and every
 T0 reconciliation edge are unaffected (D-0059).
 
-**Before T1** — measured SPX/QQQ/IWM per-day sizes · manifest symbol
-completeness for CL.FUT and ZN.FUT (D-0066, M1-close-block) ·
+**Before T1** — measured SPX/QQQ/IWM per-day sizes ·
 **`ShutdownBlockReasonCreate` while a tranche is live**.
 
 *`ShutdownBlockReasonCreate`, pre-T1.* Promoted from candidate on evidence: **24
@@ -605,9 +604,10 @@ throughput.
 *The Databento blitz reached terminal state on 2026-07-30*: all seven
 `statistics` parents are appended, so §9's open row is closed. `verify` and
 `layout-check` were re-run clean the same day (exit 0 both, over all 33 records)
-and **§9's closing sentence is written**, carrying the D-0066 exception. What
-remains on the Databento side is the D-0066 repair itself — an M1-close-block
-listed above, not an acquisition.
+and **§9's closing sentence is written**. The D-0066 repair landed the same day
+(D-0068): the predicate is narrowed, 8 supplement records credit the 21,736
+symbols, and `sym_audit` reads 0 missing and 0 dropped over all 108,696 observed
+symbols. **Nothing remains on the Databento side.**
 
 ### 8.0 T0 does not block M1 close
 
@@ -643,12 +643,12 @@ the first evidence on real data that the 472 path works — without that line,
 every future resume would re-ask the same empty question until the subscription
 ends.
 
-**Carry-forward tracked items**, both open and neither blocking T0:
+**Carry-forward tracked items**, neither blocking T0:
 
 | Item | Status | Blocks |
 |---|---|---|
-| July-3rd conditional early close | six phantom 13:00 closes; test asserts the current wrong behaviour so a fix must flip it (D-0059) | the **session-hours layer** — equity `bars_per_year`, T1 intraday minute grids |
-| Manifest symbol completeness | 21,736 of 108,696 observed symbols absent, CL.FUT + ZN.FUT only; cause and repair designed (D-0066) | **M1 close**; `coverage` would re-buy those symbols |
+| July-3rd conditional early close | **open** — six phantom 13:00 closes; test asserts the current wrong behaviour so a fix must flip it (D-0059) | the **session-hours layer** — equity `bars_per_year`, T1 intraday minute grids |
+| Manifest symbol completeness | **CLOSED 2026-07-30** (D-0068) — predicate narrowed to the requested key, 8 supplement records credit the 21,736 symbols, `sym_audit` reads 0 missing / 0 dropped over 108,696 observed | nothing |
 
 ---
 
@@ -751,22 +751,14 @@ It is written, and it reads:
 Per §0.1, the smaller true number, restated without the prose: **33 intents
 appended, `verify` and `layout-check` clean on 2026-07-30.**
 
-<!-- BEGIN D-0066-EXCEPTION — delete everything between these two markers,
-     markers included, in the same commit that makes sym_audit read 0 dropped
-     archive-wide (D-0066 specific 4). Nothing outside this block depends on it.
-     A caveat that outlives its cause is how a doc starts lying. -->
-
-> **The exception the sentence carries, and while it stands it is the only one.**
-> `sym_audit` reads **21,736 of 108,696 observed symbols (20.00 %) absent from the
-> manifest's `symbols` lists, across 8 of 33 lines**, confined to **CL.FUT**
-> (9,427 observed / 7,120 recorded, 2,307 dropped) and **ZN.FUT** (3,335 observed
-> / 208 recorded, 3,127 dropped — **94 % missing**). The archived bytes are
-> complete and `verify`-clean; what is incomplete is the per-contract coverage
-> record, so the manifest does not yet tell the whole truth per contract and
-> **`coverage` reads those 21,736 symbols as missing and would buy them again** —
-> the re-buy bug D-0033 exists to prevent. M1-close-block, cause and repair
-> designed in **D-0066**; the completion proof is `sym_audit` reading 0 dropped
-> archive-wide. Until then the restatement above carries one more term: one known
-> and quantified symbol-completeness gap.
-
-<!-- END D-0066-EXCEPTION -->
+**The exception this sentence used to carry is gone, and the date it went is the
+date the repair landed.** It read: 21,736 of 108,696 observed symbols (20.00 %)
+absent from the manifest's `symbols` lists across 8 of 33 lines, confined to
+CL.FUT (2,307 dropped) and ZN.FUT (3,127 dropped, 94 %) — so `coverage` would
+have bought them again, the re-buy bug D-0033 exists to prevent. **D-0068** closed
+it on **2026-07-30**: the predicate is narrowed to the requested key, 8 appended
+supplement records credit the missing symbols without rewriting a single existing
+line, and `sym_audit` reads **0 missing and 0 dropped over all 108,696 observed
+symbols**. The quantified gap is kept here in the past tense rather than erased —
+what the number was is part of why the repair exists — but it no longer qualifies
+the closing sentence.

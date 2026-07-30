@@ -268,6 +268,51 @@ fn verify_without_a_data_dir_is_a_usage_error() {
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
 }
 
+#[test]
+fn symbol_supplement_without_a_data_dir_is_a_usage_error() {
+    let dir = TempDir::new();
+    let out = run(dir.path(), &["symbol-supplement"], &[]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+}
+
+// An empty archive has no records, so nothing can be short: exit 0, and — in a
+// default build — the refusal to guess without a DBN decoder, also 2. Which of
+// the two applies depends on the feature, and both are usage-level answers, so
+// the assertion is on the pair rather than on one code.
+#[test]
+fn symbol_supplement_on_an_empty_archive_does_not_fail() {
+    let dir = TempDir::new();
+    let out = run(
+        dir.path(),
+        &["symbol-supplement"],
+        &[("CRUCIBLE_DATA_DIR", &dir.path().to_string_lossy())],
+    );
+    let code = out.status.code();
+    assert!(
+        code == Some(0) || code == Some(2),
+        "expected 0 (nothing to do) or 2 (build without the databento feature), \
+         got {code:?}: {}",
+        stderr(&out)
+    );
+}
+
+// A dry run must never write. The manifest is the archive's most load-bearing
+// file, so "look first" has to be the default rather than a flag.
+#[test]
+fn symbol_supplement_dry_run_creates_no_manifest() {
+    let dir = TempDir::new();
+    let out = run(
+        dir.path(),
+        &["symbol-supplement"],
+        &[("CRUCIBLE_DATA_DIR", &dir.path().to_string_lossy())],
+    );
+    assert!(out.status.code().is_some(), "the process ran");
+    assert!(
+        !dir.path().join("manifest.jsonl").exists(),
+        "a dry run must not create a manifest"
+    );
+}
+
 // The determinism gate reads this: one line, one hash, nothing else. Adding
 // `clap` restructured argument parsing, so this pins the output shape the CI
 // double-run compares.
