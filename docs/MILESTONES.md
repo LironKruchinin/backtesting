@@ -336,13 +336,32 @@ The quant-research payload. Specs live in `crucible-funnel` module docs.
             `Stage::S0::is_implemented()` is true, `s0` configs are accepted and
             H-008 is unblocked — all in that commit, as D-0075 asked
 - [ ] Stats: deflated Sharpe, PBO/CSCV, block-permutation nulls, empirical
-      p-values — cited implementations with property tests. **The planted
-      defect they will be measured against already exists**:
+      p-values — cited implementations with property tests.
+      - [x] **Block-permutation null + empirical p-values** (2026-07-31,
+            D-0087): `crucible-funnel::stats::permutation`. The null is stated
+            rather than implied — *returns are exchangeable at block scale L* —
+            with the +1-corrected one-sided p-value, unevaluable draws counted
+            rather than zero-filled, and an absent null failing its criterion.
+            **M3's acceptance clause is met**: `planted_leak.rs` flipped from
+            `Iterate` to `Kill`, by building the harness and by nothing else,
+            with every gate before S3 still passing and asserted to pass. The
+            converse control came first and caught a broken fixture on the way.
+            Pinned hash `9fe41f6f5b3653e7`; the five existing hashes unmoved
+      - [ ] Deflated Sharpe, PBO/CSCV — block B of `docs/plans/m3-full.md`
+
+      **The planted defect they were measured against already existed**:
       `controls::LeakyZScore` (a full-sample z-score, §2.1's named lookahead),
-      and `crucible-funnel/tests/planted_leak.rs` records that today's gates
-      return `Iterate` for it. That expectation flipping to `Kill` is the
-      acceptance test for this line
-- [ ] Truncation-invariance harness in CI (sampled cut points)
+      and `crucible-funnel/tests/planted_leak.rs` recorded that the gates
+      returned `Iterate` for it. **That expectation flipped to `Kill` on
+      2026-07-31** when the permutation null landed — the detector watched
+      firing on a defect planted before it existed, which is what this line's
+      acceptance test asked for
+- [ ] Truncation-invariance harness in CI (sampled cut points). The other half
+      of block A; deliberately **not** started so the permutation harness could
+      ship complete rather than both half done (D-0087). It asks a different
+      question — decisions on `data[0..t]` must be BIT-IDENTICAL to decisions
+      `<= t` on the full series, an equality rather than an extremeness — and it
+      truncates the END, because that is the direction lookahead flows from
 - [ ] Cross-instrument rhyme check (needs NQ/RTY archives from M1 tooling)
 - [ ] Multi-instance pass + dataset semaphore, with criterion evidence
 
@@ -352,8 +371,13 @@ the permutation/truncation harnesses (negative-control test).
 *First half met 2026-07-30:* `crucible funnel --config
 configs/combo-smoke.toml` runs unattended to 24 registry rows, 6 verdicts and
 a scorecard, killing all six combos of the null harness at S1 and exiting 5.
-*Second half is open, and its baseline is measured rather than assumed:* the
-leaky strategy is planted and the record says the gates do **not** catch it.
+*Second half met 2026-07-31* (D-0087): the permutation null landed and
+`planted_leak.rs` flipped from `Iterate` to `Kill` — the detector watched firing
+on a defect planted before it existed, reached by building the harness and by no
+other route. Its baseline had been measured rather than assumed, which is what
+made the flip evidence instead of a claim. Every gate before S3 still passes and
+the test asserts they do, so the file cannot silently stop measuring the
+detector. The **truncation-invariance** half of the clause is still open.
 
 ## M4 — Calibration + write-up (~3–4 weeks)
 

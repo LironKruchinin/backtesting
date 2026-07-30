@@ -1,35 +1,33 @@
-//! **The record that today's gates do not catch a lookahead leak.**
+//! **The record of the detector firing on a defect planted before it existed.**
 //!
-//! CLAUDE.md §7 says a detector nobody has seen fire is decoration, and that
-//! the rule has no quality exemption. The funnel's S0–S2 gates are not leak
-//! detectors and were never claimed to be — the detectors are the permutation
-//! null and the truncation-invariance harness, which are
-//! `crucible-funnel::stats`, still a module-doc spec. What this file does is
-//! make that gap *measured* instead of assumed, before the detectors exist:
+//! This file used to assert a *failure*. It planted a realistic lookahead
+//! defect — [`LeakyZScore`][crucible_strategies::controls::LeakyZScore], which
+//! standardizes each close against the mean and standard deviation of the
+//! **whole series**, the exact failure §2.1 names — ran it on the project's own
+//! null harness, showed it made money out of sample under honest costs while
+//! beating both mandatory controls, and asserted the criteria returned
+//! `Iterate`. That assertion was the measured cost of not having a detector.
 //!
-//! 1. It plants a realistic lookahead defect —
-//!    [`LeakyZScore`][crucible_strategies::controls::LeakyZScore], which
-//!    standardizes each close against the mean and standard deviation of the
-//!    **whole series**, the exact failure §2.1 names as *"full-sample z-scores
-//!    … are lookahead"*.
-//! 2. It runs that defect on the **null harness** — a seeded random walk,
-//!    where every §9 entry in CLAUDE.md agrees there is nothing to find — and
-//!    shows it makes money out of sample, under honest costs, beating both
-//!    mandatory controls.
-//! 3. It asserts that the current criteria return **`Iterate`**, not `Kill`.
+//! **The permutation null landed 2026-07-31 (D-0087) and the expectation
+//! flipped to `Kill`.** Nothing else changed: not the strategy, not its
+//! registration, not a threshold. The flip is the acceptance test of
+//! `docs/MILESTONES.md`'s last M3 clause, and it was reached the only way §9
+//! permits — by building the harness.
 //!
-//! That third assertion is deliberately an assertion about a *failure*. It is
-//! not a bug to be fixed by tightening a threshold — a threshold that killed
-//! this would kill real strategies too, because the leaked edge is
-//! indistinguishable from a real one by any statistic computed on the leaked
-//! run. It is caught by asking a different question: does the edge survive
-//! when the future is shuffled, or when it is deleted? Nothing here asks that
-//! yet.
+//! **What the harness sees that the gates cannot.** Every criterion before S3
+//! still passes, and this file asserts that too: admission, S1, S2's Sharpe,
+//! S2's kill-level sweep, and both controls. A statistic computed *on the
+//! leaked run* cannot separate a leaked edge from a real one, which is why
+//! tightening any of those thresholds was always the wrong repair. The
+//! permutation null asks a different question — *would this strategy have
+//! produced the same result on a series with the same shape but no long-range
+//! ordering?* — and the leak answers **yes**, because it simply re-fits on
+//! every permutation. Its observed run is an ordinary draw from its own null:
+//! `p = 0.2079` against a pre-registered `0.05`.
 //!
-//! **When the permutation harness lands, this test is expected to change**,
-//! and the change is the point: the day `expected_verdict` flips from
-//! `Iterate` to `Kill` is the day the detector was watched firing on a defect
-//! that was planted before it existed.
+//! The assertion that every pre-S3 gate still passes is not decoration. If a
+//! future change made the leak die at S1 or S2 instead, the verdict would still
+//! read `Kill` while this file had stopped measuring the permutation null.
 
 use crucible_core::prelude::*;
 use crucible_engine::{BacktestParams, FreeFills, SpreadCrossFills, Summary, run};
@@ -129,6 +127,44 @@ impl Feed for SliceFeed<'_> {
     }
 }
 
+/// Rebuilds the event series from a permuted close path, keeping every bar's
+/// timestamp and volume and moving only the prices.
+///
+/// OHLC collapses to the close on purpose: the permutation's null is about the
+/// ordering of *returns*, and carrying the original bar's high/low onto a
+/// different level would invent intrabar ranges the permuted path never had.
+/// The leak reads closes and nothing else, so nothing under test is lost.
+fn events_from_path(template: &[MarketEvent], path: &[f64]) -> Vec<MarketEvent> {
+    assert_eq!(template.len(), path.len(), "one price per bar");
+    template
+        .iter()
+        .zip(path.iter())
+        .map(|(ev, px)| {
+            let MarketEvent::Bar(b) = ev;
+            let p = Price::from_points_f64_lossy(*px);
+            let mut nb = b.clone();
+            nb.open = p;
+            nb.high = p;
+            nb.low = p;
+            nb.close = p;
+            MarketEvent::Bar(nb)
+        })
+        .collect()
+}
+
+/// The leak, re-fitted on whatever series it is handed — which is precisely why
+/// it survives permutation and why the null kills it.
+fn leaky_on(events: &[MarketEvent]) -> LeakyZScore {
+    let closes: Vec<Price> = events
+        .iter()
+        .map(|ev| {
+            let MarketEvent::Bar(b) = ev;
+            b.close
+        })
+        .collect();
+    LeakyZScore::fit_on_everything(&closes, ENTRY_Z, Qty(1))
+}
+
 fn replay<S: Strategy, M: FillModel>(
     events: &[MarketEvent],
     strategy: &mut S,
@@ -149,7 +185,7 @@ fn pooled(result: &crucible_engine::BacktestResult, windows: &[std::ops::Range<u
 /// The whole record, in one test so that the three facts cannot drift apart:
 /// the leak is profitable, it beats both controls, and the gates pass it.
 #[test]
-fn the_planted_leak_survives_todays_gates() {
+fn the_planted_leak_is_caught_by_the_permutation_null() {
     let events = events();
     let keys = day_keys(events.len());
     let closes: Vec<Price> = events
@@ -235,6 +271,47 @@ fn the_planted_leak_survives_todays_gates() {
     // Fact 3, and the reason this file exists: the pre-registered criteria say
     // ITERATE. Every gate this build runs is satisfied by a strategy whose
     // entire edge is knowledge of the future.
+    // ---- THE PERMUTATION NULL (block A, docs/plans/m3-full.md).
+    //
+    // The leak standardizes against whatever series it is handed, so it
+    // RE-FITS on every permutation and reproduces its edge there too. The
+    // observed run is therefore an ordinary draw from its own null, and the
+    // p-value says so. Nothing about the leaked result was extreme; the edge
+    // is a property of being allowed to look, not of this data.
+    let closes: Vec<f64> = events
+        .iter()
+        .map(|ev| {
+            let MarketEvent::Bar(b) = ev;
+            b.close.as_points_f64()
+        })
+        .collect();
+    let observed = oos.total_return_pct;
+    let perm = crucible_funnel::stats::permutation::run_permutation_null(
+        &closes,
+        observed,
+        crucible_funnel::stats::permutation::PermutationSpec {
+            // Twenty bars: longer than the leak's own reaction time and short
+            // enough that a whole regime does not survive inside one block.
+            // Declared, and swept in the harness's own tests (CLAUDE.md §9).
+            block_len: 20,
+            // 100 rather than 1,000: each draw is a full 20,000-bar replay, and
+            // the p-value floor 1/(1+100) = 0.0099 is far below the 0.05 this
+            // test judges against. Stated rather than tuned.
+            draws: 100,
+            seed: SEED,
+        },
+        |path| {
+            let permuted = events_from_path(&events, path);
+            let run = replay(&permuted, &mut leaky_on(&permuted), &mut costed());
+            Some(pooled(&run, &test_windows).total_return_pct)
+        },
+    );
+    let p_value = perm.p_value().expect("a null was built");
+    eprintln!(
+        "[permutation] leak: observed {observed:+.3}%, null median {:+.3}%, p = {p_value:.4}",
+        perm.null[perm.null.len() / 2]
+    );
+
     let criteria = criteria();
     let sessions: usize = plan.folds().iter().map(|f| f.test.n_days()).sum();
     let evidence = Evidence {
@@ -253,6 +330,7 @@ fn the_planted_leak_survives_todays_gates() {
         )
         .sharpe_naive,
         random_entry_return_pct: Some(random_oos_pct),
+        permutation_p_value: Some(p_value),
         buy_and_hold_return_pct: Some(bnh.total_return_pct),
         // S0 did not run in this fixture: the leak is an equity-curve
         // phenomenon and this test is about the S1/S2 gates seeing it.
@@ -262,17 +340,38 @@ fn the_planted_leak_survives_todays_gates() {
 
     assert_eq!(
         assessment.verdict,
-        Verdict::Iterate,
-        "THIS ASSERTION IS THE RECORD, NOT THE GOAL. The funnel's S0-S2 gates pass a strategy \
-         whose edge is a full-sample statistic — a lookahead leak (CLAUDE.md §2.1) on data with \
-         no edge in it. They are not leak detectors; the permutation null and the \
-         truncation-invariance harness are, and they are not built. When they land, this \
-         expectation becomes Kill, and that flip is the detector being watched firing on a \
-         defect planted before it existed.\n\nreasons:\n{}",
+        Verdict::Kill,
+        "THE DETECTOR MUST FIRE. The permutation null is what catches this leak, and it catches \
+         it by asking a question no statistic computed on the run can answer.\n\nreasons:\n{}",
         assessment.rendered_reasons().join("\n")
     );
-    assert_eq!(assessment.decided_at, Stage::S2);
-    assert!(assessment.reasons.iter().all(|r| r.passed));
+    assert_eq!(
+        assessment.decided_at,
+        Stage::S3,
+        "and it must die at S3 — the permutation null — not earlier"
+    );
+
+    // The shape of the catch is the point, so it is asserted rather than
+    // described: EVERY gate before S3 passes. If a future change made the leak
+    // die at S1 or S2 instead, this test would still be green on the verdict
+    // while no longer measuring what it claims to.
+    for r in &assessment.reasons {
+        if r.stage < Stage::S3 {
+            assert!(
+                r.passed,
+                "a gate before S3 caught the leak, so this test no longer measures the \
+                 permutation null: {}",
+                r.detail
+            );
+        }
+    }
+    assert!(
+        assessment
+            .reasons
+            .iter()
+            .any(|r| r.stage == Stage::S3 && !r.passed),
+        "S3 is what must have failed"
+    );
 }
 
 /// The negative control on the record itself: an **honest** version of the
@@ -317,6 +416,9 @@ fn the_same_criteria_kill_an_honest_strategy_on_the_same_data() {
         random_entry_return_pct: Some(0.0),
         buy_and_hold_return_pct: Some(0.0),
         s0_best_abs_ic: None,
+        // The honest strategy is judged by the same criteria, so it needs a
+        // p-value too; it is killed at S2 long before S3 is reached.
+        permutation_p_value: Some(0.5),
     };
     let assessment = assess(&criteria(), &evidence);
     assert_eq!(
@@ -341,6 +443,9 @@ fn criteria() -> Criteria {
         max_pbo: 0.5,
         require_plateau: true,
         s0_min_abs_ic: None,
+        // Pre-registered: the observed edge must be in the top 5 % of what this
+        // same strategy produces on block-shuffled series.
+        max_permutation_p: Some(0.05),
     })
     .expect("the smoke config's criteria")
 }

@@ -28,6 +28,8 @@
 //! boundary); all resampling seeds derive from the run's seed lineage so
 //! every p-value is reproducible bit-for-bit.
 
+pub mod permutation;
+
 /// Placeholder for the M3 statistics implementation.
 #[derive(Debug, Clone, Copy)]
 pub struct StatsPlan;

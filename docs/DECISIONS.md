@@ -2597,3 +2597,76 @@ propose a superseding entry — don't silently diverge.
   (>1.87 M missing bars, coverage under 0.1 %). That is a consequence of building
   a metals table, not the "strengthening" §9 refuses, and the partition key is
   still what fixes the bug.
+- **D-0087** (2026-07-31) — **The permutation null: the first real piece of S3,
+  and the harness that catches the planted leak.** Block A of
+  `docs/plans/m3-full.md`, and the acceptance test of M3's last clause.
+  **What the null IS, stated because it is a choice.** `H₀: the return series is
+  exchangeable at block scale L` — any dependence longer than `L` is absent,
+  while the return distribution and dependence shorter than `L` are preserved
+  exactly, because blocks move intact. A p-value here means "the observed metric
+  was in the top `p` of what this strategy produces on series that keep the
+  marginal distribution and the short-range dependence but lose the long-range
+  ordering". It does not mean "profitable" and it does not mean "real".
+  **Why it catches a leak that every prior gate passes.** `LeakyZScore`
+  standardizes against the whole series and then trades. Permute the series and
+  it **re-fits on the permutation**: its edge reproduces on every draw, so the
+  observed run sits in the middle of its own null. On the null harness it reads
+  **observed +5.947 %, null median +3.707 %, p = 0.2079** against a
+  pre-registered `0.05` — killed at S3, while admission, S1, S2's Sharpe, the
+  kill-level sweep and both controls all still **pass**. That is the point: a
+  statistic computed *on the leaked run* cannot separate a leaked edge from a
+  real one, which is why tightening any earlier threshold was always the wrong
+  repair (§9).
+  **`crucible-funnel/tests/planted_leak.rs` flips from `Iterate` to `Kill`**,
+  and that flip is M3's acceptance test. It was reached by building the harness
+  and by nothing else — the strategy, its registration and every threshold are
+  untouched. The test additionally asserts that **every gate before S3 passes**,
+  so a future change that made the leak die earlier would fail here rather than
+  silently stop measuring the detector.
+  **The converse control came first, and it earned its place.** A detector that
+  kills everything is not a detector, so `a_real_edge_destroyed_by_shuffling_
+  survives` plants a series with genuine long-range structure — regimes
+  persisting 500 bars — and requires a trend-follower to **survive**: observed
+  188.77 pt against a null median of 41.85 pt, **p = 0.0050**, the floor
+  `1/(1+200)`. The first draft of that fixture was wrong (`4000 + dir*t*drift`
+  is a sawtooth, and the trend-follower lost money on it); the converse control
+  caught the broken fixture, which is precisely the argument for having one, and
+  the fixture's doc comment records it rather than quietly correcting it. A
+  third case names the cause: the **same** strategy on a structureless walk
+  reads `p = 0.4030`, so the converse control measured the edge and not the
+  harness (§7's "add the third case").
+  **The p-value carries the +1 correction** — `(1 + #{null ≥ observed}) /
+  (1 + draws)`. Without it a strategy that beat every draw reports `p = 0`,
+  claiming more certainty than the resample count can support; with it the floor
+  is the resolution the experiment actually has. An **absent** null has no
+  p-value and **fails** its criterion rather than passing it (D-0075).
+  Unevaluable draws are counted, never folded in as zeros — a zero is a result,
+  and inventing one moves the p-value.
+  **The pinned determinism hash is `9fe41f6f5b3653e7`**
+  (`the_permutation_null_is_pinned`): blake3 over the observed metric, the block
+  length, the unevaluable count and every null draw, for `walk(4_000, seed 29)`
+  — the inlined SplitMix64 walk from 4000.00 points in quarter-point ticks —
+  evaluated with the file's `leaky_zscore_pnl`, `block_len = 20`, `draws = 200`,
+  `seed = 4`. Hashed over the whole distribution rather than a percentile so a
+  drift anywhere fails, not only where a p-value happens to read. The five
+  existing hashes are **unmoved**: the harness observes runs, it does not change
+  them.
+  **Mutations, each watched failing and restored byte-exactly.** (1) the
+  decision rule's comparison `p <= alpha` → `p >= alpha`: caught by all three
+  controls. (2) the tail comparison `null >= observed` → `null <= observed`:
+  caught by the converse control and by the hand-derived p-value test.
+  **Where the criterion lives, and why it is not gated on `stages`.**
+  `Criteria::max_permutation_p` is evaluated whenever an `Evidence` carries a
+  p-value, rather than when `stages` names `s3` — because **s3 as a declarable
+  stage still needs the rest of the battery** (deflated Sharpe, PBO, truncation)
+  and is still refused at load. D-0075's stage refusal is untouched and the
+  `Iterate` ceiling still stands; lifting either is block D's, with its own
+  superseding entry.
+  **What is NOT here: the truncation-invariance harness.** Block A is two
+  harnesses and this session delivered one complete rather than both half done.
+  Truncation asks a different question — decisions computed on `data[0..t]` must
+  be **bit-identical** to decisions `≤ t` computed on the full series — which is
+  a determinism property asserting equality, not a statistical one asserting
+  extremeness. It truncates the **end** (the future), because that is the
+  direction lookahead flows from; truncating the start would test warmup
+  sensitivity, which is a different and lesser question. It is not built.

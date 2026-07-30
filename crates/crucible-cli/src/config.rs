@@ -380,6 +380,9 @@ impl FunnelCfg {
             kill_if_dead_at_ticks: self.kill_if_dead_at_ticks,
             require_controls_beaten: self.require_controls_beaten,
             s0_min_abs_ic,
+            // Not configurable yet: the permutation harness ships with its
+            // acceptance test before it is wired to the run path.
+            max_permutation_p: None,
             max_pbo: self.max_pbo,
             require_plateau: self.require_plateau,
         })

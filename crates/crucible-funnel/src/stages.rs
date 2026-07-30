@@ -190,6 +190,17 @@ pub struct Criteria {
     /// S0: the smallest `|IC|` at any declared horizon that counts as a
     /// relationship. `None` when the config did not declare `s0`.
     pub s0_min_abs_ic: Option<f64>,
+    /// **S3, and the first piece of the battery that is real**: the largest
+    /// permutation-null p-value that still counts as an edge. `None` when the
+    /// caller supplies no permutation result.
+    ///
+    /// Evaluated whenever an `Evidence` carries a p-value, rather than gated on
+    /// `stages` containing `s3` — because `s3` as a *declarable stage* still
+    /// needs the rest of the battery (deflated Sharpe, PBO, truncation) and is
+    /// still refused at load (D-0075). This is the seam that lets the harness
+    /// be exercised by its acceptance test before the stage it belongs to
+    /// exists.
+    pub max_permutation_p: Option<f64>,
     /// S3, echoed and **not evaluated** by this build.
     pub max_pbo: f64,
     /// S3, echoed and not evaluated by this build.
@@ -314,6 +325,8 @@ pub struct CriteriaSource<'a> {
     pub require_controls_beaten: bool,
     /// `[s0].min_abs_ic`, or `None` when the config declares no `[s0]` block.
     pub s0_min_abs_ic: Option<f64>,
+    /// The permutation criterion, or `None`.
+    pub max_permutation_p: Option<f64>,
     /// `max_pbo`.
     pub max_pbo: f64,
     /// `require_plateau`.
@@ -396,6 +409,7 @@ impl Criteria {
             kill_if_dead_half_ticks,
             require_controls_beaten: source.require_controls_beaten,
             s0_min_abs_ic: source.s0_min_abs_ic,
+            max_permutation_p: source.max_permutation_p,
             max_pbo: source.max_pbo,
             require_plateau: source.require_plateau,
         })
@@ -415,6 +429,7 @@ impl Criteria {
             kill_if_dead_half_ticks: 2,
             require_controls_beaten: true,
             s0_min_abs_ic: None,
+            max_permutation_p: None,
             max_pbo: 0.5,
             require_plateau: true,
         }
@@ -490,6 +505,12 @@ pub struct Evidence {
     /// when S0 did not run. `None` is not a failure — it is the absence of a
     /// measurement, and the criterion is only applied when S0 was asked for.
     pub s0_best_abs_ic: Option<f64>,
+    /// The permutation null's empirical p-value for this combo's out-of-sample
+    /// result, or `None` when the harness did not run
+    /// ([`crate::stats::permutation`]). `None` is not a pass — the criterion
+    /// below is simply not evaluated, and a config that wanted it says so by
+    /// declaring `max_permutation_p`.
+    pub permutation_p_value: Option<f64>,
 }
 
 /// One criterion, evaluated.
@@ -653,6 +674,36 @@ pub fn assess(criteria: &Criteria, evidence: &Evidence) -> Assessment {
         reasons.extend(s2);
     }
 
+    // The permutation null — the first real piece of S3, and the one gate in
+    // this build that asks a question no statistic computed ON the run can
+    // answer: would this strategy have produced the same result on a series
+    // with the same shape but no long-range ordering? A leak that re-fits on
+    // every permutation answers "yes" and dies here (CLAUDE.md §9).
+    //
+    // Gated on the criterion being SUPPLIED rather than on `stages` naming s3,
+    // because s3 as a declarable stage still needs the rest of the battery
+    // (deflated Sharpe, PBO, truncation) and is still refused at load (D-0075).
+    if !failed && let Some(max_p) = criteria.max_permutation_p {
+        decided_at = Stage::S3;
+        let s3 = vec![check(
+            Stage::S3,
+            evidence.permutation_p_value.is_some_and(|p| p <= max_p),
+            match evidence.permutation_p_value {
+                Some(p) => format!(
+                    "permutation-null p = {p:.4}, {max_p:.4} required — the observed edge must \
+                     be extreme against the same strategy run on block-shuffled series, or it \
+                     is not a property of this data"
+                ),
+                None => format!(
+                    "no permutation null was built, {max_p:.4} required — an absent null is \
+                     not a cleared bar (D-0075)"
+                ),
+            },
+        )];
+        failed = s3.iter().any(|r| !r.passed);
+        reasons.extend(s3);
+    }
+
     // Graduate is unreachable, and deliberately: the glossary defines it as
     // "survived the full battery", and S3 — the battery — is not in this
     // build. Awarding it on S1+S2 would just rename Iterate.
@@ -729,6 +780,7 @@ mod tests {
             max_pbo: 0.5,
             require_plateau: true,
             s0_min_abs_ic: None,
+            max_permutation_p: None,
         }
     }
 
@@ -748,6 +800,7 @@ mod tests {
             random_entry_return_pct: Some(0.5),
             buy_and_hold_return_pct: Some(1.0),
             s0_best_abs_ic: None,
+            permutation_p_value: None,
         }
     }
 

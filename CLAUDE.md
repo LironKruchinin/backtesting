@@ -895,11 +895,23 @@ reference; supersede the decision if you disagree — don't hotfix.
   already had one.** The store is append-only by design (D-0074): the run
   genuinely ran again, and a log that mutated the first line would lose that.
   The index folds later lines over earlier ones, so the reader is unaffected.
-- **A leaky strategy is checked into this repository on purpose.**
-  `crucible-strategies::controls::LeakyZScore` fits on the whole series and
-  then backtests — the lookahead §2.1 names by name — and
-  `crucible-funnel/tests/planted_leak.rs` asserts the current gates return
-  `Iterate` for it. **That test asserts a failure, and fixing it by tightening a
+- **A leaky strategy is checked into this repository on purpose, and the
+  detector now catches it** (D-0087). `crucible-strategies::controls::
+  LeakyZScore` fits on the whole series and then backtests — the lookahead §2.1
+  names by name — and `crucible-funnel/tests/planted_leak.rs` asserted for
+  months that the gates returned `Iterate` for it. **On 2026-07-31 the
+  permutation null landed and that expectation flipped to `Kill`**, reached the
+  only way §9 permits: by building the harness. Nothing else moved — not the
+  strategy, not its registration, not a threshold.
+
+  The shape of the catch is the lesson. Every gate before S3 **still passes** —
+  admission, S1, S2's Sharpe, the kill-level sweep, and both controls — and the
+  test asserts that, because if a future change made the leak die earlier the
+  verdict would still read `Kill` while the file had stopped measuring the
+  detector. The leak dies at S3 on `p = 0.2079` against a pre-registered `0.05`:
+  it **re-fits on every permutation**, so its observed run is an ordinary draw
+  from its own null. The historical text follows, because the reasoning is what
+  made the flip meaningful: **That test asserts a failure, and fixing it by tightening a
   threshold is wrong**: a leaked edge is indistinguishable from a real one by
   any statistic computed on the leaked run, so a threshold that killed it would
   kill real strategies too. It is caught by asking a different question — does
@@ -916,6 +928,21 @@ reference; supersede the decision if you disagree — don't hotfix.
   changing `Verdict::Iterate` to `Verdict::Kill` in that test by any route
   other than a harness catching it would tick the milestone's last box with a
   lie in it.
+- **The permutation null's block length `L` has two opposing jobs, and there is
+  no correct value — only a declared one and a sweep** (D-0087). `L` preserves
+  dependence *and* destroys the signal. Too long and the strategy's own horizon
+  fits inside a block, so the null keeps the edge and the test is conservative
+  to the point of uselessness; too short and the null loses autocorrelation the
+  market really has, so an ordinary strategy looks extreme against a straw man.
+  The spec (`stats`' module doc) says "block length ≳ strategy horizon to
+  preserve autocorrelation structure", which reads as *preserve* while the test
+  needs *destroy* — **that ambiguity is flagged here rather than resolved
+  silently.** What this build does: state the null in one sentence (`returns are
+  exchangeable at block scale L`), declare `L` before the run, and require a
+  sweep over it — the same demand `ACCOUNT_EVAL_SPEC.md` §4.3 already makes of
+  its own bootstrap. A single unswept `L` is a result with a parameter hidden
+  inside it, and picking the `L` that makes a p-value small is the seed-shopping
+  the rule below forbids.
 - **The leak fixture uses seed 29 rather than the smoke config's 42**, and that
   is confound removal rather than fixture-fitting. Buy-and-hold is a *criterion*,
   and a random walk's drift across any particular set of test windows is

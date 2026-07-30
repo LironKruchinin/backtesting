@@ -351,6 +351,10 @@ pub fn run_funnel(
             // bars (it takes no position, so it has no replay), and its reading
             // gates this assessment. `None` when the config declared no `s0`.
             s0_best_abs_ic: inputs.s0_best_abs_ic.get(&index).copied(),
+            // The permutation harness is not wired into the run path yet:
+            // block A ships the harness and its acceptance test first
+            // (docs/plans/m3-full.md).
+            permutation_p_value: None,
         };
         let assessment = assess(inputs.criteria, &evidence);
 
