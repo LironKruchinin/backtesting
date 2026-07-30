@@ -13,6 +13,14 @@
 //! fee are arguments with today's hand-set values as defaults, echoed back in
 //! the header. Their calibration from archived L1 is M4's job.
 //!
+//! `--stop-ticks` / `--target-ticks` bracket every position the strategy
+//! opens, and bring a *second* named assumption with them: an OHLC bar does
+//! not say whether its high or its low printed first, so the intrabar ordering
+//! convention (`stop_first_intrabar`, `crucible-engine::bracket`) is printed in
+//! the header and the bars where it decided the outcome are counted in the
+//! result. A run whose PnL turns on many of those is a run to distrust, and it
+//! says so.
+//!
 //! ## Exit codes
 //!
 //! | code | meaning |
@@ -30,8 +38,10 @@ use crucible_data::curated::{
 use crucible_data::ingest::money::parse_usd_to_nano;
 use crucible_data::ingest::range_from_dates;
 use crucible_data::ingest::window::{date_of, days_from_civil, parse_civil_date, start_of};
-use crucible_engine::{BacktestParams, BacktestResult, SpreadCrossFills, run as run_backtest};
-use crucible_strategies::SmaCross;
+use crucible_engine::{
+    BacktestParams, BacktestResult, INTRABAR_CONVENTION, SpreadCrossFills, run as run_backtest,
+};
+use crucible_strategies::{Bracketed, SmaCross};
 
 use crate::pull::{EXIT_FAILED, EXIT_USAGE, data_dir};
 
@@ -78,6 +88,18 @@ pub struct BacktestArgs {
     /// Commission per contract per side, in dollars.
     #[arg(long, default_value = "1.25")]
     pub fee_per_contract_usd: String,
+    /// Protective stop, in ticks below (long) / above (short) the price each
+    /// entry actually fills at. Omit for a naked position.
+    ///
+    /// `allow_negative_numbers` so that `--stop-ticks -8` reaches the check
+    /// below and gets told *why* a signed distance is wrong, instead of clap's
+    /// "unexpected argument '-8'" — the direction is taken from the position,
+    /// and writing it out is a plausible mistake.
+    #[arg(long, allow_negative_numbers = true)]
+    pub stop_ticks: Option<i64>,
+    /// Profit target, in ticks the other way. Omit for a naked position.
+    #[arg(long, allow_negative_numbers = true)]
+    pub target_ticks: Option<i64>,
     /// Override the annualization factor outright. Beats both the calendar
     /// and the sample measurement.
     #[arg(long)]
@@ -131,6 +153,10 @@ struct Settings {
     spec: ContractSpec,
     initial_cash_nano_usd: NanoUsd,
     fills: SpreadCrossFills,
+    /// Protective levels every entry carries, if any. `None` is a naked
+    /// position, which is what this command did before M2's stops landed and
+    /// still does by default.
+    bracket: Option<Bracket>,
 }
 
 /// Runs the command, returning the process exit code.
@@ -202,20 +228,39 @@ pub fn run(args: &BacktestArgs) -> i32 {
         initial_cash_nano_usd: settings.initial_cash_nano_usd,
         bars_per_year: annualization.value(),
     };
-    let mut strategy = SmaCross::new(args.fast, args.slow, Qty(args.qty));
     let mut fills = settings.fills;
 
     print_header(args, &settings, &feed, &annualization);
 
-    match run_backtest(
-        &mut feed,
-        &mut strategy,
-        &mut fills,
-        &settings.spec,
-        &params,
-    ) {
+    // Two branches because a bracketed strategy is a different type, not a
+    // different flag: nothing downstream can forget to apply the wrapper.
+    let outcome = match settings.bracket {
+        Some(bracket) => {
+            let mut strategy =
+                Bracketed::new(SmaCross::new(args.fast, args.slow, Qty(args.qty)), bracket);
+            run_backtest(
+                &mut feed,
+                &mut strategy,
+                &mut fills,
+                &settings.spec,
+                &params,
+            )
+        }
+        None => {
+            let mut strategy = SmaCross::new(args.fast, args.slow, Qty(args.qty));
+            run_backtest(
+                &mut feed,
+                &mut strategy,
+                &mut fills,
+                &settings.spec,
+                &params,
+            )
+        }
+    };
+
+    match outcome {
         Ok(result) => {
-            print_result(&result);
+            print_result(&result, &settings);
             0
         }
         Err(e) => {
@@ -244,6 +289,17 @@ fn parse(args: &BacktestArgs) -> Result<Settings, String> {
     }
     if args.point_value_usd <= 0 {
         return Err("--point-value-usd must be positive".to_owned());
+    }
+    for (name, ticks) in [
+        ("--stop-ticks", args.stop_ticks),
+        ("--target-ticks", args.target_ticks),
+    ] {
+        if ticks.is_some_and(|t| t <= 0) {
+            return Err(format!(
+                "{name} must be a positive tick distance from the fill price; zero would put \
+                 the level on the entry and a negative one on the wrong side of it"
+            ));
+        }
     }
 
     let tf: TimeFrame = args
@@ -297,6 +353,8 @@ fn parse(args: &BacktestArgs) -> Result<Settings, String> {
             half_spread_ticks: args.half_spread_ticks,
             fee_per_contract_nano_usd,
         },
+        bracket: (args.stop_ticks.is_some() || args.target_ticks.is_some())
+            .then(|| Bracket::new(args.stop_ticks, args.target_ticks)),
     })
 }
 
@@ -439,6 +497,29 @@ fn print_header(
         settings.fills.half_spread_ticks,
         usd(settings.fills.fee_per_contract_nano_usd)
     );
+    match settings.bracket {
+        Some(bracket) => {
+            println!(
+                "  brackets       stop {}, target {} — from the price each entry FILLS at",
+                bracket
+                    .stop_ticks()
+                    .map_or_else(|| "none".to_owned(), |t| format!("{t} tick(s)")),
+                bracket
+                    .target_ticks()
+                    .map_or_else(|| "none".to_owned(), |t| format!("{t} tick(s)"))
+            );
+            println!(
+                "  intrabar       {INTRABAR_CONVENTION} — a bar touching both levels is read as \
+                 the STOP\n\
+                 \x20                filling first, and a bar opening beyond a level fills at that \
+                 open,\n\
+                 \x20                never at the level (D-0069). Bars where that choice decided \
+                 the\n\
+                 \x20                outcome are counted below"
+            );
+        }
+        None => println!("  brackets       none — positions are naked; no exit is path-dependent"),
+    }
     println!(
         "  capital        {} initial",
         usd(settings.initial_cash_nano_usd)
@@ -475,7 +556,7 @@ fn print_header(
     println!();
 }
 
-fn print_result(result: &BacktestResult) {
+fn print_result(result: &BacktestResult, settings: &Settings) {
     let s = &result.summary;
     println!("  final equity     {:>14}", usd(s.final_equity_nano_usd));
     println!(
@@ -500,12 +581,59 @@ fn print_result(result: &BacktestResult) {
             result.cancelled_at_eof
         );
     }
+    if settings.bracket.is_some() {
+        println!(
+            "  stop/target exits{:>14}   (of {} fills)",
+            result.n_protective_exits, result.n_fills
+        );
+        println!(
+            "  path-sensitive   {:>14}   (bars where {INTRABAR_CONVENTION} chose the outcome)",
+            result.path_sensitive_bars
+        );
+        println!(
+            "{}",
+            path_sensitivity_note(result.path_sensitive_bars, result.n_protective_exits)
+        );
+    }
     println!(
         "\n  One instrument, one fill model, one parameter pair, no benchmark and no\n\
          \x20 trial count: this is a control run, not a verdict. Comparisons against\n\
          \x20 buy-and-hold and a matched random-entry baseline arrive with the\n\
          \x20 predictor workbench; deflated Sharpe and PBO arrive with the funnel."
     );
+}
+
+/// How much of the number above rests on a convention rather than on the data.
+///
+/// An OHLC bar does not say whether its high or its low printed first, so an
+/// exit from a bar that touched both levels is a *choice*. Stating the count is
+/// the whole point of the M2 line that asked for it: a run where most exits
+/// came from ambiguous bars would have a materially different PnL under a
+/// different-but-equally-defensible rule, and a reader cannot judge that from a
+/// return figure alone.
+fn path_sensitivity_note(path_sensitive_bars: usize, n_protective_exits: usize) -> String {
+    if path_sensitive_bars == 0 {
+        return "\n  Every stop/target exit above was decided by the bars themselves: no bar \
+                touched\n\
+                \x20 both levels, so nothing here depends on the intrabar convention."
+            .to_owned();
+    }
+    let share = if n_protective_exits == 0 {
+        0.0
+    } else {
+        #[expect(clippy::cast_precision_loss, reason = "small counts, display only")]
+        let (num, den) = (path_sensitive_bars as f64, n_protective_exits as f64);
+        num / den * 100.0
+    };
+    format!(
+        "\n  PATH-SENSITIVE: {path_sensitive_bars} of {n_protective_exits} stop/target exits came \
+         from a bar that touched BOTH\n\
+         \x20 levels ({share:.0}%). An OHLC bar does not record which printed first, so each of\n\
+         \x20 those exits is the worst-case convention's answer, not the data's: under a\n\
+         \x20 target-first rule they would each have paid the target instead. Treat the\n\
+         \x20 return above as one end of a range, and prefer a wider bracket or a finer\n\
+         \x20 timeframe (1s bars resolve most of these) before quoting it."
+    )
 }
 
 /// Names what *is* transcoded, so "not found" is actionable.
@@ -516,5 +644,31 @@ fn suggest_instruments(dir: &std::path::Path, tf: TimeFrame) {
         }
         Ok(_) => {}
         Err(e) => eprintln!("       (could not list curated instruments: {e})"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::path_sensitivity_note;
+
+    /// The zero case has to say *why* it is zero. "No number printed" and "no
+    /// ambiguous bars" read identically to someone scanning a report, and only
+    /// one of them means the result is safe to quote.
+    #[test]
+    fn no_ambiguous_bars_still_says_so() {
+        let note = path_sensitivity_note(0, 12);
+        assert!(note.contains("decided by the bars themselves"), "{note}");
+        assert!(!note.contains("PATH-SENSITIVE"), "{note}");
+    }
+
+    /// And the nonzero case has to be impossible to skim past: the counts, the
+    /// share, and what a different convention would have paid.
+    #[test]
+    fn ambiguous_bars_are_flagged_loudly_with_their_share() {
+        let note = path_sensitivity_note(3, 12);
+        assert!(note.contains("PATH-SENSITIVE"), "{note}");
+        assert!(note.contains("3 of 12"), "{note}");
+        assert!(note.contains("(25%)"), "{note}");
+        assert!(note.contains("target-first"), "{note}");
     }
 }

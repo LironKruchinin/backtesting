@@ -16,11 +16,13 @@
 //!   numerical behavior are the point (docs/DECISIONS.md D-0007).
 
 pub mod align;
+pub mod bracket;
 pub mod combo;
 pub mod indicators;
 pub mod sma_cross;
 
 pub use align::Aligned;
+pub use bracket::Bracketed;
 pub use combo::{ComboSpec, ComboStrategy, Grid};
 pub use indicators::{Bollinger, BollingerBands, Ema, Sma};
 pub use sma_cross::SmaCross;

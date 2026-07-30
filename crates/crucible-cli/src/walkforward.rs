@@ -29,7 +29,7 @@ use crucible_data::ingest::window::{CivilDate, civil_from_days, date_of, days_fr
 use crucible_engine::{BacktestParams, FreeFills, SpreadCrossFills, Summary};
 use crucible_funnel::walkforward::{FoldPlan, FoldSpec, RunIdentity, WalkForwardReport, run_grid};
 
-use crate::combo::{annualization, collect_events, print_header};
+use crate::combo::{annualization, collect_events, print_header, print_path_sensitivity};
 use crate::config::{self, LoadedConfig};
 use crate::pull::EXIT_USAGE;
 
@@ -474,6 +474,10 @@ fn print_footer(loaded: &LoadedConfig, plan: &FoldPlan, report: &WalkForwardRepo
     println!(
         "\n  fill model     {} — every number above states it (§2.4)",
         loaded.file.execution.fill_model
+    );
+    print_path_sensitivity(
+        report.combos.iter().map(|c| c.n_protective_exits).sum(),
+        report.combos.iter().map(|c| c.path_sensitive_bars).sum(),
     );
     println!("\n  not consumed by `walk-forward`:");
     let unconsumed = loaded.unconsumed_sections(true);

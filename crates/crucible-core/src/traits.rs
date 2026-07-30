@@ -1,7 +1,9 @@
 //! The trait seams. Everything pluggable in Crucible — data sources,
 //! strategies, indicators, execution assumptions — plugs in here.
 
-use crate::events::{Bar, Fill, MarketEvent, Order, OrderIntent, OrderKind, Side};
+use crate::events::{
+    Bar, Bracket, Fill, MarketEvent, Order, OrderIntent, OrderKind, ProtectiveExit, Side,
+};
 use crate::types::{ContractSpec, NanoUsd, Price, Qty};
 
 /// A time-ordered source of market events.
@@ -64,28 +66,66 @@ impl Actions {
     }
 
     pub fn buy(&mut self, qty: Qty) {
-        self.intents.push(OrderIntent {
-            side: Side::Buy,
-            qty: qty.abs(),
-            kind: OrderKind::Market,
-        });
+        self.order(Side::Buy, qty, None);
     }
 
     pub fn sell(&mut self, qty: Qty) {
-        self.intents.push(OrderIntent {
-            side: Side::Sell,
-            qty: qty.abs(),
-            kind: OrderKind::Market,
-        });
+        self.order(Side::Sell, qty, None);
+    }
+
+    /// Buy, and install a protective [`Bracket`] around whatever position the
+    /// fill leaves open.
+    pub fn buy_bracketed(&mut self, qty: Qty, bracket: Bracket) {
+        self.order(Side::Buy, qty, Some(bracket));
+    }
+
+    /// Sell, and install a protective [`Bracket`] around whatever position the
+    /// fill leaves open.
+    pub fn sell_bracketed(&mut self, qty: Qty, bracket: Bracket) {
+        self.order(Side::Sell, qty, Some(bracket));
     }
 
     /// Emit whatever single order moves `current` to `target`. The idiomatic
     /// way to express "be long 1 / be short 1 / be flat".
     pub fn target_position(&mut self, current: Qty, target: Qty) {
+        self.move_position(current, target, None);
+    }
+
+    /// [`Actions::target_position`], with a protective bracket on the
+    /// resulting position.
+    ///
+    /// The bracket rides along with the order and is dropped when the order
+    /// would leave the position flat: a pure exit has nothing to protect, and
+    /// attaching a bracket to it would install levels around a position that
+    /// no longer exists.
+    pub fn target_position_bracketed(&mut self, current: Qty, target: Qty, bracket: Bracket) {
+        let bracket = (target.0 != 0).then_some(bracket);
+        self.move_position(current, target, bracket);
+    }
+
+    /// Emit an intent verbatim.
+    ///
+    /// For decorators that rewrite what an inner strategy asked for — see
+    /// `crucible-strategies::bracket` — rather than for strategies, which have
+    /// the named helpers above.
+    pub fn push_intent(&mut self, intent: OrderIntent) {
+        self.intents.push(intent);
+    }
+
+    fn order(&mut self, side: Side, qty: Qty, bracket: Option<Bracket>) {
+        self.intents.push(OrderIntent {
+            side,
+            qty: qty.abs(),
+            kind: OrderKind::Market,
+            bracket,
+        });
+    }
+
+    fn move_position(&mut self, current: Qty, target: Qty, bracket: Option<Bracket>) {
         let delta = target.0 - current.0;
         match delta.cmp(&0) {
-            std::cmp::Ordering::Greater => self.buy(Qty(delta)),
-            std::cmp::Ordering::Less => self.sell(Qty(-delta)),
+            std::cmp::Ordering::Greater => self.order(Side::Buy, Qty(delta), bracket),
+            std::cmp::Ordering::Less => self.order(Side::Sell, Qty(-delta), bracket),
             std::cmp::Ordering::Equal => {}
         }
     }
@@ -138,6 +178,23 @@ pub trait FillModel {
         next_event: &MarketEvent,
         spec: &ContractSpec,
     ) -> Option<Fill>;
+
+    /// Price a bracket leg that has already triggered.
+    ///
+    /// Whether it triggered, which leg won an ambiguous bar, and what price the
+    /// level resolved to are decided *before* this call, once, by the engine's
+    /// named intrabar convention — a fill model cannot move the path, only
+    /// charge for it. It returns a `Fill` rather than an `Option<Fill>`
+    /// because the trigger decision has been made: an execution assumption
+    /// that could veto a touched stop would be modelling a market that lets
+    /// you off.
+    ///
+    /// **Required, not defaulted.** A default implementation would price every
+    /// bracketed strategy's exits under an assumption nobody named, which
+    /// CLAUDE.md §2.4 forbids: the cost of a stop (a market order, crossing
+    /// the spread) and of a target (a resting limit, not crossing it) is
+    /// exactly the kind of optimism that has to be visible and greppable.
+    fn fill_protective_exit(&mut self, exit: &ProtectiveExit, spec: &ContractSpec) -> Fill;
 }
 
 #[cfg(test)]
@@ -160,5 +217,31 @@ mod tests {
         let mut a = Actions::new();
         a.target_position(Qty(3), Qty(3));
         assert!(a.is_empty());
+    }
+
+    #[test]
+    fn a_plain_order_carries_no_bracket() {
+        let mut a = Actions::new();
+        a.buy(Qty(1));
+        assert_eq!(a.take_intents()[0].bracket, None);
+    }
+
+    /// Going flat is a pure exit: there is no resulting position for a bracket
+    /// to protect, so the bracket is dropped rather than installed around
+    /// nothing.
+    #[test]
+    fn a_bracketed_exit_drops_the_bracket() {
+        let bracket = Bracket::new(Some(8), Some(12));
+        let mut a = Actions::new();
+        a.target_position_bracketed(Qty(1), Qty(0), bracket);
+        let intents = a.take_intents();
+        assert_eq!(intents[0].side, Side::Sell);
+        assert_eq!(intents[0].bracket, None);
+
+        // A flip does leave a position, so it keeps its bracket.
+        a.target_position_bracketed(Qty(1), Qty(-1), bracket);
+        let intents = a.take_intents();
+        assert_eq!(intents[0].qty, Qty(2));
+        assert_eq!(intents[0].bracket, Some(bracket));
     }
 }

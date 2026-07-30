@@ -10,15 +10,24 @@
 //! thread`, or wall-clock time into this crate (CLAUDE.md §2.2, §3).
 //!
 //! Event-loop order within one event (see `replay.rs`, do not reorder):
-//! 1. fills — pending orders placed *strictly before* this event may execute
+//! 1. fills — pending orders placed *strictly before* this event may execute,
+//!    then any live protective bracket is tested against this bar
 //! 2. mark  — portfolio marks to the event's close; equity point recorded
 //! 3. decide — the strategy sees the event and may emit new order intents
+//!
+//! Two named assumptions govern what a fill costs and when it happens, and
+//! both are stated with every number they produce (CLAUDE.md §2.4): the
+//! [`execution`] fill model, and — for stops and targets, where one bar can be
+//! consistent with two opposite outcomes — the [`bracket`] intrabar ordering
+//! convention.
 
+pub mod bracket;
 pub mod execution;
 pub mod metrics;
 pub mod portfolio;
 pub mod replay;
 
+pub use bracket::{ActiveBracket, INTRABAR_CONVENTION, Outcome, Resolution, StopFirstIntrabar};
 pub use execution::{FreeFills, SpreadCrossFills};
 pub use metrics::Summary;
 pub use portfolio::{ClosedTrade, FeeEvent, Portfolio};

@@ -23,8 +23,11 @@
 //! counted as a test-window trade. The mark-to-market equity series still
 //! splits the *money* at the boundary correctly — each window keeps the marks
 //! that happened inside it — but the trade *count* and win rate attribute the
-//! whole round-trip to where it was realized. Path-dependent exits (M2's
-//! stops/targets work) will make this more visible, and the report says so.
+//! whole round-trip to where it was realized. Path-dependent exits make this
+//! more visible: a bracket ([`crucible_engine::bracket`]) can close a
+//! training-window entry on the first bar of a test window, so the report
+//! carries the protective-exit and path-sensitivity counts per combo rather
+//! than leaving a reader to assume neither happened.
 
 use crucible_core::prelude::*;
 use crucible_engine::{BacktestParams, BacktestResult, EngineError, Summary, run};
@@ -89,6 +92,20 @@ pub struct ComboWalkForward {
     pub whole_run: Summary,
     /// Orders still pending when the series ended.
     pub cancelled_at_eof: usize,
+    /// Exits produced by a protective stop or target rather than by a
+    /// strategy order, over the whole replay.
+    pub n_protective_exits: usize,
+    /// Bars where a bracket's stop *and* target were both touched, so the exit
+    /// came from `stop_first_intrabar` rather than from the data
+    /// (`crucible-engine::bracket`).
+    ///
+    /// Whole-replay, not per fold, and deliberately so: a path-sensitive bar is
+    /// a property of the *execution assumption*, not of a metric window, and
+    /// the number a reader needs is "how much of this grid's PnL is a
+    /// convention?". Attributing them per window becomes worth its plumbing the
+    /// day a config can declare a bracket — today none can, so the honest
+    /// number is one per combo.
+    pub path_sensitive_bars: usize,
 }
 
 /// A grid, walked forward on one bar series.
@@ -263,6 +280,8 @@ impl<M: FillModel + Clone> GridRun<'_, M> {
             is_pooled,
             whole_run: result.summary.clone(),
             cancelled_at_eof: result.cancelled_at_eof,
+            n_protective_exits: result.n_protective_exits,
+            path_sensitive_bars: result.path_sensitive_bars,
         })
     }
 }

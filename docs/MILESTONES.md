@@ -131,8 +131,26 @@ ESH4 January-2024 1m bars, 30,167 bars, −23.51% under `spread_cross`.
       combo` expands a config and replays every point on one shared bar series.
       `SmaCross` written as four lines of TOML emits an identical order stream,
       which is the test that makes the layer credible
-- [ ] Stops/targets with worst-case intrabar ordering; flag path-sensitive
-      results in outputs
+- [x] Stops/targets with worst-case intrabar ordering; flag path-sensitive
+      results in outputs (2026-07-30): a `Bracket` rides along with the order
+      that opens a position and resolves against the price that order *actually
+      filled at*, so the position is protected from the bar it was opened on
+      rather than the one after. One named convention decides what an OHLC bar
+      refuses to say — `stop_first_intrabar` in `crucible-engine::bracket`
+      (D-0069): the opening print wins where it settles the ordering (a gap
+      fills **at the open**, never at the level, in both directions), and
+      otherwise a bar touching both levels fills the **stop**. `FillModel`
+      gained a required `fill_protective_exit`, because a stop crosses the
+      spread and a target does not, and a defaulted method would be an
+      execution assumption nobody named (§2.4). Bars where the convention chose
+      the outcome are counted in `BacktestResult::path_sensitive_bars` and
+      printed beside the fill model by `backtest`, `combo` and `walk-forward`.
+      The proof is `bracket_golden.rs`: hand-derived fixtures for both the
+      ambiguous bar and the gap, each stating the value a different convention
+      would have produced, plus the negative controls (one-legged, unambiguous,
+      and unbracketed runs all report zero). Not a config axis yet — the combo
+      grammar cannot declare a bracket, and both grid commands say so rather
+      than printing a bare zero
 - [ ] Golden tests vs an external reference (NautilusTrader or hand-audited
       runs) on identical data — the "why should anyone trust your engine"
       answer

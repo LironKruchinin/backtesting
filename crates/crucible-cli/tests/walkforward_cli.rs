@@ -150,6 +150,13 @@ fn the_smoke_config_walks_forward() {
     // And the honesty box survives.
     assert!(text.contains("EVIDENCE, NOT A VERDICT"), "{text}");
     assert!(text.contains("fill model     spread_cross"), "{text}");
+    // The second named execution assumption sits beside the first (§2.4), and
+    // says why its count is zero rather than leaving the reader to guess.
+    assert!(text.contains("stop_first_intrabar"), "{text}");
+    assert!(
+        text.contains("no combo declared a stop or target"),
+        "{text}"
+    );
 }
 
 /// A random walk under costs must lose money out of sample. If this ever

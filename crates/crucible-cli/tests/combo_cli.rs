@@ -168,6 +168,14 @@ fn the_smoke_config_replays_and_finds_nothing() {
         !text.contains("  n/a") || text.contains("Sharpe"),
         "a replay must produce a table: {text}"
     );
+    // §2.4: the intrabar ordering assumption is stated even when nothing in
+    // this grid can trigger it. "No number printed" and "no ambiguous bars"
+    // must not look the same to a reader.
+    assert!(
+        text.contains("no combo declared a stop or target"),
+        "{text}"
+    );
+    assert!(text.contains("stop_first_intrabar"), "{text}");
 }
 
 /// The determinism gate: same config, same data, bit-identical hash.
