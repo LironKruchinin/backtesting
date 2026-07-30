@@ -54,7 +54,12 @@ combo config can express **only** this:
   fields `.mid`, `.upper`, `.lower`). That is the complete list
   (`crucible-strategies::combo::spec`).
 - **Operands:** a numeric constant, a price field (`open`, `high`, `low`,
-  `close`) of the completed bar, or an indicator slot.
+  `close`) of the completed bar, an indicator slot, or a **session clock
+  reading** — `minutes_since_open`, `minutes_to_close`,
+  `minutes_since_rth_open`, `minutes_to_rth_close`, `is_rth`, `is_overnight`,
+  `is_post_rth` (D-0078). Every reading is taken at the bar's `avail_ts`;
+  `minutes_to_close` honours an early close, `minutes_to_rth_close` counts
+  toward the scheduled one.
 - **Comparisons:** `<`, `<=`, `>`, `>=`, `crosses_above`, `crosses_below`,
   combined with `and` / `or` / `not` / parentheses.
 - **Rules:** `enter_long`, `exit_long`, `enter_short`, `exit_short`. All four
@@ -71,7 +76,7 @@ most common reason a paper's signal is grade B rather than A:
 
 | Not expressible | Consequence |
 |---|---|
-| **Time of day / session position** | Every "first half-hour", "last hour", "opening range", "RTH vs Globex" idea is grade B. There is no clock operand in the grammar. |
+| ~~Time of day / session position~~ | **Expressible since 2026-07-30** (D-0078). `minutes_since_rth_open > 0 and minutes_since_rth_open <= 30` is the first half-hour of RTH; `minutes_to_close <= 30` is the last half-hour of the session, early closes included. Needs a bundled calendar, so a synthetic feed is refused. An *opening range* still is not: it needs a rolling high/low over a window, not a clock. |
 | **Volume** | `Bar` carries `volume: u64`, but the rule grammar has no `volume` operand. Volume ideas are grade B — the data is there, the grammar is not. |
 | **Arithmetic between operands** | Only *comparisons*. You cannot write `(bb.upper - bb.lower) > x`, so no width, ratio, spread, or normalized-deviation term. |
 | **Calendar predicates** | Day-of-week, day-of-month, turn-of-month, holiday proximity. Grade B (the calendar exists in `crucible-data`; the grammar cannot reach it). |
@@ -249,6 +254,7 @@ retired and the decision that did it.
 | unlock | retired | decision |
 |---|---|---|
 | bar resampler | §2.2's first structural blocker; `5m`/`15m`/`1h`/`1d` are replayable | D-0077 |
+| time-of-day / session predicates | §2.1's "Time of day / session position" row | D-0078 |
 
 Grade tally: **2 A · 8 B · 5 C**. That distribution is the honest one, and the
 shape of it is the sweep's main structural finding: the combo grammar is three

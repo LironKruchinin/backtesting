@@ -574,6 +574,21 @@ reference; supersede the decision if you disagree — don't hotfix.
   2.0000000000000004, so the *number of points* on the axis — and with it the
   combo count, every combo index, and every trial charged to the hypothesis
   family — would depend on floating-point accumulation. Write the values out.
+- **A combo config whose rules read the session clock is REFUSED against a
+  synthetic feed**, rather than run with those rules silent (D-0078). A
+  `minutes_since_open < 30` with no calendar behind it has no opinion on any
+  bar — which is a backtest of a different strategy from the one the config
+  describes, and looks exactly like a strategy that never found a signal.
+- **`minutes_to_close` shortens on an early close and `minutes_to_rth_close`
+  does not** (D-0078). The first asks "is the exchange still open", the second
+  "how far into the scheduled trading day are we", and on CME's 12:00 CT
+  Independence Day they disagree by four hours. Collapsing them makes one of the
+  two questions unaskable.
+- **The last regular-hours bar of a day reads `is_rth`, though its interval ends
+  exactly at the closing bell** (D-0078). Open intervals are half-open, so the
+  session is asked one nanosecond before `avail_ts`; asking at `avail_ts` would
+  report every day's final bar as closed and "flatten on the last bar" would
+  never fire.
 - **Rule evaluation never short-circuits, and all four rules are evaluated
   every bar** even when the position makes the answer irrelevant. A
   `crosses_*` node that misses a bar compares against a reading from two bars

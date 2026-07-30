@@ -77,6 +77,133 @@ impl PriceField {
     }
 }
 
+/// Which named session a bar's interval closed inside.
+///
+/// A mirror of `crucible_data::calendar::SessionId`, and a mirror on purpose:
+/// §3 keeps `crucible-strategies` on `crucible-core` alone, forever, so the
+/// crate that knows what a timezone is cannot be named here. `crucible-cli`
+/// maps one onto the other in the six lines that are the only place the two
+/// meet — the same device D-0062 used for trading-day keys and D-0060 for the
+/// config hash: the way to keep a capability out of a crate is to make the call
+/// not exist there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionPhase {
+    /// Between the session open and the regular open.
+    Overnight,
+    /// The exchange's regular trading hours.
+    Regular,
+    /// Between the regular close and the session close.
+    PostRegular,
+    /// Not trading: weekend, maintenance break, holiday, or after an early
+    /// close.
+    Closed,
+}
+
+/// Where one bar sits inside its trading session, precomputed.
+///
+/// One of these per bar, in bar order, computed **once** by the CLI from
+/// `crucible-data::calendar` and handed to every combo in the grid as a shared
+/// slice (D-0078). Two combos scoring the same bar therefore cannot disagree
+/// about what time it was, and the engine gains no dependency edge: what
+/// arrives here is five plain numbers.
+///
+/// Minutes rather than nanoseconds because this is indicator space, where §2.3
+/// puts `f64`, and because a rule is written by a person: `minutes_since_open <
+/// 30` is the thing the research says.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SessionPosition {
+    /// Minutes from the trading day's session open to this bar's `avail_ts`.
+    pub minutes_since_open: f64,
+    /// Minutes from this bar's `avail_ts` to the session close, **honouring an
+    /// early close**. Negative after it.
+    pub minutes_to_close: f64,
+    /// Minutes from the scheduled regular-hours open. Negative before it, which
+    /// is what makes `minutes_since_rth_open > 0 and minutes_since_rth_open <=
+    /// 30` mean "the first half hour of the regular session".
+    pub minutes_since_rth_open: f64,
+    /// Minutes to the scheduled regular-hours close. Negative after it.
+    pub minutes_to_rth_close: f64,
+    /// Which session this bar's interval closed inside.
+    pub phase: SessionPhase,
+}
+
+/// A session-relative reading a rule can compare against.
+///
+/// These are **clock readings at the decision instant**, not facts about the
+/// bar's contents: every one is measured from or to `avail_ts` (§2.1), because
+/// a rule fires when a bar completes and the order it emits fills on the next
+/// one. The `is_*` family is the one exception in shape only — a bar's session
+/// is a containment question, asked at the last instant of its own interval, so
+/// that the final regular-hours bar of a day reads `is_rth` rather than
+/// `is_rth`-just-turned-false.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionField {
+    /// `minutes_since_open`
+    MinutesSinceOpen,
+    /// `minutes_to_close`
+    MinutesToClose,
+    /// `minutes_since_rth_open`
+    MinutesSinceRthOpen,
+    /// `minutes_to_rth_close`
+    MinutesToRthClose,
+    /// `is_rth` — 1 inside regular hours, 0 elsewhere.
+    IsRth,
+    /// `is_overnight` — 1 between the session open and the regular open.
+    IsOvernight,
+    /// `is_post_rth` — 1 between the regular close and the session close.
+    IsPostRth,
+}
+
+impl SessionField {
+    /// The config spelling, which is also the canonical-form spelling.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            SessionField::MinutesSinceOpen => "minutes_since_open",
+            SessionField::MinutesToClose => "minutes_to_close",
+            SessionField::MinutesSinceRthOpen => "minutes_since_rth_open",
+            SessionField::MinutesToRthClose => "minutes_to_rth_close",
+            SessionField::IsRth => "is_rth",
+            SessionField::IsOvernight => "is_overnight",
+            SessionField::IsPostRth => "is_post_rth",
+        }
+    }
+
+    /// Every spelling the grammar accepts, in canonical order.
+    #[must_use]
+    pub const fn all() -> &'static [SessionField] {
+        &[
+            SessionField::MinutesSinceOpen,
+            SessionField::MinutesToClose,
+            SessionField::MinutesSinceRthOpen,
+            SessionField::MinutesToRthClose,
+            SessionField::IsRth,
+            SessionField::IsOvernight,
+            SessionField::IsPostRth,
+        ]
+    }
+
+    fn of(self, at: SessionPosition) -> f64 {
+        let flag = |yes: bool| if yes { 1.0 } else { 0.0 };
+        match self {
+            SessionField::MinutesSinceOpen => at.minutes_since_open,
+            SessionField::MinutesToClose => at.minutes_to_close,
+            SessionField::MinutesSinceRthOpen => at.minutes_since_rth_open,
+            SessionField::MinutesToRthClose => at.minutes_to_rth_close,
+            SessionField::IsRth => flag(at.phase == SessionPhase::Regular),
+            SessionField::IsOvernight => flag(at.phase == SessionPhase::Overnight),
+            SessionField::IsPostRth => flag(at.phase == SessionPhase::PostRegular),
+        }
+    }
+}
+
+fn session_field(name: &str) -> Option<SessionField> {
+    SessionField::all()
+        .iter()
+        .copied()
+        .find(|field| field.name() == name)
+}
+
 /// Which output of an indicator slot a rule means.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SlotField {
@@ -138,6 +265,8 @@ pub enum Operand {
         /// Which output.
         field: SlotField,
     },
+    /// A session-relative clock reading (D-0078).
+    Session(SessionField),
 }
 
 impl Operand {
@@ -148,6 +277,10 @@ impl Operand {
             Operand::Slot { slot, field } => {
                 ctx.slots.get(*slot).copied().flatten()?.field(*field)?
             }
+            // No session data for this bar is `None` — no opinion — for the
+            // same reason an unwarm slot is: a rule silently reading `false`
+            // would take a position on the absence of a clock.
+            Operand::Session(field) => field.of(ctx.session?),
         };
         v.is_finite().then_some(v)
     }
@@ -227,6 +360,11 @@ pub struct EvalCtx<'a> {
     pub bar: &'a Bar,
     /// One entry per slot, in sorted-slot order; `None` until warm.
     pub slots: &'a [Option<SlotOut>],
+    /// Where this bar sits in its trading session, or `None` when nobody
+    /// supplied a session series — a synthetic feed has no exchange, so it has
+    /// no clock (D-0078). Rules using a session operand are then silent rather
+    /// than false.
+    pub session: Option<SessionPosition>,
 }
 
 impl Expr {
@@ -321,6 +459,18 @@ impl Expr {
         }
     }
 
+    /// Whether any operand under this expression is a session clock reading.
+    fn uses_session(&self) -> bool {
+        let operand = |o: &Operand| matches!(o, Operand::Session(_));
+        match self {
+            Expr::Compare { lhs, rhs, .. } | Expr::Cross { lhs, rhs, .. } => {
+                operand(lhs) || operand(rhs)
+            }
+            Expr::And(l, r) | Expr::Or(l, r) => l.uses_session() || r.uses_session(),
+            Expr::Not(e) => e.uses_session(),
+        }
+    }
+
     /// Crossover nodes under this expression. Used by the test that proves
     /// `RuleSet::cross_states` counts what it says it counts.
     #[cfg(test)]
@@ -355,6 +505,7 @@ fn render_operand(operand: &Operand, slots: &[SlotDecl], out: &mut String) {
             out.push_str(name);
             out.push_str(field.suffix());
         }
+        Operand::Session(field) => out.push_str(field.name()),
     }
 }
 
@@ -470,6 +621,24 @@ impl RuleSet {
         self.cross_states > 0
     }
 
+    /// True if any rule reads the session clock (D-0078).
+    ///
+    /// The CLI asks before it replays: a config wanting a clock against a feed
+    /// that has no exchange is refused up front, rather than run with every
+    /// such rule silently having no opinion.
+    #[must_use]
+    pub fn uses_session(&self) -> bool {
+        [
+            &self.enter_long,
+            &self.exit_long,
+            &self.enter_short,
+            &self.exit_short,
+        ]
+        .iter()
+        .filter_map(|r| r.as_ref())
+        .any(Expr::uses_session)
+    }
+
     /// Renders the rules in canonical form, one line each, omitted rules
     /// omitted (D-0012).
     pub(crate) fn render(&self, slots: &[SlotDecl], out: &mut String) {
@@ -557,6 +726,15 @@ pub(crate) const RESERVED: &[&str] = &[
     "not",
     "crosses_above",
     "crosses_below",
+    // The session operands (D-0078). A slot named after one would shadow it
+    // and the rule would silently mean something else.
+    "minutes_since_open",
+    "minutes_to_close",
+    "minutes_since_rth_open",
+    "minutes_to_rth_close",
+    "is_rth",
+    "is_overnight",
+    "is_post_rth",
 ];
 
 fn tokenize(text: &str) -> Result<Vec<(Tok, usize)>, RuleError> {
@@ -819,6 +997,15 @@ impl Parser<'_> {
                 }),
             };
         }
+        if let Some(session) = session_field(name) {
+            return match field {
+                None => Ok(Operand::Session(session)),
+                Some(f) => Err(RuleError {
+                    position: pos,
+                    message: format!("{name} is a session clock reading, and has no field {f:?}"),
+                }),
+            };
+        }
         if RESERVED.contains(&name) {
             return Err(RuleError {
                 position: pos,
@@ -1046,6 +1233,7 @@ mod tests {
             let ctx = EvalCtx {
                 bar: &b,
                 slots: &[],
+                session: None,
             };
             fired.push(expr.eval(&ctx, &mut state));
             let _ = i;
@@ -1069,6 +1257,7 @@ mod tests {
                     &EvalCtx {
                         bar: &b,
                         slots: &[],
+                        session: None,
                     },
                     &mut state,
                 )
@@ -1095,6 +1284,7 @@ mod tests {
                 &EvalCtx {
                     bar: &b,
                     slots: &[],
+                    session: None,
                 },
                 &mut state,
             );
@@ -1112,7 +1302,8 @@ mod tests {
             expr.eval(
                 &EvalCtx {
                     bar: &b,
-                    slots: &[None, None]
+                    slots: &[None, None],
+                    session: None,
                 },
                 &mut state
             ),
@@ -1130,7 +1321,8 @@ mod tests {
             expr.eval(
                 &EvalCtx {
                     bar: &b,
-                    slots: &warm
+                    slots: &warm,
+                    session: None,
                 },
                 &mut state
             ),
@@ -1165,3 +1357,6 @@ mod tests {
         assert_eq!(canonical_f64(0.1 + 0.2), "0.30000000000000004");
     }
 }
+
+#[cfg(test)]
+mod session_tests;

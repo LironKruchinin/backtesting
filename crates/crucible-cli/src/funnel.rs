@@ -47,7 +47,7 @@ use crucible_funnel::stages::Verdict;
 use crucible_funnel::walkforward::{FoldPlan, RunIdentity};
 use crucible_funnel::{ComboOutcome, Costs, FunnelInputs, FunnelReport, run_funnel};
 
-use crate::combo::{annualization, collect_events, print_header, usd};
+use crate::combo::{annualization, attach_sessions, collect_events, print_header, usd};
 use crate::config::{self, Consumer, LoadedConfig};
 use crate::pull::EXIT_USAGE;
 use crate::walkforward::trading_days;
@@ -77,7 +77,7 @@ pub struct FunnelArgs {
               each called once"
 )]
 pub fn run_cmd(args: &FunnelArgs) -> i32 {
-    let loaded = match config::load(&args.config) {
+    let mut loaded = match config::load(&args.config) {
         Ok(loaded) => loaded,
         Err(e) => {
             eprintln!("error: {e}");
@@ -152,6 +152,10 @@ pub fn run_cmd(args: &FunnelArgs) -> i32 {
     };
     if series.events.is_empty() {
         eprintln!("error: the data source produced no bars; there is nothing to replay");
+        return EXIT_USAGE;
+    }
+    if let Err(message) = attach_sessions(&mut loaded, &series.events) {
+        eprintln!("error: {message}");
         return EXIT_USAGE;
     }
     let days = match trading_days(&loaded, &series.events) {

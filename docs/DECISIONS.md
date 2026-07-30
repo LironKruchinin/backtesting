@@ -1998,3 +1998,76 @@ propose a superseding entry — don't silently diverge.
   and falls back to 1-minute, because `curated/bars/ESH2024/5m` never exists and
   resolving `ESH4` at `5m` would refuse a contract that is right there; D-0072's
   ambiguity refusal is untouched at whichever grain answers.
+- **D-0078** (2026-07-30) — **The rule grammar gains a session clock, and the
+  clock is computed ONCE by the CLI and handed down as a slice.** Seven operands
+  join the grammar — `minutes_since_open`, `minutes_to_close`,
+  `minutes_since_rth_open`, `minutes_to_rth_close`, `is_rth`, `is_overnight`,
+  `is_post_rth` — so that "the first half hour", "the last hour" and "RTH only",
+  which is how essentially every published intraday result is stated, are
+  expressible in TOML.
+  **The device is D-0071's, applied to a second kind of key.**
+  `crucible-data::calendar` gains `Calendar::session_clock(avail_ts) ->
+  SessionClock`, five exact integers; `crucible-cli::combo::attach_sessions`
+  computes one per bar in bar order and calls `Grid::attach_sessions`; every
+  combo the grid builds reads the same slice by bar index. `crucible-strategies`
+  and `crucible-engine` still depend on `crucible-core` and nothing else, and
+  what crosses the boundary is five plain numbers plus a four-variant enum. Two
+  combos scoring one bar therefore cannot disagree about what time it was —
+  the same failure D-0071 names, where two attributions of "which day" land a
+  breach on two different dates.
+  **On the grid, not on the call.** The series is attached to the `Grid` rather
+  than passed to `Grid::strategy`, because a per-call argument is a per-call
+  opportunity to pass a different one. `ComboStrategy` indexes it with a bar
+  counter, not with a timestamp: deriving "which bar is this" inside the
+  strategy would be a second attribution of a fact the caller already computed.
+  **Every reading is measured from or to `avail_ts`** (§2.1), because a rule
+  fires when a bar completes and the order it emits fills on the next one. The
+  **session** is asked one nanosecond earlier — at the last instant the bar's
+  interval covers — because open intervals are half-open and a bar ending
+  exactly at 16:00 CT traded entirely inside the session it just closed. Asking
+  at `avail_ts` reports the final regular-hours bar of every day as `Closed`,
+  and "flatten on the last bar" becomes a rule that never fires. The two
+  instants can only name different sessions for a bar whose own interval
+  straddles the session open, which no interval-aligned bar has and which
+  `resample` refuses outright (D-0077).
+  **Signs are meaningful and not clamped.** `minutes_since_rth_open` is
+  negative through the overnight session, which is exactly what makes
+  `minutes_since_rth_open > 0 and minutes_since_rth_open <= 30` mean "the first
+  half hour of the regular session" and not "the first half hour of anything".
+  **`minutes_to_close` honours an early close and `minutes_to_rth_close` does
+  not**, deliberately. The first is "is the exchange still open"; the second is
+  "how far into the scheduled trading day are we". On CME's 12:00 CT
+  Independence Day the session is 1140 minutes rather than 1380, so a
+  `minutes_to_close <= 30` exit fires 240 minutes earlier than on an ordinary
+  day — while `minutes_to_rth_close` still counts toward 15:00 CT and goes
+  negative after the market has shut. Collapsing them would make one of the two
+  questions unaskable, and a rule written against a fixed 16:00 close would try
+  to flatten four hours after the market shut, on exactly the days when being
+  positioned into an illiquid close costs most.
+  **No clock is `None`, never `false`** — the rule the grammar already applies
+  to an unwarm slot, for the same reason: `not minutes_since_open < 30` would
+  otherwise read as *true* on every bar of a feed that has no exchange, which is
+  a position taken on the absence of a calendar. `crucible combo` /
+  `walk-forward` / `funnel` **refuse** such a config before replaying it,
+  naming the seven operands, because a rule silent on every bar produces a
+  backtest of a different strategy from the one the config describes and looks
+  exactly like a strategy that never found a signal. `ComboStrategy::
+  session_gaps` counts any bar that reaches the evaluator without a reading and
+  `combo` prints it as a bug rather than a caveat — it is supposed to be
+  unreachable.
+  **All seven names are reserved**, so a slot cannot shadow one, and each
+  renders in the canonical form as itself, so a config hash covers which clock
+  a rule read (D-0012).
+  **Each control was watched firing** (§7). Five mutations, five catches: the
+  session asked at `avail_ts` instead of one nanosecond earlier → the
+  last-bar-of-a-session test; the close computed from the template instead of
+  `session_close` → both early-close tests; a missing session reading 0 instead
+  of no-opinion → the silence test; `is_rth` widened to mean "open" → the
+  one-hot test; the series read one bar ahead → the bar-index test and the
+  grid-wide one. Each of the behavioural tests carries the third case §7 asks
+  for: the early-close assertions sit beside the identical wall-clock bar on an
+  ordinary day, so what moved the rule is provably the holiday and not the
+  clock.
+  **Not in scope:** calendar predicates (day-of-week, day-of-month,
+  turn-of-month). They need a different key — a position in a *month* of
+  trading days rather than in a session — and belong with their own entry.

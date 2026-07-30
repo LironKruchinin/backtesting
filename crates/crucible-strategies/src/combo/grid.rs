@@ -11,7 +11,7 @@
 
 use std::fmt;
 
-use super::build::ComboStrategy;
+use super::build::{ComboStrategy, SessionSeries};
 use super::error::ComboError;
 use super::spec::{ComboSpec, IndicatorParams};
 
@@ -128,6 +128,9 @@ pub struct Grid {
     axis_lens: Vec<usize>,
     len: usize,
     max_warmup_bars: usize,
+    /// One session-clock reading per bar of the series this grid will be
+    /// replayed on, or `None` when nothing supplied one (D-0078).
+    sessions: Option<SessionSeries>,
 }
 
 impl Grid {
@@ -158,6 +161,7 @@ impl Grid {
             axis_lens,
             len,
             max_warmup_bars,
+            sessions: None,
         })
     }
 
@@ -237,7 +241,31 @@ impl Grid {
     /// Panics if `index >= len()`, as [`Grid::combo`] does.
     #[must_use]
     pub fn strategy(&self, index: usize) -> ComboStrategy {
-        ComboStrategy::build(&self.spec, &self.combo(index))
+        let strategy = ComboStrategy::build(&self.spec, &self.combo(index));
+        match &self.sessions {
+            Some(sessions) => strategy.with_sessions(sessions.clone()),
+            None => strategy,
+        }
+    }
+
+    /// Attaches the session series every combo in this grid will read (D-0078).
+    ///
+    /// Set once, after the bar series exists and before anything is replayed,
+    /// so every combo scoring a given bar reads the same clock. That is the
+    /// point of putting it on the *grid* rather than passing it per strategy:
+    /// a per-call argument is a per-call opportunity to pass a different one.
+    ///
+    /// A grid with no session series builds strategies that have no clock, and
+    /// a rule reading one is then silent — which the CLI refuses before it gets
+    /// here, and which [`ComboStrategy::session_gaps`] counts if it happens.
+    pub fn attach_sessions(&mut self, sessions: SessionSeries) {
+        self.sessions = Some(sessions);
+    }
+
+    /// Whether a session series has been attached.
+    #[must_use]
+    pub fn has_sessions(&self) -> bool {
+        self.sessions.is_some()
     }
 
     /// Builds the strategy for one combo, aligned to the grid's warmup so it

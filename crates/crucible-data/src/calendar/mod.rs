@@ -131,6 +131,41 @@ impl core::fmt::Display for SessionId {
     }
 }
 
+/// Where a completed bar sits inside its trading session.
+///
+/// The four distances are the raw material of every "first half-hour", "last
+/// hour", "RTH only" and "overnight only" filter, and they exist here — in the
+/// one module that knows what a timezone is — so that no strategy ever computes
+/// them from a hardcoded UTC offset. That is how timezone bugs get into
+/// research: the arithmetic looks right for six months of the year.
+///
+/// Nanoseconds rather than minutes, and integers rather than `f64`, because a
+/// difference of two timestamps is exact and §2.3 puts the conversion into
+/// indicator space at the boundary the consumer chooses. `crucible-cli` divides
+/// by 60e9 on its way into the rule grammar, which is where `f64` belongs.
+///
+/// Signs are meaningful and not clamped. `since_rth_open_ns` is **negative**
+/// through the overnight session, which is exactly what makes
+/// `minutes_since_rth_open > 0 and minutes_since_rth_open <= 30` say "the first
+/// half hour of the regular session" and nothing else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SessionClock {
+    /// From the trading day's session open to the bar's availability.
+    pub since_open_ns: i64,
+    /// From the bar's availability to the trading day's session close,
+    /// **honouring an early close** — the number is smaller on a holiday eve,
+    /// which is the point of asking a calendar instead of a clock.
+    pub to_close_ns: i64,
+    /// From the scheduled regular-hours open to the bar's availability.
+    /// Negative before it.
+    pub since_rth_open_ns: i64,
+    /// From the bar's availability to the scheduled regular-hours close.
+    /// Negative after it.
+    pub to_rth_close_ns: i64,
+    /// Which named session the bar's **interval** closed inside.
+    pub session: SessionId,
+}
+
 /// A resolved recurring holiday rule.
 #[derive(Debug, Clone)]
 struct Holiday {
@@ -581,6 +616,40 @@ impl Calendar {
             self.instant(date, self.rth_open_local),
             self.instant(date, self.rth_close_local),
         )
+    }
+
+    /// Where a bar that became available at `avail_ts` sits in its session.
+    ///
+    /// Total, like everything else here. Two instants are involved and the
+    /// difference is deliberate:
+    ///
+    /// - the **distances** are measured from `avail_ts`, the instant the bar's
+    ///   information exists and a decision on it is taken (§2.1);
+    /// - the **session** is asked at `avail_ts − 1ns`, the last instant the
+    ///   bar's interval covers, because open intervals are half-open and a bar
+    ///   ending exactly at 16:00 CT traded entirely inside the session it just
+    ///   closed. Asking at `avail_ts` would report the final regular-hours bar
+    ///   of every day as [`SessionId::Closed`], and "exit on the last bar of
+    ///   RTH" would be a rule that never fires.
+    ///
+    /// The **trading day** is `trading_day(avail_ts)` — D-0062's expression,
+    /// spelled the way D-0071 requires so that this clock and a fold boundary
+    /// can never attribute one bar to two different dates. The two instants can
+    /// only name different sessions for a bar whose own interval straddles the
+    /// session open, which no interval-aligned bar has and which
+    /// [`resample`](crate::curated::resample) refuses outright.
+    #[must_use]
+    pub fn session_clock(&self, avail_ts: Ts) -> SessionClock {
+        let last_instant = Ts(avail_ts.0 - 1);
+        let day = self.trading_day(avail_ts);
+        let (rth_open, rth_close) = self.regular_hours(day);
+        SessionClock {
+            since_open_ns: avail_ts.0 - self.session_open(day).0,
+            to_close_ns: self.session_close(day).0 - avail_ts.0,
+            since_rth_open_ns: avail_ts.0 - rth_open.0,
+            to_rth_close_ns: rth_close.0 - avail_ts.0,
+            session: self.session_of(last_instant),
+        }
     }
 
     /// True when this calendar declares an intraday halt.

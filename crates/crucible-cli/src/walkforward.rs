@@ -29,7 +29,9 @@ use crucible_data::ingest::window::{CivilDate, civil_from_days, date_of, days_fr
 use crucible_engine::{BacktestParams, FreeFills, Summary};
 use crucible_funnel::walkforward::{FoldPlan, FoldSpec, RunIdentity, WalkForwardReport, run_grid};
 
-use crate::combo::{annualization, collect_events, print_header, print_path_sensitivity};
+use crate::combo::{
+    annualization, attach_sessions, collect_events, print_header, print_path_sensitivity,
+};
 use crate::config::{self, LoadedConfig};
 use crate::pull::EXIT_USAGE;
 
@@ -54,7 +56,7 @@ pub struct WalkForwardArgs {
 
 /// Runs the command, returning the process exit code.
 pub fn run_cmd(args: &WalkForwardArgs) -> i32 {
-    let loaded = match config::load(&args.config) {
+    let mut loaded = match config::load(&args.config) {
         Ok(loaded) => loaded,
         Err(e) => {
             eprintln!("error: {e}");
@@ -93,6 +95,10 @@ pub fn run_cmd(args: &WalkForwardArgs) -> i32 {
     let events = series.events;
     if events.is_empty() {
         eprintln!("error: the data source produced no bars; there is nothing to replay");
+        return EXIT_USAGE;
+    }
+    if let Err(message) = attach_sessions(&mut loaded, &events) {
+        eprintln!("error: {message}");
         return EXIT_USAGE;
     }
 
