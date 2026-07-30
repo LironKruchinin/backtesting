@@ -192,6 +192,14 @@ Pinned conventions:
   exists only in `crucible-data::calendar`.
 - **Config field names**: `snake_case`, units suffixed like code
   (`fee_per_contract_usd`, `train_days`).
+- **A number derived by convention rather than sourced carries its basis
+  beside it**, in its own field, never folded into the value. `initial_*_usd`
+  in `configs/accounts/personal_*.toml` is 1.1 × maintenance — the CME
+  speculator convention — and each row says so in `initial_basis`. The field
+  exists so the convention cannot hide inside the number: a reader can tell a
+  measurement from an assumption without knowing the domain, and a result that
+  turns on the assumption can say so. Sourced numbers carry a citation and an
+  access date instead; every number carries one or the other.
 - **Fold windows are measured in trading days**, never months or bars
   (`train_days`, `test_days`, `step_days` — D-0062). A month holds a number of
   sessions the exchange's holiday schedule picks; a bar count ends
@@ -287,6 +295,16 @@ crate lands, delete its placeholder comment from the relevant `Cargo.toml`.
 - **Negative controls:** when building detection machinery (leak detectors,
   permutation harnesses), also build the test that plants a known bug/leak
   and asserts detection fires. A detector nobody has seen fire is decoration.
+  This has **no quality exemption**: work that looks right and passes its
+  gate is still unverified until each control has been broken deliberately
+  and watched firing, and the record says which mutation each one caught.
+- **When two things disagree, add the third case that makes them agree** —
+  it turns a difference into a diagnosis. A test proving captured and
+  reconstructed equity differ says only "something differs"; the companion
+  test showing they agree *once the reconstruction adopts the engine's
+  intrabar convention* proves the divergence **is** that convention and
+  nothing else. Two-sided controls locate a discrepancy; the third side
+  names its cause.
 
 ---
 
