@@ -183,3 +183,32 @@ config**, not two configs, and that is a change to how the work is shaped rather
 than to how expensive it is. Recorded here so whoever takes the ticket does not
 spend an afternoon trying to write the full-sample arm in TOML and conclude the
 parser is broken.
+
+### 2026-07-31 — ruling on the full-sample arm: a quarantined Rust comparator
+
+Recorded because the re-grade above found the shape of this file's work had
+changed, and the ruling settles what to build rather than leaving it implied.
+
+**The full-sample arm will be a compiled Rust comparator, not a config.** D-0080
+admits no full-sample normalizer and states that no config can name one, so the
+deliberate-lookahead half of this pairing cannot be written in TOML at all. It
+therefore lives beside `crucible-strategies::controls::LeakyZScore`, under the
+same four conditions:
+
+1. **Quarantined** — in `controls`, never reachable from the combo grammar, so
+   no config can accidentally summon it.
+2. **Leak-by-construction** — it fits on the whole series on purpose. That is
+   its job, not a defect to be fixed, and its doc comment says so in those words
+   (the `LeakyZScore` precedent, CLAUDE.md §9).
+3. **Ineligible past its role** — it exists to be the *denominator* of this
+   file's comparison and may never be reported as a strategy result, never
+   graduate, and never appear in a scorecard except as the labelled full-sample
+   arm.
+4. **Built only when H-010 runs** — not speculatively. The gap between the two
+   arms is this file's deliverable, and a comparator with nothing to compare
+   against is just a leak checked into the repository.
+
+The measurement this produces — how large a Sharpe improvement the published
+full-sample method shows over a strictly point-in-time one, on futures, on our
+own data — is worth more to the M4 write-up than a positive result on H-009,
+which is why the pairing is registered as mandatory rather than optional.
