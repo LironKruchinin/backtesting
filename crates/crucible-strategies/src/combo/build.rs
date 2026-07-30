@@ -6,13 +6,22 @@
 //! cloned rather than shared behind an `Arc` because it is a handful of nodes
 //! and an atomic refcount on the hot path buys nothing at this size.
 
+use std::sync::Arc;
+
 use crucible_core::prelude::*;
 
-use crate::indicators::{Bollinger, Ema, Sma};
+use crate::indicators::{Bollinger, Ema, RollingStdev, RollingZScore, Sma};
 
 use super::grid::Combo;
-use super::rules::{EvalCtx, Expr, RuleSet, SlotOut};
+use super::rules::{EvalCtx, Expr, RuleSet, SessionPosition, SlotOut};
 use super::spec::{ComboSpec, IndicatorParams};
+
+/// One session-clock reading per bar of the series a grid is replayed on.
+///
+/// `Arc` because a grid holds thousands of strategies against one data pass and
+/// the series is one entry per bar of a sixteen-year sample: cloning it per
+/// combo would cost gigabytes, and cloning an `Arc` costs a refcount.
+pub type SessionSeries = Arc<[SessionPosition]>;
 
 /// The indicator behind one slot.
 #[derive(Debug, Clone)]
@@ -20,6 +29,8 @@ enum SlotState {
     Sma(Sma),
     Ema(Ema),
     Bollinger(Bollinger),
+    ZScore(RollingZScore),
+    Stdev(RollingStdev),
 }
 
 impl SlotState {
@@ -30,6 +41,12 @@ impl SlotState {
             IndicatorParams::Bollinger { period, k } => {
                 SlotState::Bollinger(Bollinger::new(period, k))
             }
+            IndicatorParams::ZScore { period, source } => {
+                SlotState::ZScore(RollingZScore::new(period, source))
+            }
+            IndicatorParams::Stdev { period, source } => {
+                SlotState::Stdev(RollingStdev::new(period, source))
+            }
         }
     }
 
@@ -38,6 +55,8 @@ impl SlotState {
             SlotState::Sma(i) => i.update(bar).map(SlotOut::Scalar),
             SlotState::Ema(i) => i.update(bar).map(SlotOut::Scalar),
             SlotState::Bollinger(i) => i.update(bar).map(SlotOut::Bands),
+            SlotState::ZScore(i) => i.update(bar).map(SlotOut::Scalar),
+            SlotState::Stdev(i) => i.update(bar).map(SlotOut::Scalar),
         }
     }
 }
@@ -52,6 +71,18 @@ pub struct ComboStrategy {
     qty: Qty,
     warmup_bars: usize,
     conflicting_signals: usize,
+    sessions: Option<SessionSeries>,
+    /// How many bars this strategy has been shown, which is how it indexes
+    /// [`ComboStrategy::sessions`].
+    ///
+    /// A counter rather than a timestamp lookup, and that is the D-0071 device
+    /// again: the caller computed one reading per bar in bar order, and the
+    /// engine hands every bar to every strategy exactly once, in that order.
+    /// Deriving "which bar is this" from the timestamp inside the strategy
+    /// would be a second attribution of the same fact, which is precisely how
+    /// two reports come to disagree.
+    bars_seen: usize,
+    session_gaps: usize,
 }
 
 impl ComboStrategy {
@@ -88,7 +119,35 @@ impl ComboStrategy {
             qty: spec.qty(),
             warmup_bars,
             conflicting_signals: 0,
+            sessions: None,
+            bars_seen: 0,
+            session_gaps: 0,
         }
+    }
+
+    /// Attaches the session series a session-relative rule reads (D-0078).
+    ///
+    /// One reading per bar, in bar order, computed once by the caller from
+    /// `crucible-data::calendar`. Without it a rule naming
+    /// `minutes_since_open` and friends has no opinion on any bar — which the
+    /// CLI refuses up front rather than discovering at replay, and which
+    /// [`ComboStrategy::session_gaps`] counts if it ever happens anyway.
+    #[must_use]
+    pub fn with_sessions(mut self, sessions: SessionSeries) -> ComboStrategy {
+        self.sessions = Some(sessions);
+        self
+    }
+
+    /// Bars on which a session-relative rule was evaluated with no reading
+    /// available — because none was attached, or because the series was shorter
+    /// than the replay.
+    ///
+    /// Expected to be zero. Nonzero means some rule was silent on that many
+    /// bars, which is a different backtest from the one the config describes,
+    /// so it is counted and printed rather than absorbed.
+    #[must_use]
+    pub const fn session_gaps(&self) -> usize {
+        self.session_gaps
     }
 
     /// Bars on which `enter_long` and `enter_short` were both true and the
@@ -121,6 +180,9 @@ impl Strategy for ComboStrategy {
             cross_state,
             qty,
             conflicting_signals,
+            sessions,
+            bars_seen,
+            session_gaps,
             ..
         } = self;
 
@@ -128,7 +190,17 @@ impl Strategy for ComboStrategy {
             *out = state.update(bar);
         }
 
-        let ctx = EvalCtx { bar, slots: values };
+        let session = sessions.as_ref().and_then(|s| s.get(*bars_seen).copied());
+        *bars_seen += 1;
+        if session.is_none() && rules.uses_session() {
+            *session_gaps += 1;
+        }
+
+        let ctx = EvalCtx {
+            bar,
+            slots: values,
+            session,
+        };
         // Every rule, every bar, unconditionally: a crossover node that misses
         // a bar compares against a stale reading and fires late. See
         // `rules`'s module docs.
@@ -393,5 +465,99 @@ mod tests {
         // Bar 2: mid = 2, close 3 — no. Bar 3: window [2,3,0.1], mid = 1.7,
         // close 0.1 < 1.7 — enter long.
         assert_eq!(fired, vec![(3, 1)]);
+    }
+
+    /// A session-relative rule reads the reading at **its own bar index**
+    /// (D-0078).
+    ///
+    /// The series below says the session opens at bar 0 and one minute passes
+    /// per bar, so `minutes_since_open <= 3` is true on bars 0, 1 and 2 and
+    /// false afterwards. `enter_long` therefore fires on bar 0 and the position
+    /// is closed on bar 3 — a one-bar shift in the indexing would move both.
+    #[test]
+    fn a_session_rule_reads_the_series_at_its_own_bar_index() {
+        let grid = build(
+            vec![sma("mid", 1)],
+            RuleSource {
+                enter_long: Some("minutes_since_open <= 3".to_owned()),
+                exit_long: Some("minutes_since_open > 3".to_owned()),
+                ..RuleSource::default()
+            },
+        );
+        let sessions: SessionSeries = (0..6)
+            .map(|i| SessionPosition {
+                minutes_since_open: f64::from(i),
+                minutes_to_close: 1380.0 - f64::from(i),
+                minutes_since_rth_open: f64::from(i) - 930.0,
+                minutes_to_rth_close: 1320.0 - f64::from(i),
+                phase: crate::combo::rules::SessionPhase::Overnight,
+            })
+            .collect();
+        let mut strategy = grid.strategy(0).with_sessions(sessions);
+        let fired = drive(&mut strategy, &[10.0; 6]);
+        assert_eq!(fired, vec![(0, 1), (4, 0)]);
+        assert_eq!(strategy.session_gaps(), 0);
+    }
+
+    /// Without a series the same rules are silent on every bar, and every one
+    /// of those bars is counted.
+    ///
+    /// The control that makes the test above mean something: the position is
+    /// never taken, so what produced it there was the clock and not the prices.
+    /// `crucible combo` refuses such a config before replaying it; this is what
+    /// happens if one reaches the strategy anyway.
+    #[test]
+    fn a_session_rule_with_no_series_is_silent_and_counted() {
+        let grid = build(
+            vec![sma("mid", 1)],
+            RuleSource {
+                enter_long: Some("minutes_since_open <= 3".to_owned()),
+                exit_long: Some("minutes_since_open > 3".to_owned()),
+                ..RuleSource::default()
+            },
+        );
+        let mut strategy = grid.strategy(0);
+        let fired = drive(&mut strategy, &[10.0; 6]);
+        assert!(fired.is_empty(), "no position may be taken with no clock");
+        assert_eq!(strategy.session_gaps(), 6);
+    }
+
+    /// A grid attaches its series to every combo it builds, so two combos
+    /// scoring one bar cannot disagree about what time it was.
+    #[test]
+    fn a_grid_hands_the_same_series_to_every_combo() {
+        let grid = {
+            let mut g = build(
+                vec![(
+                    "mid".to_owned(),
+                    IndicatorSpec::Sma {
+                        period: IntAxis::List(vec![1, 2]),
+                    },
+                )],
+                RuleSource {
+                    enter_long: Some("minutes_since_open <= 3".to_owned()),
+                    ..RuleSource::default()
+                },
+            );
+            g.attach_sessions(
+                (0..4)
+                    .map(|i| SessionPosition {
+                        minutes_since_open: f64::from(i),
+                        minutes_to_close: 1380.0,
+                        minutes_since_rth_open: -930.0,
+                        minutes_to_rth_close: 1320.0,
+                        phase: crate::combo::rules::SessionPhase::Overnight,
+                    })
+                    .collect::<SessionSeries>(),
+            );
+            g
+        };
+        assert!(grid.has_sessions());
+        assert_eq!(grid.len(), 2);
+        for index in 0..grid.len() {
+            let mut strategy = grid.strategy(index);
+            let _ = drive(&mut strategy, &[10.0; 4]);
+            assert_eq!(strategy.session_gaps(), 0, "combo {index}");
+        }
     }
 }

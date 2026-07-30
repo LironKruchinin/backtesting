@@ -369,3 +369,118 @@ fn a_missing_config_is_a_usage_error() {
     assert_eq!(code(&out), 2);
     assert!(stderr(&out).contains("cannot read"), "{}", stderr(&out));
 }
+
+// ------------------------------------------------------ rolling normalizer
+
+/// A rolling z-score is nameable from TOML, runs, and its **source** reaches
+/// the config hash (D-0080).
+///
+/// The hash comparison is the load-bearing half: two configs identical except
+/// for `source` are two different features, and a registry that gave them one
+/// identity would pool their trials and report one idea where there were two.
+#[test]
+fn a_rolling_zscore_slot_runs_and_its_source_is_part_of_its_identity() {
+    let dir = TempDir::new();
+    let with = |source: &str| {
+        TEMPLATE
+            .replace(
+                "[indicators.slow]\nkind = \"sma\"\nperiod = [20, 30]",
+                &format!(
+                    "[indicators.slow]\nkind = \"zscore\"\nperiod = 20\nsource = \"{source}\""
+                ),
+            )
+            .replace(
+                "enter_long = \"fast crosses_above slow\"",
+                "enter_long = \"slow < -1.5\"",
+            )
+            .replace(
+                "exit_long = \"fast crosses_below slow\"",
+                "exit_long = \"slow > 0\"",
+            )
+    };
+
+    let hash_of = |body: String, name: &str| {
+        let path = dir.path.join(name);
+        std::fs::write(&path, body).expect("write config");
+        let out = run(&["combo", "--config", &path.to_string_lossy(), "--run"]);
+        assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+        let text = stdout(&out);
+        let line = text
+            .lines()
+            .find(|l| l.contains("config hash"))
+            .expect("a config hash line")
+            .to_owned();
+        (line, text)
+    };
+
+    let (close_hash, close_text) = hash_of(with("close"), "close.toml");
+    let (volume_hash, _) = hash_of(with("volume"), "volume.toml");
+    let (return_hash, return_text) = hash_of(with("return"), "return.toml");
+
+    assert_ne!(close_hash, volume_hash);
+    assert_ne!(close_hash, return_hash);
+    assert_ne!(volume_hash, return_hash);
+
+    // The warmup a `return` source needs is declared, not absorbed: 20 bars of
+    // window plus the one bar its first difference costs.
+    assert!(close_text.contains("warmup 20 bars"), "{close_text}");
+    assert!(return_text.contains("warmup 21 bars"), "{return_text}");
+}
+
+/// A misspelled source is a hard error naming the slot and listing the three
+/// that exist, rather than a silent default to `close`.
+#[test]
+fn an_unknown_rolling_source_is_refused() {
+    let dir = TempDir::new();
+    let path = dir.config(&TEMPLATE.replace(
+        "[indicators.slow]\nkind = \"sma\"\nperiod = [20, 30]",
+        "[indicators.slow]\nkind = \"zscore\"\nperiod = 20\nsource = \"closs\"",
+    ));
+    let out = run(&["combo", "--config", &path.to_string_lossy()]);
+    assert_eq!(code(&out), 2, "stdout: {}", stdout(&out));
+    let text = stderr(&out);
+    assert!(text.contains("\"slow\""), "{text}");
+    assert!(text.contains("close, volume, return"), "{text}");
+}
+
+/// A rolling slot with no `source` at all is refused by `deny_unknown_fields`'s
+/// sibling — a missing required field — rather than defaulted.
+#[test]
+fn a_rolling_slot_without_a_source_is_refused() {
+    let dir = TempDir::new();
+    let path = dir.config(&TEMPLATE.replace(
+        "[indicators.slow]\nkind = \"sma\"\nperiod = [20, 30]",
+        "[indicators.slow]\nkind = \"zscore\"\nperiod = 20",
+    ));
+    let out = run(&["combo", "--config", &path.to_string_lossy()]);
+    assert_eq!(code(&out), 2, "stdout: {}", stdout(&out));
+    assert!(stderr(&out).contains("source"), "{}", stderr(&out));
+}
+
+/// The second shipped reference config — the one that exercises every operand
+/// the grammar has — expands.
+///
+/// Two `stretch` periods and nothing else varying, so 2 combos; warmup is the
+/// max across the grid, which is `stretch`'s 40 and not `rv`'s 21 (§2.6).
+#[test]
+fn the_grammar_surface_config_expands() {
+    let out = run(&[
+        "combo",
+        "--config",
+        &shipped("example-session-volume.toml").to_string_lossy(),
+    ]);
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("2 combos"), "{text}");
+    assert!(text.contains("warmup 40 bars"), "{text}");
+    // Every unlock is visible in the echoed rules and slots.
+    for token in [
+        "minutes_since_rth_open",
+        "minutes_to_close",
+        "volume",
+        "zscore",
+        "stdev",
+    ] {
+        assert!(text.contains(token), "{token} missing from:\n{text}");
+    }
+}

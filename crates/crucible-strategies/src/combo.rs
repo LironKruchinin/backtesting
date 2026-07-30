@@ -92,9 +92,96 @@
 //! unary      := "not" unary | "(" expr ")" | comparison
 //! comparison := operand ("<" | "<=" | ">" | ">=" | "crosses_above"
 //!                        | "crosses_below") operand
-//! operand    := number | price_field | slot ("." field)?
-//! price_field := "open" | "high" | "low" | "close"
+//! operand    := number | price_field | "volume" | session_field
+//!             | slot ("." field)?
+//! price_field   := "open" | "high" | "low" | "close"
+//! session_field := "minutes_since_open" | "minutes_to_close"
+//!                | "minutes_since_rth_open" | "minutes_to_rth_close"
+//!                | "is_rth" | "is_overnight" | "is_post_rth"
 //! ```
+//!
+//! ## Rolling normalizers (D-0080)
+//!
+//! Two more kinds, `zscore` and `stdev`, each over a declared **source**:
+//!
+//! ```toml
+//! [indicators.stretch]
+//! kind = "zscore"
+//! period = 20
+//! source = "close"     # "close" | "volume" | "return" — required, no default
+//!
+//! [indicators.vol]
+//! kind = "stdev"
+//! period = 20
+//! source = "return"    # realized volatility, in return units
+//! ```
+//!
+//! They are the answer to the two things the grammar most obviously could not
+//! say: "this bar is two sigmas below its own recent range" (no arithmetic
+//! between operands, so `(close - bb.mid)/(bb.upper - bb.mid)` is unwritable)
+//! and "volume is twice its recent average" (an absolute `volume > 1000` means
+//! something different on every grain).
+//!
+//! **They are point-in-time by construction, and there is no full-sample
+//! counterpart** — see `crate::indicators::rolling`. No `IndicatorKind` is a
+//! full-sample statistic, so no config can name one; the leak in
+//! [`crate::controls::LeakyZScore`] is reachable from Rust, on purpose, and
+//! unreachable from TOML.
+//!
+//! Three details that move numbers:
+//!
+//! - `source` is **required** and is part of the slot's identity, not one of
+//!   its axes: it does not expand, and two slots differing only in it are two
+//!   different features that must not share a config hash (D-0012).
+//! - `source = "return"` costs **one extra warmup bar** — a return needs two
+//!   closes — and that bar is declared, so §2.6 aligns the whole grid on it.
+//! - `period` must be at least 2. A one-bar window has zero spread, so every
+//!   reading over it is 0/0; the refusal names the slot at config-load time.
+//!
+//! ## The volume operand (D-0079)
+//!
+//! `volume` is the completed bar's traded size in **contracts**, and it is a
+//! bar field like `close` with one difference that is the reason it is a
+//! separate operand rather than a fifth `PriceField`: price fields are read in
+//! signal space and carry the `signal_offset` a stitched series applies
+//! (D-0076), and a contract count has no signal space. Folding it in would give
+//! the offset an operand it must not touch, and nothing would catch it.
+//!
+//! Contracts, not a normalized figure: `volume > 1000` means different things
+//! on a 1-minute bar and a daily one, and turning volume into a ratio needs a
+//! trailing window — a rolling statistic, which is an indicator's job.
+//!
+//! ## Session operands (D-0078)
+//!
+//! Every published intraday result is stated in terms of a clock — "the first
+//! half hour", "the last hour", "RTH only" — and until these existed the
+//! grammar could not read one. They are **precomputed per bar by the CLI** from
+//! `crucible-data::calendar` and handed to the grid as a shared slice, so
+//! `crucible-strategies` and `crucible-engine` still depend on nothing but
+//! `crucible-core` and no strategy ever computes a timezone offset by hand.
+//!
+//! ```toml
+//! [rules]
+//! # the first half hour of the regular session, and flat before the close
+//! enter_long = "minutes_since_rth_open > 0 and minutes_since_rth_open <= 30"
+//! exit_long  = "minutes_to_close <= 30"
+//! ```
+//!
+//! - Every reading is measured from or to the bar's `avail_ts`, because that is
+//!   when a decision on it is taken (§2.1). `minutes_since_rth_open` is
+//!   **negative** before the opening bell, which is what makes the `> 0` above
+//!   mean what it says.
+//! - `minutes_to_close` honours an **early close**: on CME's 12:00 CT
+//!   Independence Day the session is 1140 minutes rather than 1380, so the exit
+//!   rule above fires 240 minutes earlier than it would on an ordinary day.
+//!   That is the whole reason this reads a calendar instead of subtracting from
+//!   a constant.
+//! - `is_rth` / `is_overnight` / `is_post_rth` are 1 or 0, and one-hot: a bar
+//!   the exchange was shut for reads 0 on all three.
+//! - Without a session series every one of these is `None` — no opinion, like
+//!   an unwarm slot, never `false`. `crucible combo` refuses a config that
+//!   needs a clock against a feed with no exchange rather than running it with
+//!   silent rules.
 //!
 //! - `a crosses_above b` is true on the bar where `a` goes from `<= b` to
 //!   `> b` — the same two-reading rule [`SmaCross`](crate::SmaCross) implements by
@@ -177,10 +264,10 @@ pub mod grid;
 pub mod rules;
 pub mod spec;
 
-pub use build::ComboStrategy;
+pub use build::{ComboStrategy, SessionSeries};
 pub use error::ComboError;
 pub use grid::{Combo, ComboId, ConfigHash, Grid, SlotParams};
-pub use rules::{RuleSet, RuleSource};
+pub use rules::{RuleSet, RuleSource, SessionField, SessionPhase, SessionPosition};
 pub use spec::{
     CANONICAL_FORM_VERSION, ComboSpec, FloatAxis, IndicatorKind, IndicatorParams, IndicatorSpec,
     IntAxis, Slot,

@@ -1889,3 +1889,291 @@ propose a superseding entry — don't silently diverge.
   eight days before expiry is an operator's parameter, not a sourced CME
   convention, and a `.c` alias with two stored tables refuses rather than picks.
   `raw/` untouched; roll tables are curated and disposable (D-0045).
+- **D-0077** (2026-07-30) — **Coarser grains are RESAMPLED ON READ, never
+  stored, and the bucket grid is anchored on the exchange's session open rather
+  than on the UTC clock.** `crucible-data::curated::resample` turns curated
+  1-minute bars into `5m` / `15m` / `1h` / `1d`, and `crucible-cli::grain`
+  decides once — for `backtest`, `combo`, `walk-forward` and `funnel` alike —
+  whether a request is answered from stored partitions or from aggregation.
+  `TimeFrame::M5` and `TimeFrame::M15` have been deliberately unmapped in
+  `transcode::timeframe_for_schema` since M1; this is the one path that produces
+  them, and that mapping is unchanged.
+  **Why nothing is written.** A curated partition is named after the raw window
+  it came from and records exactly one `source_file_blake3`, so one raw file
+  fans out to one curated file and nothing is ever merged (D-0036). Raw windows
+  are monthly, and a month boundary lands *inside* a CME session:
+  2024-02-01T00:00Z is 18:00 CT on 31 January, an hour into the trading day that
+  opened at 17:00. A daily bar for that day therefore has constituents in two
+  raw windows, so writing it needs exactly the read-modify-write merge D-0036
+  exists to prevent — and merging is where silent duplication lives. Read-time
+  aggregation has no such seam, because `ParquetBarFeed` already concatenates
+  every window file in order and the resampler aggregates the concatenation. It
+  is also cheap: one integer pass over sixteen years of ES 1-minute bars,
+  against a second copy of the archive that can go stale against the first.
+  **The bucket rule, and why the anchor is the session open.**
+  `day = trading_day(avail_ts)` (D-0062's expression, spelled the way D-0071
+  requires so no two consumers can disagree about a date), `anchor =
+  session_open(day)`, `k = (ts_open − anchor) / target`, `ts_open = anchor +
+  k·target`. Two bars in different trading days have different anchors, so the
+  last minute before the maintenance break and the first minute after it can
+  never land in one bar. On a UTC grid they would: a UTC-day daily bar for
+  2024-01-03 holds that day's 00:00–22:00Z bars **and** the 23:00Z bars that
+  opened the fourth's session — two trading days in one "daily" bar, which is
+  the shape of a signal that fires on the calendar rather than on the market.
+  With a 24-hour target the whole session is one bucket, so a daily bar is a
+  trading-day bar by construction rather than by convention.
+  **An early close needs no special case,** which is the test that the anchor is
+  the right one: the buckets after the close simply have no bars in them, and
+  the bucket the close lands inside is built from the minutes that traded. A
+  12:15 CT close 19¼ hours after a 17:00 CT open makes bucket 19 of an hourly
+  resample fifteen minutes long, and its volume says 15 where its neighbours say
+  60.
+  **Why this is not lookahead, and the one precondition.** `avail_ts` is still
+  `ts_open + tf` computed by `Bar::avail_ts` and nowhere else (§2.1), so the
+  resampled bar is knowable at `anchor + (k+1)·target`. That is at or after every
+  constituent's availability **iff** the target is a whole multiple of the source
+  *and* the anchor is a whole number of source intervals from the epoch — then
+  the largest constituent `ts_open` in a bucket is `start + target − source` and
+  its availability is exactly `start + target`. Both are checked. CME opens on
+  the hour so a 1-minute source satisfies the second everywhere; a calendar
+  opening at 09:30:30 does not and is refused per trading day rather than
+  quietly making bars visible a minute early. Every coarser pair of the current
+  `TimeFrame` variants divides, so the first check cannot fire today — and a
+  test asserts exactly that, so the day a `4m` variant is added the test fails
+  and the refusal starts working instead of a lookahead starting.
+  **Bucketing keys on `ts_open` while the day keys on `avail_ts`, deliberately.**
+  Which interval a bar's *content* describes is a question about the bar's own
+  interval; which window a bar is *ordered into* is a question about when it
+  could be known, and D-0062 settled that one. Bucketing on `avail_ts` would
+  file a 10:04 bar's content under the bucket beginning 10:05 — the right answer
+  to the ordering question and the wrong answer about what happened.
+  **Four refusals, each with a control that has been watched firing:** a target
+  that is not coarser or not a whole multiple; a calendar declaring an intraday
+  halt (a halt is a session boundary and this grid is anchored per *day*;
+  neither bundled table declares one since D-0040, so it costs nothing today and
+  stops the promise above from silently becoming false); a session open off the
+  source grid; and a source bar whose own interval starts before its trading
+  day's session open, which straddles the boundary and belongs to neither side.
+  Two of them carry a positive control beside the negative one — the same bars
+  on an on-the-hour calendar resample, and a bar one minute later resamples —
+  so the refusal is the fixture's defect and not the fixture.
+  **Calendar gains four total accessors** — `session_open`, `session_close`,
+  `regular_hours`, `declares_halts` — and `open_intervals` is rewritten in terms
+  of the first two, so a bucket grid and a coverage check cannot come to
+  disagree about when a session ran. `session_open` is deliberately independent
+  of `day_effect`: an early close moves the close, never the open, and a closed
+  day still has a template open. Answering for a non-trading day is not a bug
+  for the reason `trading_day` answers for a Saturday — the functions are total
+  because there is nowhere to put a `Result` inside replay.
+  **Two edge facts are reported rather than hidden.** A sample's *first* bucket
+  can be cut by the request, and its *last* can be cut by the request or by the
+  session — so `last_bar_may_be_partial` is computed against the session close
+  and is **false** for an early close, which ended the bars for a reason that is
+  not truncation. "May", not "did": `ohlcv` has no bar for an interval that did
+  not trade, so a thin first minute looks exactly like a truncated one, and both
+  are worth knowing about the first bar of a sample.
+  **Provenance is unchanged.** A resampled bar's `source_file_blake3` set is its
+  constituents', so D-0013 holds transitively and `crucible verify` re-hashes
+  exactly what fed the run. The grain itself joins the `data_source` string the
+  registry and the scorecard store, because "5m as delivered" and "5m aggregated
+  here on `cme_globex_equity_index` sessions" are different bars (§2.5), and it
+  is printed on every curated run **including the ones that resampled nothing**
+  — the §2.4 argument, applied to data.
+  **Each control was watched firing** (§7, no quality exemption). Eight
+  mutations, eight catches, each restored byte-exactly and re-verified: the
+  anchor moved from the session open to UTC midnight → **12 of 16 tests**, which
+  is what "the anchor is the whole design" looks like; bucketing moved from
+  `ts_open` to `avail_ts` → 5; the `last_bar_may_be_partial` comparison stripped
+  of its session-close term → the early-close test, which is the one that
+  distinguishes a truncated window from a closed exchange; each of the three
+  refusals disabled in turn → its own test and only its own; `close` left on the
+  first constituent → the hand-derived OHLCV test; `high` taken from the last
+  constituent instead of the maximum → the same. The two positive controls in
+  that file (an on-the-hour calendar accepting the bars an off-grid one refuses,
+  a bar one minute later resampling where a straddling one does not) are what
+  make the refusals statements about the input rather than about the fixture.
+  **Not in scope: a stitched series.** A bucket spanning a roll would mix two
+  `signal_offset`s (D-0076), so `ES.v.0` at `5m` is not reachable and needs its
+  own decision. Instrument shorthand resolution now tries the requested grain
+  and falls back to 1-minute, because `curated/bars/ESH2024/5m` never exists and
+  resolving `ESH4` at `5m` would refuse a contract that is right there; D-0072's
+  ambiguity refusal is untouched at whichever grain answers.
+- **D-0078** (2026-07-30) — **The rule grammar gains a session clock, and the
+  clock is computed ONCE by the CLI and handed down as a slice.** Seven operands
+  join the grammar — `minutes_since_open`, `minutes_to_close`,
+  `minutes_since_rth_open`, `minutes_to_rth_close`, `is_rth`, `is_overnight`,
+  `is_post_rth` — so that "the first half hour", "the last hour" and "RTH only",
+  which is how essentially every published intraday result is stated, are
+  expressible in TOML.
+  **The device is D-0071's, applied to a second kind of key.**
+  `crucible-data::calendar` gains `Calendar::session_clock(avail_ts) ->
+  SessionClock`, five exact integers; `crucible-cli::combo::attach_sessions`
+  computes one per bar in bar order and calls `Grid::attach_sessions`; every
+  combo the grid builds reads the same slice by bar index. `crucible-strategies`
+  and `crucible-engine` still depend on `crucible-core` and nothing else, and
+  what crosses the boundary is five plain numbers plus a four-variant enum. Two
+  combos scoring one bar therefore cannot disagree about what time it was —
+  the same failure D-0071 names, where two attributions of "which day" land a
+  breach on two different dates.
+  **On the grid, not on the call.** The series is attached to the `Grid` rather
+  than passed to `Grid::strategy`, because a per-call argument is a per-call
+  opportunity to pass a different one. `ComboStrategy` indexes it with a bar
+  counter, not with a timestamp: deriving "which bar is this" inside the
+  strategy would be a second attribution of a fact the caller already computed.
+  **Every reading is measured from or to `avail_ts`** (§2.1), because a rule
+  fires when a bar completes and the order it emits fills on the next one. The
+  **session** is asked one nanosecond earlier — at the last instant the bar's
+  interval covers — because open intervals are half-open and a bar ending
+  exactly at 16:00 CT traded entirely inside the session it just closed. Asking
+  at `avail_ts` reports the final regular-hours bar of every day as `Closed`,
+  and "flatten on the last bar" becomes a rule that never fires. The two
+  instants can only name different sessions for a bar whose own interval
+  straddles the session open, which no interval-aligned bar has and which
+  `resample` refuses outright (D-0077).
+  **Signs are meaningful and not clamped.** `minutes_since_rth_open` is
+  negative through the overnight session, which is exactly what makes
+  `minutes_since_rth_open > 0 and minutes_since_rth_open <= 30` mean "the first
+  half hour of the regular session" and not "the first half hour of anything".
+  **`minutes_to_close` honours an early close and `minutes_to_rth_close` does
+  not**, deliberately. The first is "is the exchange still open"; the second is
+  "how far into the scheduled trading day are we". On CME's 12:00 CT
+  Independence Day the session is 1140 minutes rather than 1380, so a
+  `minutes_to_close <= 30` exit fires 240 minutes earlier than on an ordinary
+  day — while `minutes_to_rth_close` still counts toward 15:00 CT and goes
+  negative after the market has shut. Collapsing them would make one of the two
+  questions unaskable, and a rule written against a fixed 16:00 close would try
+  to flatten four hours after the market shut, on exactly the days when being
+  positioned into an illiquid close costs most.
+  **No clock is `None`, never `false`** — the rule the grammar already applies
+  to an unwarm slot, for the same reason: `not minutes_since_open < 30` would
+  otherwise read as *true* on every bar of a feed that has no exchange, which is
+  a position taken on the absence of a calendar. `crucible combo` /
+  `walk-forward` / `funnel` **refuse** such a config before replaying it,
+  naming the seven operands, because a rule silent on every bar produces a
+  backtest of a different strategy from the one the config describes and looks
+  exactly like a strategy that never found a signal. `ComboStrategy::
+  session_gaps` counts any bar that reaches the evaluator without a reading and
+  `combo` prints it as a bug rather than a caveat — it is supposed to be
+  unreachable.
+  **All seven names are reserved**, so a slot cannot shadow one, and each
+  renders in the canonical form as itself, so a config hash covers which clock
+  a rule read (D-0012).
+  **Each control was watched firing** (§7). Five mutations, five catches: the
+  session asked at `avail_ts` instead of one nanosecond earlier → the
+  last-bar-of-a-session test; the close computed from the template instead of
+  `session_close` → both early-close tests; a missing session reading 0 instead
+  of no-opinion → the silence test; `is_rth` widened to mean "open" → the
+  one-hot test; the series read one bar ahead → the bar-index test and the
+  grid-wide one. Each of the behavioural tests carries the third case §7 asks
+  for: the early-close assertions sit beside the identical wall-clock bar on an
+  ordinary day, so what moved the rule is provably the holiday and not the
+  clock.
+  **Not in scope:** calendar predicates (day-of-week, day-of-month,
+  turn-of-month). They need a different key — a position in a *month* of
+  trading days rather than in a session — and belong with their own entry.
+- **D-0079** (2026-07-30) — **`volume` is a rule operand, and it is its own
+  operand rather than a fifth `PriceField`.** `Bar::volume` has reached the
+  engine since M0; what was missing was a way to name it in a rule, which made
+  every volume-conditioned idea grade B for the want of one line of grammar.
+  **Why not a `PriceField` variant.** A price field is read in *signal space*
+  and carries the `signal_offset` a stitched continuous series applies to every
+  price (D-0076). A contract count has no signal space, and there is no
+  arithmetic in which adding points to contracts is meaningful. Adding a
+  `PriceField::Volume` would route volume through
+  `Bar::signal_*()` and the compiler would not notice, because both sides are
+  `f64` by then. A separate operand makes the mistake unrepresentable, which is
+  the same argument `AdjustedPrice` makes about `Price` (D-0042) at a smaller
+  scale. The control is a two-sided test: on one bar carrying a +20 point
+  offset, `close` reads 120 and `volume` reads its own 137, and the same bar
+  with no offset reads 100 — so the 120 is the offset arriving rather than the
+  fixture.
+  **Contracts, not a normalized figure.** `volume > 1000` means very different
+  things on a 1-minute ES bar and on a daily one, and that is the operator's
+  problem to state, not the grammar's to smooth over. Turning volume into a
+  ratio — "twice the 20-day average" — needs a trailing window, which is a
+  rolling statistic and belongs to `crucible-strategies::indicators`, not to an
+  operand.
+  **`f64` is exact here** to 2^53 contracts, eleven orders of magnitude past any
+  bar this archive holds, and nothing on this path reaches accounting (§2.3).
+  **`volume` is reserved**, so a slot cannot shadow it, and it renders as itself
+  in the canonical form so a config hash covers it (D-0012).
+  **It adds no warmup.** Volume is available on bar 0, so a rule reading it
+  starts when its indicators do — pinned by test, because a silent lengthening
+  of `Grid::max_warmup_bars` would shorten every combo's evaluation window for a
+  reason nobody wrote down (§2.6).
+  **Each control was watched firing** (§7). Three mutations, three catches:
+  volume picking up the signal offset → the signal-space test; `volume` removed
+  from the reserved list → the reservation test *and* the slot-shadowing
+  refusal; the operand rewired to read the close → three tests at once.
+- **D-0080** (2026-07-30) — **Rolling normalizers exist and a full-sample one is
+  not expressible — by construction, not by discipline.**
+  `crucible-strategies::indicators::rolling` adds `RollingZScore` and
+  `RollingStdev` over a declared `RollingSource` (`close`, `volume`, `return`),
+  and the combo grammar gains `kind = "zscore"` and `kind = "stdev"`. They
+  answer the two things the grammar most obviously could not say: "this bar is
+  two sigmas below its own recent range" — unwritable, because there is no
+  arithmetic between operands, so `(close - bb.mid)/(bb.upper - bb.lower)` has
+  no spelling — and "volume is twice its recent average", which an absolute
+  `volume > 1000` (D-0079) cannot mean on more than one grain.
+  **The §2.1 defence is structural.** A normalized feature is where lookahead
+  usually enters a research pipeline, and it enters by convenience: the series
+  is in memory, `mean()` and `std()` are one call each, and the z-score is
+  standardized against a mean the market had not produced. So everything here
+  is a private trailing window behind `Indicator::update`, which takes **one
+  bar** and returns a reading for **that** bar. There is no constructor over a
+  slice, no `fit`, no two-pass anything, and no `IndicatorKind` that names a
+  full-sample statistic — so `controls::LeakyZScore`, the planted defect, stays
+  reachable from Rust and unreachable from TOML. A test enumerates the five
+  kinds so that adding a sixth fails until someone answers "does it look at
+  anything it has not been shown yet?".
+  **The property, and the planted control.** The claim is **truncation
+  invariance**: a reading at bar *i* is a function of bars *i−period+1 … i*
+  alone, so appending bars after *i* cannot change it. Both halves are asserted
+  together, because only the pair is a diagnosis (§7): the rolling readings over
+  a 100-bar prefix are **bit-identical** to the first hundred readings over the
+  200-bar series, and the full-sample readings over the same prefix move by more
+  than a full sigma. The full-sample function is written **in the test file and
+  nowhere else** — the only way to compare against the defect is to build it
+  where it cannot escape. On a trending fixture the two statistics differ by
+  more than two sigma at the same bar, and the first warm bar reads deeply
+  negative under the full-sample statistic (which "knows" the series climbs for
+  180 more bars) and ordinary under the rolling one. That difference **is** the
+  lookahead, measured rather than asserted.
+  **The control has a control.** Rewriting the test's leaky reference as an
+  *expanding* window — past-only, still causal — drops the measured movement to
+  exactly **0** and both assertions fail. So the detector is measuring
+  future-dependence and not accumulator noise, sample size, or the fixture.
+  **`source` is required and is part of a slot's identity**, not one of its
+  axes: it does not expand, and a 20-bar z-score of price and a 20-bar z-score
+  of volume are different features that must not share a config hash (D-0012).
+  It is rendered into the canonical form, and a CLI test asserts all three
+  sources hash differently. There is no default, because "the z-score of what"
+  is not a detail; an unknown spelling is refused naming the slot and listing
+  the three that exist.
+  **`source = "return"` costs one extra warmup bar** — a return needs two
+  closes — and the bar is *declared* rather than absorbed, so §2.6 aligns the
+  whole grid on it. A grid mixing sources would otherwise start its
+  return-based combos one bar late while reporting that they started with
+  everyone else.
+  **`period >= 2`, refused at config-load time** naming the slot. A one-bar
+  window has zero spread, so every reading over it is 0/0.
+  **A flat window has no z-score and does have a deviation.** The z-score is
+  `None` — the grammar's "no opinion", the same answer an unwarm slot gives —
+  because the numerator and the denominator are both zero; the standard
+  deviation is `0.0`, because that is a real answer. Returning a NaN and letting
+  the operand's finiteness filter catch it would work by accident.
+  **A z-score is shift-invariant**, so unlike `close > 4500` it is safe on a
+  back-adjusted series (D-0076): the offset cancels between the value and the
+  window's mean. Asserted to 1e-9 rather than bit-exactly, and the difference is
+  worth stating — the rolling accumulator sums values around 350 differently
+  from values around 100, which is the drift `indicators` already accepts until
+  the M2 Welford/rebase task. A numerics gap, not a semantics one.
+  **Each control was watched firing** (§7). Seven mutations, seven catches: the
+  window read before it was full → four tests; the return source declaring no
+  extra warmup → three; a flat window returning NaN instead of no-opinion →
+  three; the volume source reading the close → the source-selection test, which
+  carries its own control (the same bars' closes are flat, so a source being
+  ignored would answer twice the same way); the source dropped from the
+  canonical form → the identity test; the grid's warmup ignoring the source →
+  the alignment test; and the leaky reference made causal → the planted control
+  itself, above.

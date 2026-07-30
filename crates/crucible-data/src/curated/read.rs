@@ -446,6 +446,15 @@ impl ParquetBarFeed {
     pub fn tf(&self) -> TimeFrame {
         self.tf
     }
+
+    /// The loaded columns, for the one consumer that needs them as columns
+    /// rather than as events: [`resample`](super::resample), which aggregates
+    /// the whole concatenation in one integer pass. Crate-private, because
+    /// handing bars out as six parallel `Vec`s is a shortcut for code inside
+    /// this module's invariants and a footgun outside them.
+    pub(crate) fn columns(&self) -> &BarColumns {
+        &self.bars
+    }
 }
 
 /// Whether a file's `ts_open` span intersects a half-open request.

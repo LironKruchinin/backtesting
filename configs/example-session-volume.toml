@@ -1,0 +1,102 @@
+# Reference config for the four grammar unlocks of 2026-07-30, in one file:
+# a RESAMPLED grain (D-0077), SESSION operands (D-0078), the VOLUME operand
+# (D-0079), and ROLLING normalizers (D-0080).
+#
+# THIS IS A SCHEMA EXAMPLE, NOT A HYPOTHESIS. It exists so that every operand
+# the grammar has appears somewhere a reader can copy from, and it is not a
+# claim that this combination predicts anything. Candidate ideas live in
+# `research/backlog/` with pre-registered kill criteria written before anything
+# is run; a config in this directory is documentation.
+#
+# `crucible combo --config configs/example-session-volume.toml` expands it and
+# spends nothing. `--run` needs `curated/bars/ESH2024/1m` — the 15-minute bars
+# are aggregated from it on read, on CME's own sessions, so there is nothing to
+# build first.
+
+schema_version = 1
+
+[meta]
+name = "grammar-surface-example"
+hypothesis_family = "example-grammar-surface"
+economic_rationale = "None claimed: this config exercises the grammar's full operand surface so that each one has a worked example. It is not an idea under test."
+
+[universe]
+instruments = ["ESH2024"]
+# 15m is not stored — the archive holds 1s and 1m, and coarser grains are
+# resampled on read, cut on the exchange's sessions so no bar spans one
+# (D-0077). Every report says whether the bars were stored or aggregated.
+timeframes = ["15m"]
+
+[data]
+source = "curated"
+start = "2024-01-01"
+end = "2024-02-01"
+
+[contract]
+tick_points = "0.25"
+point_value_usd = 50
+
+# --- rolling normalizers (D-0080) -------------------------------------------
+# `source` is required and is part of the slot's identity: a 20-bar z-score of
+# price and a 20-bar z-score of volume are different features and hash
+# differently. Every statistic here is a TRAILING window — there is no
+# full-sample variant, and no config can name one.
+
+[indicators.stretch]
+kind = "zscore"
+period = [20, 40]
+source = "close"          # shift-invariant, so it is safe on a stitched series
+
+[indicators.vol_z]
+kind = "zscore"
+period = 20
+source = "volume"         # "twice its recent average", which an absolute
+                          # threshold cannot mean on more than one grain
+
+[indicators.rv]
+kind = "stdev"
+period = 20
+source = "return"         # realized volatility; costs ONE extra warmup bar,
+                          # and the extra bar is declared, not absorbed
+
+# --- rules ------------------------------------------------------------------
+# `minutes_since_rth_open` is negative before the opening bell, so `> 0 and
+# <= 30` is the first half hour of the regular session and nothing else.
+# `minutes_to_close` honours an early close: on a 12:00 CT holiday the exit
+# fires four hours earlier than it would on an ordinary day.
+# `volume` is the bar's own contract count — used here as the sample-adequacy
+# filter it honestly is, not as a signal.
+
+[rules]
+enter_long = "minutes_since_rth_open > 0 and minutes_since_rth_open <= 30 and stretch < -1.5 and vol_z > 0.5 and volume > 500 and rv < 0.01"
+exit_long = "minutes_to_close <= 30 or stretch > 0"
+enter_short = "minutes_since_rth_open > 0 and minutes_since_rth_open <= 30 and stretch > 1.5 and vol_z > 0.5 and volume > 500 and rv < 0.01"
+exit_short = "minutes_to_close <= 30 or stretch < 0"
+
+[execution]
+fill_model = "spread_cross"
+half_spread_ticks = 1
+fee_per_contract_usd = "1.25"
+
+[walk_forward]
+scheme = "rolling"
+train_days = 10
+test_days = 5
+step_days = 5
+
+[funnel]
+stages = ["s1", "s2"]
+cost_sensitivity_ticks = [0.0, 0.5, 1.0, 2.0]
+min_oos_trades = 30
+min_oos_sessions = 60
+min_oos_return_pct_free_fills = 0.0
+min_oos_sharpe_after_costs = 0.5
+kill_if_dead_at_ticks = 1.0
+require_controls_beaten = true
+max_pbo = 0.5
+require_plateau = true
+
+[run]
+seed = 42
+initial_cash_usd = "100000"
+qty_contracts = 1

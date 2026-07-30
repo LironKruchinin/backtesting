@@ -483,6 +483,29 @@ reference; supersede the decision if you disagree — don't hotfix.
   2015-09-21**: the functions are total by design — there is nowhere to put a
   `Result` inside replay. `qa` and `backtest` warn when a span starts earlier;
   the two older session eras are documented in the table, not modelled.
+- **`curated/bars/ESH2024/5m` never exists, and that is not an unfinished
+  transcode** (D-0077). The archive stores the grain the vendor sent — `1s` and
+  `1m` — and `5m`/`15m`/`1h`/`1d` are aggregated on read, on the exchange's own
+  sessions. Writing them would need the read-modify-write merge D-0036 exists to
+  prevent: raw windows are monthly and a month boundary lands *inside* a CME
+  session, so a daily bar's constituents live in two raw files. Every report says
+  which of the two produced its bars, including when nothing was resampled.
+- **A resampled daily bar opens at 17:00 CT the previous evening, not at
+  midnight** (D-0077). It is a trading-day bar; the bucket grid is anchored on
+  `Calendar::session_open`, so no resampled bar can span a session boundary. A
+  UTC-day grid would put the last minutes of 3 January and the first minutes of
+  the fourth's session in one "daily" bar — they are 61 minutes and one trading
+  day apart.
+- **An early close makes the last bucket short and is NOT reported as a
+  truncated window** (D-0077). `last_bar_may_be_partial` is computed against the
+  session close, so it says "the request cut this bar" and never "the exchange
+  did". A 12:15 CT close makes bucket 19 of an hourly resample fifteen minutes
+  long, which its volume states.
+- **`resample` refuses a calendar declaring an intraday halt**, though neither
+  bundled table declares one (D-0040, D-0077). The bucket grid is anchored once
+  per trading day, so a halt — which is a session boundary — could sit inside a
+  bucket. The refusal costs nothing today and is what stops "no bar spans a
+  session boundary" from silently becoming false the day a table grows a halt.
 - **`crucible qa` exits 4 when it finds something**, like `verify`. A
   scheduled job that reads "coverage 61 %" as success is worse than no job.
 - **`AdjustedPrice` cannot be converted to `Price`, and that is the feature**
@@ -551,6 +574,37 @@ reference; supersede the decision if you disagree — don't hotfix.
   2.0000000000000004, so the *number of points* on the axis — and with it the
   combo count, every combo index, and every trial charged to the hypothesis
   family — would depend on floating-point accumulation. Write the values out.
+- **There is no full-sample z-score in `crucible-strategies::indicators`, and
+  adding one is not a convenience** (D-0080). Every statistic there is a
+  trailing window behind `Indicator::update`, which takes one bar; no
+  constructor takes a series, and no `IndicatorKind` names a full-sample
+  variant, so `controls::LeakyZScore` stays reachable from Rust and unreachable
+  from TOML. The property is truncation invariance, and its control is a
+  full-sample function written **inside the test file** — the only place it may
+  exist.
+- **`zscore` returns `None` on a flat window while `stdev` returns `0.0`**
+  (D-0080). The z-score's numerator and denominator are both zero, and `None`
+  is what the grammar already means by "no opinion"; a deviation of zero is a
+  real answer. Neither is a NaN caught downstream by accident.
+- **`source = "return"` adds a bar to `Grid::max_warmup_bars`** (D-0080). A
+  return needs two closes, and the bar is declared rather than absorbed so §2.6
+  aligns the whole grid on it — otherwise a mixed-source grid would start its
+  return combos one bar late while reporting they started with everyone else.
+- **A combo config whose rules read the session clock is REFUSED against a
+  synthetic feed**, rather than run with those rules silent (D-0078). A
+  `minutes_since_open < 30` with no calendar behind it has no opinion on any
+  bar — which is a backtest of a different strategy from the one the config
+  describes, and looks exactly like a strategy that never found a signal.
+- **`minutes_to_close` shortens on an early close and `minutes_to_rth_close`
+  does not** (D-0078). The first asks "is the exchange still open", the second
+  "how far into the scheduled trading day are we", and on CME's 12:00 CT
+  Independence Day they disagree by four hours. Collapsing them makes one of the
+  two questions unaskable.
+- **The last regular-hours bar of a day reads `is_rth`, though its interval ends
+  exactly at the closing bell** (D-0078). Open intervals are half-open, so the
+  session is asked one nanosecond before `avail_ts`; asking at `avail_ts` would
+  report every day's final bar as closed and "flatten on the last bar" would
+  never fire.
 - **Rule evaluation never short-circuits, and all four rules are evaluated
   every bar** even when the position makes the answer irrelevant. A
   `crosses_*` node that misses a bar compares against a reading from two bars
@@ -824,6 +878,14 @@ cargo run -p crucible-cli -- layout-check      # is the tree the shape DATA_LAYO
 cargo run -p crucible-cli --features databento -- transcode
 cargo run -p crucible-cli --features databento -- transcode --include-spreads
 cargo run -p crucible-cli -- backtest --instrument ESH2024 --timeframe 1m \
+  --start 2024-01-01 --end 2024-02-01 --fast 20 --slow 50
+
+# The same run on a COARSER grain (D-0077). The archive stores 1s and 1m; 5m,
+# 15m, 1h and 1d are aggregated on read, on the exchange's own sessions, so
+# there is nothing to build first and `curated/bars/ESH2024/5m` never exists.
+# A daily bar is a TRADING-day bar, opening at 17:00 CT the evening before.
+# Every report names the grain and says whether it was stored or resampled.
+cargo run -p crucible-cli -- backtest --instrument ESH2024 --timeframe 15m \
   --start 2024-01-01 --end 2024-02-01 --fast 20 --slow 50
 
 # The same command over a CONTINUOUS series (D-0076). `--instrument` takes the

@@ -30,6 +30,15 @@
 //! admits characters a filename does not — `SYN:RW` is a legal instrument and
 //! an illegal Windows filename.
 //!
+//! ## Grains: what is stored, and what is derived on read
+//!
+//! A partition holds the grain the vendor sent — `ohlcv-1s` and `ohlcv-1m` are
+//! the only two this archive bought. Coarser grains come from
+//! [`resample`](resample), which aggregates on the exchange's own sessions at
+//! **read time** and writes nothing (D-0077). That is why `curated/bars/ESH2024`
+//! has a `1m` directory and no `5m` one, and why deleting `curated/` still only
+//! costs a `crucible transcode`.
+//!
 //! ## Column schema v1
 //!
 //! | column | physical type | meaning |
@@ -94,6 +103,7 @@ pub mod error;
 pub mod meta;
 pub mod path;
 mod read;
+pub mod resample;
 mod write;
 
 pub use error::CuratedError;
@@ -101,6 +111,7 @@ pub use meta::{CuratedMeta, PartitionSource};
 pub use read::{
     CuratedSource, ParquetBarFeed, Resolution, list_instruments, read_meta, resolve_instrument,
 };
+pub use resample::{RESAMPLER_VERSION, ResampleError, ResampleReport, ResampledBarFeed, resample};
 pub use write::{PartitionWriter, write_partition};
 
 /// Directory under the data dir holding every curated bar partition.

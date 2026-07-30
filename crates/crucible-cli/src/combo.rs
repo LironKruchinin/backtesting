@@ -26,16 +26,20 @@ use std::path::PathBuf;
 
 use crucible_core::prelude::*;
 use crucible_data::SyntheticFeed;
-use crucible_data::calendar::Calendar;
+use crucible_data::calendar::{Calendar, SessionClock, SessionId};
 use crucible_data::continuous::ContinuousAlias;
-use crucible_data::curated::{CuratedError, ParquetBarFeed};
+use crucible_data::curated::CuratedError;
+use crucible_data::curated::resample::ResampleError;
 use crucible_data::ingest::range_from_dates;
 use crucible_data::ingest::window::parse_civil_date;
 use crucible_engine::{BacktestParams, BacktestResult, FreeFills, INTRABAR_CONVENTION, run};
 use crucible_strategies::Aligned;
-use crucible_strategies::combo::ComboStrategy;
+use crucible_strategies::combo::{
+    ComboStrategy, SessionField, SessionPhase, SessionPosition, SessionSeries,
+};
 
 use crate::config::{self, ConfigError, DataSource, LoadedConfig};
+use crate::grain::{CuratedGrain, grain_caveats, grain_line};
 use crate::pull::{EXIT_FAILED, EXIT_USAGE, data_dir};
 
 /// Nanoseconds in a mean Gregorian year (365.2425 days).
@@ -68,7 +72,7 @@ pub struct ComboArgs {
 
 /// Runs the command, returning the process exit code.
 pub fn run_cmd(args: &ComboArgs) -> i32 {
-    let loaded = match config::load(&args.config) {
+    let mut loaded = match config::load(&args.config) {
         Ok(loaded) => loaded,
         Err(e) => {
             eprintln!("error: {e}");
@@ -100,15 +104,19 @@ pub fn run_cmd(args: &ComboArgs) -> i32 {
             return code;
         }
     };
-    let events = series.events;
+    let events = &series.events;
     if events.is_empty() {
         eprintln!("error: the data source produced no bars; there is nothing to replay");
         return EXIT_USAGE;
     }
+    if let Err(message) = attach_sessions(&mut loaded, events) {
+        eprintln!("error: {message}");
+        return EXIT_USAGE;
+    }
 
-    let bars_per_year = annualization(&loaded, &events);
+    let bars_per_year = annualization(&loaded, events);
     let results: Vec<Replay> = (0..loaded.grid.len())
-        .map(|index| replay(&loaded, &events, bars_per_year, index))
+        .map(|index| replay(&loaded, events, bars_per_year, index))
         .collect();
 
     if hash_only {
@@ -116,7 +124,7 @@ pub fn run_cmd(args: &ComboArgs) -> i32 {
         return 0;
     }
 
-    print_run_context(&loaded, &events, bars_per_year);
+    print_run_context(&loaded, &series, bars_per_year);
     print_results(&loaded, &results);
     println!("  determinism hash {:016x}", grid_hash(&results));
     print_path_sensitivity(
@@ -135,6 +143,7 @@ struct Replay {
     own_warmup_bars: usize,
     suppressed_intents: usize,
     conflicting_signals: usize,
+    session_gaps: usize,
     result: BacktestResult,
 }
 
@@ -158,6 +167,7 @@ fn replay(
         own_warmup_bars: combo.own_warmup_bars(),
         suppressed_intents: strategy.suppressed_intents(),
         conflicting_signals: strategy.inner().conflicting_signals(),
+        session_gaps: strategy.inner().session_gaps(),
         result,
     }
 }
@@ -209,6 +219,11 @@ pub(crate) struct Series {
     pub data_manifest_ids: Vec<String>,
     /// What the bars were, in one line, for a report header.
     pub description: String,
+    /// Anything about the series a reader has to know and would not guess —
+    /// today, the two edge facts a resampled series carries (D-0077). Empty is
+    /// the normal case and means there is nothing to say, not that nobody
+    /// looked.
+    pub caveats: Vec<String>,
 }
 
 /// Materializes the config's data source into one bar series.
@@ -259,6 +274,9 @@ pub(crate) fn collect_events(loaded: &LoadedConfig) -> Result<Series, (i32, Stri
                     "synthetic random walk — seed {seed}, {bars} bars, from \
                      {start_price_points} pt, ±{vol_ticks} ticks"
                 ),
+                // A generated feed emits the requested grain directly, so
+                // there is no aggregation to caveat.
+                caveats: Vec::new(),
             })
         }
         DataSource::Curated { start, end } => {
@@ -308,12 +326,17 @@ pub(crate) fn collect_events(loaded: &LoadedConfig) -> Result<Series, (i32, Stri
                 .map_err(|err| (EXIT_USAGE, err.to_string()))?;
             let dir = data_dir().map_err(|msg| (EXIT_USAGE, msg))?;
             let id = InstrumentId::new(instrument);
+            // The archive holds 1s and 1m; anything coarser is aggregated on
+            // the exchange's sessions when it is read (D-0077). Which of the
+            // two happened is decided in one place and printed, never assumed.
             let mut feed =
-                ParquetBarFeed::open(&dir, &id, loaded.timeframe, Some(range)).map_err(|e| {
-                    let code = match e {
-                        CuratedError::NoCuratedData { .. } | CuratedError::EmptyRange { .. } => {
-                            EXIT_USAGE
-                        }
+                CuratedGrain::open(&dir, &id, loaded.timeframe, Some(range)).map_err(|e| {
+                    let code = match &e {
+                        ResampleError::Curated(
+                            CuratedError::NoCuratedData { .. } | CuratedError::EmptyRange { .. },
+                        )
+                        | ResampleError::NoCalendar { .. }
+                        | ResampleError::NotCoarser { .. } => EXIT_USAGE,
                         _ => EXIT_FAILED,
                     };
                     (code, e.to_string())
@@ -330,16 +353,103 @@ pub(crate) fn collect_events(loaded: &LoadedConfig) -> Result<Series, (i32, Stri
                 .collect();
             data_manifest_ids.sort_unstable();
             data_manifest_ids.dedup();
+            // The grain belongs in the description rather than beside it: this
+            // string is what the registry and the scorecard store as
+            // `data_source`, and "5m as delivered" and "5m aggregated here from
+            // 1m on cme_globex_equity_index sessions" are different bars (§2.5).
+            let grain = grain_line(&feed, loaded.timeframe);
+            let caveats = grain_caveats(&feed);
             Ok(Series {
                 description: format!(
-                    "curated {instrument} {} {start}..{end} — {} source file(s)",
-                    loaded.timeframe,
+                    "curated {instrument} {start}..{end} — {grain}, {} source file(s)",
                     data_manifest_ids.len()
                 ),
                 data_manifest_ids,
+                caveats,
                 events: std::iter::from_fn(|| feed.next_event()).collect(),
             })
         }
+    }
+}
+
+/// Computes every bar's session clock **once** and attaches it to the grid.
+///
+/// The D-0071 device, applied to a second kind of key (D-0078).
+/// `crucible-strategies` may not depend on `crucible-data`, so it cannot know
+/// what a timezone is; `crucible-engine` may not either. The CLI is the one
+/// place that holds both a `Calendar` and a `Grid`, so it does the arithmetic
+/// once, in bar order, and every combo in the grid reads the same slice. Two
+/// combos scoring the same bar therefore cannot disagree about what time it
+/// was — which is the failure the device exists to prevent, in the same shape
+/// as a daily-loss-limit breach landing on two different dates.
+///
+/// Keyed on `avail_ts`, never `ts_open` (§2.1): a rule fires when a bar
+/// completes, and the order it emits fills on the next one.
+///
+/// # Errors
+/// A message naming the problem when the config's rules read the session clock
+/// and nothing can supply one. That is a refusal rather than a run with silent
+/// rules: a `minutes_since_open < 30` that has no opinion on any bar produces a
+/// backtest of a *different strategy* than the config describes, and it looks
+/// exactly like a strategy that never found a signal.
+pub(crate) fn attach_sessions(
+    loaded: &mut LoadedConfig,
+    events: &[MarketEvent],
+) -> Result<(), String> {
+    let needed = loaded.grid.spec().rules().uses_session();
+    let calendar = Calendar::for_instrument(&loaded.spec.instrument)
+        .map_err(|e| format!("bundled calendar tables are broken: {e}"))?;
+    let Some(calendar) = calendar else {
+        if needed {
+            return Err(format!(
+                "the rules read the session clock ({}), but no bundled calendar governs {}. \
+                 A synthetic feed has no exchange and therefore no session, so every such rule \
+                 would be silent on every bar — which is a backtest of a different strategy \
+                 than this config describes, and looks exactly like one that found no signal",
+                SessionField::all()
+                    .iter()
+                    .map(|f| f.name())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                loaded.spec.instrument
+            ));
+        }
+        return Ok(());
+    };
+
+    let series: SessionSeries = events
+        .iter()
+        .map(|ev| session_position(calendar.session_clock(ev.avail_ts())))
+        .collect();
+    loaded.grid.attach_sessions(series);
+    Ok(())
+}
+
+/// The six lines where `crucible-data`'s session clock becomes the rule
+/// grammar's, and the only place the two crates meet.
+///
+/// Nanoseconds to minutes is the one conversion, and it happens here because
+/// this is the boundary into indicator space where §2.3 puts `f64`;
+/// `crucible-data` keeps the exact integers. The phase mapping is one-to-one
+/// and total — a new `SessionId` variant must fail to compile here rather than
+/// fall into a default, which is why there is no `_ =>` arm.
+fn session_position(clock: SessionClock) -> SessionPosition {
+    let minutes = |ns: i64| {
+        #[expect(clippy::cast_precision_loss, reason = "indicator space (§2.3)")]
+        let ns = ns as f64;
+        ns / 60e9
+    };
+    SessionPosition {
+        minutes_since_open: minutes(clock.since_open_ns),
+        minutes_to_close: minutes(clock.to_close_ns),
+        minutes_since_rth_open: minutes(clock.since_rth_open_ns),
+        minutes_to_rth_close: minutes(clock.to_rth_close_ns),
+        phase: match clock.session {
+            SessionId::Overnight => SessionPhase::Overnight,
+            SessionId::Regular => SessionPhase::Regular,
+            SessionId::PostRegular => SessionPhase::PostRegular,
+            SessionId::Closed => SessionPhase::Closed,
+        },
     }
 }
 
@@ -522,8 +632,10 @@ fn print_grid_listing(loaded: &LoadedConfig) {
     println!();
 }
 
-fn print_run_context(loaded: &LoadedConfig, events: &[MarketEvent], bars_per_year: f64) {
+fn print_run_context(loaded: &LoadedConfig, series: &Series, bars_per_year: f64) {
+    let events = &series.events;
     let eval_bars = events.len().saturating_sub(loaded.grid.max_warmup_bars());
+    println!("  bars           {}", series.description);
     println!(
         "  replay         {} bars, one series shared by every combo; {eval_bars} of them\n\
          \x20                inside the evaluation window",
@@ -531,6 +643,7 @@ fn print_run_context(loaded: &LoadedConfig, events: &[MarketEvent], bars_per_yea
     );
     println!("  annualization  {bars_per_year:.0} bars/yr");
     println!();
+    crate::grain::print_caveats(&series.caveats);
 }
 
 fn print_results(loaded: &LoadedConfig, results: &[Replay]) {
@@ -576,6 +689,16 @@ fn print_results(loaded: &LoadedConfig, results: &[Replay]) {
             "\n  WARNING: enter_long and enter_short were both true on {conflicts} bar(s) with a\n\
              \x20          flat position. No position was taken on any of them. Two entry rules\n\
              \x20          that can fire together is a bug in the config, not a signal."
+        );
+    }
+    let gaps: usize = results.iter().map(|r| r.session_gaps).sum();
+    if gaps > 0 {
+        println!(
+            "
+  WARNING: a session-relative rule had no clock reading on {gaps} bar(s) and was
+                        silent there. `attach_sessions` is supposed to make that impossible, so
+                        this is a bug, not a data caveat — the numbers above are a different
+                        strategy from the one the config describes (D-0078)."
         );
     }
     let cancelled: usize = results.iter().map(|r| r.result.cancelled_at_eof).sum();
@@ -630,4 +753,92 @@ fn print_footer(loaded: &LoadedConfig) {
          \x20 idea is real. Deflated Sharpe, PBO and the permutation battery arrive with\n\
          \x20 the funnel (M3)."
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Seconds since the epoch, as a `Ts`.
+    fn utc(seconds: i64) -> Ts {
+        Ts(seconds * 1_000_000_000)
+    }
+
+    fn cme() -> Calendar {
+        Calendar::for_instrument(&InstrumentId::new("ESH2024"))
+            .expect("bundled tables parse")
+            .expect("CME governs ES")
+    }
+
+    /// The mapping is a unit conversion and a one-to-one relabel, and both are
+    /// checked against instants derived by hand.
+    ///
+    /// Trading day 2024-01-03 opens 2024-01-02 17:00 CST = 23:00Z
+    /// (1_704_236_400) and closes 2024-01-03 16:00 CST = 22:00Z
+    /// (1_704_319_200) — 1380 minutes. Regular hours are 08:30–15:00 CST, i.e.
+    /// 14:30Z (1_704_292_200) to 21:00Z (1_704_315_600).
+    ///
+    /// The bar under test becomes available at 10:00 CST = 16:00Z
+    /// (1_704_297_600): 1020 minutes into the session, 360 from its close, 90
+    /// past the regular open and 300 from the regular close, inside RTH.
+    #[test]
+    fn a_session_clock_becomes_the_grammars_reading() {
+        let position = session_position(cme().session_clock(utc(1_704_297_600)));
+        assert!((position.minutes_since_open - 1020.0).abs() < 1e-9);
+        assert!((position.minutes_to_close - 360.0).abs() < 1e-9);
+        assert!((position.minutes_since_rth_open - 90.0).abs() < 1e-9);
+        assert!((position.minutes_to_rth_close - 300.0).abs() < 1e-9);
+        assert_eq!(position.phase, SessionPhase::Regular);
+    }
+
+    /// The same wall-clock reading on the bundled table's real early close, and
+    /// the ordinary day beside it.
+    ///
+    /// CME closes at 12:00 CT on Independence Day itself — 2024-07-04, a
+    /// Thursday. That trading day opens 2024-07-03 17:00 CDT = 22:00Z
+    /// (1_720_044_000) and closes 2024-07-04 12:00 CDT = 17:00Z
+    /// (1_720_112_400), so it is 19 hours = 1140 minutes long instead of 1380.
+    ///
+    /// A bar available at 11:00 CDT that day (16:00Z, 1_720_108_800) is
+    /// therefore **60** minutes from the close. The identical wall-clock bar on
+    /// the ordinary Thursday a week earlier — 2024-06-27, 16:00Z,
+    /// 1_719_504_000 — is **300**. Both are 1080 minutes into their session,
+    /// because an early close moves the close and never the open.
+    ///
+    /// A rule written against a fixed 16:00 close would have tried to flatten
+    /// four hours after the market shut, on exactly the days when being
+    /// positioned into an illiquid close costs the most.
+    #[test]
+    fn the_clock_counts_down_to_the_bundled_tables_early_close() {
+        let cal = cme();
+        assert!(matches!(
+            cal.day_effect(crucible_data::calendar::CivilDate {
+                year: 2024,
+                month: 7,
+                day: 4
+            }),
+            crucible_data::calendar::DayEffect::EarlyClose { .. }
+        ));
+
+        let holiday = session_position(cal.session_clock(utc(1_720_108_800)));
+        assert!((holiday.minutes_since_open - 1080.0).abs() < 1e-9);
+        assert!((holiday.minutes_to_close - 60.0).abs() < 1e-9);
+
+        let ordinary = session_position(cal.session_clock(utc(1_719_504_000)));
+        assert!((ordinary.minutes_since_open - 1080.0).abs() < 1e-9);
+        assert!((ordinary.minutes_to_close - 300.0).abs() < 1e-9);
+    }
+
+    /// The last bar of a session reads its own session, not `Closed`.
+    ///
+    /// A bar whose interval ends exactly at 16:00 CST on 2024-01-03 traded
+    /// entirely inside that session. Reported as `Closed`, "flatten on the last
+    /// bar" would be a rule that never fires; reported as `PostRegular` with
+    /// `minutes_to_close == 0`, it fires exactly once.
+    #[test]
+    fn the_last_bar_of_a_session_is_still_in_it() {
+        let position = session_position(cme().session_clock(utc(1_704_319_200)));
+        assert!((position.minutes_to_close - 0.0).abs() < 1e-9);
+        assert_eq!(position.phase, SessionPhase::PostRegular);
+    }
 }

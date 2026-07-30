@@ -12,6 +12,7 @@ use crucible_core::types::Qty;
 use super::error::ComboError;
 use super::grid::Grid;
 use super::rules::{RESERVED, RuleSet, RuleSource, SlotDecl, SlotField, canonical_f64};
+use crate::indicators::RollingSource;
 
 /// Version tag on the canonical form. Bumping it deliberately invalidates
 /// every stored config hash, which is the point: an identity scheme that can
@@ -31,6 +32,12 @@ pub enum IndicatorKind {
     Ema,
     /// Bollinger bands — `.mid`, `.upper`, `.lower`, and no scalar.
     Bollinger,
+    /// Trailing-window z-score of a declared source — one scalar output
+    /// (D-0080).
+    ZScore,
+    /// Trailing-window population standard deviation of a declared source —
+    /// one scalar output (D-0080).
+    Stdev,
 }
 
 impl IndicatorKind {
@@ -41,14 +48,28 @@ impl IndicatorKind {
             IndicatorKind::Sma => "sma",
             IndicatorKind::Ema => "ema",
             IndicatorKind::Bollinger => "bollinger",
+            IndicatorKind::ZScore => "zscore",
+            IndicatorKind::Stdev => "stdev",
         }
+    }
+
+    /// True when this kind normalizes a declared [`RollingSource`], which the
+    /// canonical form has to carry: a 20-bar z-score of price and a 20-bar
+    /// z-score of volume are different features and must not share an identity
+    /// (D-0012).
+    #[must_use]
+    pub const fn takes_source(self) -> bool {
+        matches!(self, IndicatorKind::ZScore | IndicatorKind::Stdev)
     }
 
     /// What this kind produces, phrased for an error message.
     #[must_use]
     pub const fn fields_help(self) -> &'static str {
         match self {
-            IndicatorKind::Sma | IndicatorKind::Ema => "a single value, referenced by name alone",
+            IndicatorKind::Sma
+            | IndicatorKind::Ema
+            | IndicatorKind::ZScore
+            | IndicatorKind::Stdev => "a single value, referenced by name alone",
             IndicatorKind::Bollinger => "`.mid`, `.upper` and `.lower`",
         }
     }
@@ -59,7 +80,13 @@ impl IndicatorKind {
     #[must_use]
     pub fn field(self, name: Option<&str>) -> Option<SlotField> {
         match (self, name) {
-            (IndicatorKind::Sma | IndicatorKind::Ema, None) => Some(SlotField::Value),
+            (
+                IndicatorKind::Sma
+                | IndicatorKind::Ema
+                | IndicatorKind::ZScore
+                | IndicatorKind::Stdev,
+                None,
+            ) => Some(SlotField::Value),
             (IndicatorKind::Bollinger, Some("mid")) => Some(SlotField::Mid),
             (IndicatorKind::Bollinger, Some("upper")) => Some(SlotField::Upper),
             (IndicatorKind::Bollinger, Some("lower")) => Some(SlotField::Lower),
@@ -71,7 +98,10 @@ impl IndicatorKind {
     #[must_use]
     pub const fn param_names(self) -> &'static [&'static str] {
         match self {
-            IndicatorKind::Sma | IndicatorKind::Ema => &["period"],
+            IndicatorKind::Sma
+            | IndicatorKind::Ema
+            | IndicatorKind::ZScore
+            | IndicatorKind::Stdev => &["period"],
             IndicatorKind::Bollinger => &["period", "k"],
         }
     }
@@ -142,6 +172,22 @@ pub enum IndicatorSpec {
         /// Band width in population standard deviations (D-0009).
         k: FloatAxis,
     },
+    /// `kind = "zscore"` — trailing-window z-score of `source` (D-0080).
+    ZScore {
+        /// Window length in bars.
+        period: IntAxis,
+        /// Which series is normalized. Required: "the z-score of what" is not
+        /// a detail worth defaulting.
+        source: RollingSource,
+    },
+    /// `kind = "stdev"` — trailing-window population standard deviation of
+    /// `source` (D-0080).
+    Stdev {
+        /// Window length in bars.
+        period: IntAxis,
+        /// Which series is measured.
+        source: RollingSource,
+    },
 }
 
 impl IndicatorSpec {
@@ -152,6 +198,20 @@ impl IndicatorSpec {
             IndicatorSpec::Sma { .. } => IndicatorKind::Sma,
             IndicatorSpec::Ema { .. } => IndicatorKind::Ema,
             IndicatorSpec::Bollinger { .. } => IndicatorKind::Bollinger,
+            IndicatorSpec::ZScore { .. } => IndicatorKind::ZScore,
+            IndicatorSpec::Stdev { .. } => IndicatorKind::Stdev,
+        }
+    }
+
+    /// The source this slot normalizes, for the kinds that take one.
+    const fn source(&self) -> Option<RollingSource> {
+        match self {
+            IndicatorSpec::Sma { .. }
+            | IndicatorSpec::Ema { .. }
+            | IndicatorSpec::Bollinger { .. } => None,
+            IndicatorSpec::ZScore { source, .. } | IndicatorSpec::Stdev { source, .. } => {
+                Some(*source)
+            }
         }
     }
 }
@@ -176,6 +236,20 @@ pub enum IndicatorParams {
         /// Band width in standard deviations.
         k: f64,
     },
+    /// Trailing-window z-score (D-0080).
+    ZScore {
+        /// Window length.
+        period: usize,
+        /// Which series is normalized.
+        source: RollingSource,
+    },
+    /// Trailing-window population standard deviation (D-0080).
+    Stdev {
+        /// Window length.
+        period: usize,
+        /// Which series is measured.
+        source: RollingSource,
+    },
 }
 
 impl IndicatorParams {
@@ -186,6 +260,11 @@ impl IndicatorParams {
             IndicatorParams::Sma { period }
             | IndicatorParams::Ema { period }
             | IndicatorParams::Bollinger { period, .. } => period,
+            // A return source needs one bar beyond the window for its first
+            // difference, and §2.6 aligns the whole grid on the declared
+            // number — so it is declared here rather than absorbed.
+            IndicatorParams::ZScore { period, source }
+            | IndicatorParams::Stdev { period, source } => period + source.extra_warmup_bars(),
         }
     }
 
@@ -196,6 +275,8 @@ impl IndicatorParams {
             IndicatorParams::Sma { .. } => IndicatorKind::Sma,
             IndicatorParams::Ema { .. } => IndicatorKind::Ema,
             IndicatorParams::Bollinger { .. } => IndicatorKind::Bollinger,
+            IndicatorParams::ZScore { .. } => IndicatorKind::ZScore,
+            IndicatorParams::Stdev { .. } => IndicatorKind::Stdev,
         }
     }
 
@@ -208,6 +289,10 @@ impl IndicatorParams {
             }
             IndicatorParams::Bollinger { period, k } => {
                 format!("period={period} k={}", canonical_f64(k))
+            }
+            IndicatorParams::ZScore { period, source }
+            | IndicatorParams::Stdev { period, source } => {
+                format!("period={period} source={}", source.name())
             }
         }
     }
@@ -259,6 +344,9 @@ pub struct Slot {
     pub name: String,
     /// Which indicator fills it.
     pub kind: IndicatorKind,
+    /// Which series a rolling statistic normalizes, for the kinds that take
+    /// one (D-0080). `None` for every other kind.
+    pub source: Option<RollingSource>,
     pub(crate) axes: Vec<ResolvedAxis>,
 }
 
@@ -274,8 +362,9 @@ impl Slot {
     /// Warmup is monotone in `period` for every kind, so this is the max of
     /// the period axis — no need to walk the cartesian product.
     pub(crate) fn max_warmup_bars(&self) -> usize {
+        let extra = self.source.map_or(0, RollingSource::extra_warmup_bars);
         match &self.axes[0] {
-            ResolvedAxis::Int(periods) => periods.iter().copied().max().unwrap_or(0),
+            ResolvedAxis::Int(periods) => periods.iter().copied().max().unwrap_or(0) + extra,
             ResolvedAxis::Float(_) => {
                 unreachable!("INVARIANT: axis 0 of every kind is the integer period")
             }
@@ -306,6 +395,16 @@ impl Slot {
                     }
                 };
                 IndicatorParams::Bollinger { period, k }
+            }
+            IndicatorKind::ZScore | IndicatorKind::Stdev => {
+                let source = self
+                    .source
+                    .expect("INVARIANT: ComboSpec::new gives every rolling slot a source");
+                if self.kind == IndicatorKind::ZScore {
+                    IndicatorParams::ZScore { period, source }
+                } else {
+                    IndicatorParams::Stdev { period, source }
+                }
             }
         }
     }
@@ -364,8 +463,14 @@ impl ComboSpec {
         for (name, spec) in slots {
             check_slot_name(&name)?;
             let kind = spec.kind();
+            let source = spec.source();
             let axes = materialize(&name, &spec)?;
-            resolved.push(Slot { name, kind, axes });
+            resolved.push(Slot {
+                name,
+                kind,
+                source,
+                axes,
+            });
         }
 
         let decls: Vec<SlotDecl> = resolved
@@ -424,6 +529,12 @@ impl ComboSpec {
         let _ = writeln!(out, "qty {}", self.qty.0);
         for slot in &self.slots {
             let _ = write!(out, "slot {} {}", slot.name, slot.kind.name());
+            // The source is part of the slot's identity, not one of its axes:
+            // it does not expand, and two slots differing only in it are two
+            // different features (D-0012, D-0080).
+            if let Some(source) = slot.source {
+                let _ = write!(out, " source={}", source.name());
+            }
             for (name, axis) in slot.kind.param_names().iter().zip(&slot.axes) {
                 let _ = write!(out, " {name}=");
                 axis.render(&mut out);
@@ -483,6 +594,23 @@ fn materialize(slot: &str, spec: &IndicatorSpec) -> Result<Vec<ResolvedAxis>, Co
             Ok(vec![periods(slot, period)?])
         }
         IndicatorSpec::Bollinger { period, k } => Ok(vec![periods(slot, period)?, ks(slot, k)?]),
+        IndicatorSpec::ZScore { period, .. } | IndicatorSpec::Stdev { period, .. } => {
+            let axis = periods(slot, period)?;
+            // A one-bar window has zero spread, so every reading over it is
+            // 0/0. Refused here rather than left to the indicator's assert, so
+            // the message names the slot and arrives at config-load time.
+            if let ResolvedAxis::Int(values) = &axis
+                && let Some(bad) = values.iter().find(|v| **v < 2)
+            {
+                return Err(ComboError::AxisValueOutOfDomain {
+                    slot: slot.to_owned(),
+                    param: "period",
+                    value: bad.to_string(),
+                    reason: "a rolling window needs at least 2 bars; a one-bar window has zero                              spread, so every reading over it is 0/0",
+                });
+            }
+            Ok(vec![axis])
+        }
     }
 }
 
@@ -792,5 +920,142 @@ mod tests {
             }
         ));
         assert!(err.to_string().contains("unknown indicator slot"));
+    }
+}
+
+#[cfg(test)]
+mod rolling_slot_tests {
+    use super::*;
+
+    fn rules_for(slot: &str) -> RuleSource {
+        RuleSource {
+            enter_long: Some(format!("{slot} < -2")),
+            ..RuleSource::default()
+        }
+    }
+
+    fn spec(kind: IndicatorSpec) -> Result<ComboSpec, ComboError> {
+        ComboSpec::new(vec![("z".to_owned(), kind)], &rules_for("z"), Qty(1))
+    }
+
+    fn zscore(period: IntAxis, source: RollingSource) -> IndicatorSpec {
+        IndicatorSpec::ZScore { period, source }
+    }
+
+    /// The source is part of a slot's identity, not one of its axes: it does
+    /// not expand, and two slots differing only in it are different features
+    /// that must not share a config hash (D-0012, D-0080).
+    #[test]
+    fn the_source_reaches_the_canonical_form() {
+        let close = spec(zscore(IntAxis::Fixed(20), RollingSource::Close)).expect("valid");
+        let volume = spec(zscore(IntAxis::Fixed(20), RollingSource::Volume)).expect("valid");
+        assert_eq!(
+            close.canonical_form(),
+            "crucible-combo/1\nqty 1\nslot z zscore source=close period=[20]\n\
+             rule enter_long (z < -2.0)\n"
+        );
+        assert_ne!(close.canonical_form(), volume.canonical_form());
+
+        // ...and the kind is part of it too: a z-score and a standard
+        // deviation over the same window are not the same feature.
+        let stdev = spec(IndicatorSpec::Stdev {
+            period: IntAxis::Fixed(20),
+            source: RollingSource::Close,
+        })
+        .expect("valid");
+        assert_ne!(close.canonical_form(), stdev.canonical_form());
+    }
+
+    /// A one-bar window is refused at config-load time, naming the slot, rather
+    /// than left to the indicator's assert or to a lifetime of `None`.
+    #[test]
+    fn a_one_bar_rolling_window_is_refused() {
+        for period in [IntAxis::Fixed(1), IntAxis::List(vec![5, 1])] {
+            let err = spec(zscore(period, RollingSource::Close)).expect_err("period < 2");
+            assert!(
+                matches!(err, ComboError::AxisValueOutOfDomain { .. }),
+                "{err}"
+            );
+            assert!(err.to_string().contains("0/0"), "{err}");
+        }
+        // The control: two bars is the smallest window that has a spread.
+        assert!(spec(zscore(IntAxis::Fixed(2), RollingSource::Close)).is_ok());
+    }
+
+    /// §2.6 aligns a grid on `max_warmup_bars`, so the extra bar a return
+    /// source needs has to be *declared*, not absorbed — otherwise a grid
+    /// mixing sources would start its return-based combos one bar late while
+    /// reporting that they started with everyone else.
+    #[test]
+    fn a_return_source_adds_its_extra_bar_to_the_grids_warmup() {
+        let grid = |source| {
+            spec(zscore(IntAxis::List(vec![10, 30]), source))
+                .expect("valid")
+                .expand()
+                .expect("expands")
+        };
+        assert_eq!(grid(RollingSource::Close).max_warmup_bars(), 30);
+        assert_eq!(grid(RollingSource::Volume).max_warmup_bars(), 30);
+        assert_eq!(grid(RollingSource::Return).max_warmup_bars(), 31);
+        // And per combo, not just for the grid's max.
+        let returns = grid(RollingSource::Return);
+        assert_eq!(returns.combo(0).own_warmup_bars(), 11);
+        assert_eq!(returns.combo(1).own_warmup_bars(), 31);
+    }
+
+    /// **The structural half of D-0080.** No `IndicatorKind` is a full-sample
+    /// statistic, so no config can name one — which is why the leak in
+    /// `controls::LeakyZScore` is reachable from Rust and unreachable from
+    /// TOML.
+    ///
+    /// A list rather than a property, because the property is "someone thought
+    /// about each of these": adding a kind should make this test fail and force
+    /// the question "does it look at anything it has not been shown yet?".
+    #[test]
+    fn every_indicator_kind_is_streaming() {
+        let kinds = [
+            IndicatorKind::Sma,
+            IndicatorKind::Ema,
+            IndicatorKind::Bollinger,
+            IndicatorKind::ZScore,
+            IndicatorKind::Stdev,
+        ];
+        let names: Vec<&str> = kinds.iter().map(|k| k.name()).collect();
+        assert_eq!(names, ["sma", "ema", "bollinger", "zscore", "stdev"]);
+        // Each takes a positive window and produces its reading from bars it
+        // has already been shown; none has a constructor over a series. The
+        // enumeration is what makes that reviewable.
+        for kind in kinds {
+            assert!(!kind.param_names().is_empty(), "{}", kind.name());
+            assert_eq!(
+                kind.takes_source(),
+                matches!(kind, IndicatorKind::ZScore | IndicatorKind::Stdev),
+                "{}",
+                kind.name()
+            );
+        }
+    }
+
+    /// A rolling slot has one scalar output, referenced by bare name, and no
+    /// fields — the same shape as SMA and EMA.
+    #[test]
+    fn a_rolling_slot_has_one_scalar_output() {
+        for kind in [IndicatorKind::ZScore, IndicatorKind::Stdev] {
+            assert_eq!(kind.field(None), Some(SlotField::Value));
+            assert_eq!(kind.field(Some("mid")), None);
+        }
+        let err = ComboSpec::new(
+            vec![(
+                "z".to_owned(),
+                zscore(IntAxis::Fixed(20), RollingSource::Close),
+            )],
+            &RuleSource {
+                enter_long: Some("z.upper < 0".to_owned()),
+                ..RuleSource::default()
+            },
+            Qty(1),
+        )
+        .expect_err("a z-score has no bands");
+        assert!(err.to_string().contains("no field"), "{err}");
     }
 }

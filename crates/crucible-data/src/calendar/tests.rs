@@ -912,3 +912,134 @@ fn the_known_spurious_july_early_closes_are_exactly_these_six() {
         DayEffect::EarlyClose { .. }
     ));
 }
+
+// ------------------------------------------------------- the session clock
+
+const MINUTE_NS: i64 = 60 * 1_000_000_000;
+const HOUR_NS: i64 = 60 * MINUTE_NS;
+
+/// Hand-derived on PLAIN (17:00→16:00 CT, RTH 08:30–15:15).
+///
+/// Trading day 2024-01-03 opens 2024-01-02 17:00 CST = 23:00Z (1_704_236_400)
+/// and closes 2024-01-03 16:00 CST = 22:00Z (1_704_319_200) — 23 hours.
+///
+/// The bar under test is the **last** of that session: its interval ends
+/// exactly at the close, so `to_close_ns` is zero and `since_open_ns` is the
+/// whole 23 hours.
+///
+/// Its session is `PostRegular`, not `Closed`, and that is the reason the clock
+/// asks one nanosecond before `avail_ts`: open intervals are half-open, so a
+/// bar ending at 16:00:00 traded entirely inside the session it just closed.
+/// Asking at `avail_ts` would report the final bar of every trading day as
+/// closed, and "flatten on the last bar" would be a rule that never fires.
+#[test]
+fn the_session_clock_reads_the_last_bar_of_a_session() {
+    let cal = plain();
+    let clock = cal.session_clock(utc(1_704_319_200));
+    assert_eq!(clock.since_open_ns, 23 * HOUR_NS);
+    assert_eq!(clock.to_close_ns, 0);
+    assert_eq!(clock.session, SessionId::PostRegular);
+
+    // The first bar of the same session, one minute in: 17:01 CST.
+    let first = cal.session_clock(utc(1_704_236_400 + 60));
+    assert_eq!(first.since_open_ns, MINUTE_NS);
+    assert_eq!(first.to_close_ns, 23 * HOUR_NS - MINUTE_NS);
+    assert_eq!(first.session, SessionId::Overnight);
+    // Negative before the regular session, which is what lets a rule say
+    // "the first half hour of RTH" and mean it.
+    assert!(first.since_rth_open_ns < 0, "{first:?}");
+}
+
+/// The early close, and the control that makes it mean something.
+///
+/// SHAPED closes at 12:00 CT on Independence Day. 2024-07-04 was a Thursday, so
+/// the rule lands on the day itself: trading day 2024-07-04 opens 2024-07-03
+/// 17:00 CDT = 22:00Z (1_720_044_000) and closes 2024-07-04 12:00 CDT = 17:00Z
+/// (1_720_112_400) — 19 hours instead of 23.
+///
+/// A bar available at 11:00 CDT that day (16:00Z, 1_720_108_800) is therefore
+/// **one hour** from the close. The identical wall-clock bar on an ordinary
+/// Thursday a week earlier — 2024-06-27, 16:00Z, 1_719_504_000 — is **five**.
+/// Both are 18 hours from their session open, because an early close moves the
+/// close and never the open. The difference between 1 h and 5 h is the holiday,
+/// and it is the whole reason a strategy asks a calendar instead of subtracting
+/// from 16:00.
+#[test]
+fn the_session_clock_counts_down_to_an_early_close() {
+    let cal = shaped();
+    assert!(matches!(
+        cal.day_effect(d(2024, 7, 4)),
+        DayEffect::EarlyClose { .. }
+    ));
+
+    let holiday = cal.session_clock(utc(1_720_108_800));
+    assert_eq!(holiday.since_open_ns, 18 * HOUR_NS);
+    assert_eq!(holiday.to_close_ns, HOUR_NS);
+    assert_eq!(holiday.session, SessionId::Regular);
+
+    let ordinary = cal.session_clock(utc(1_719_504_000));
+    assert_eq!(ordinary.since_open_ns, 18 * HOUR_NS);
+    assert_eq!(ordinary.to_close_ns, 5 * HOUR_NS);
+    assert_eq!(ordinary.session, SessionId::Regular);
+}
+
+/// The regular-hours distances are measured against the **scheduled** window,
+/// so they stay positive past an early close.
+///
+/// Deliberate, and the pair of readings says so: on 2024-07-04 the exchange has
+/// been shut for an hour by 13:00 CDT (18:00Z, 1_720_116_000) — `to_close_ns`
+/// is −1 h and `session` is `Closed` — while `to_rth_close_ns` still reads
+/// 2¼ h, because 15:15 CT is when the regular session was *scheduled* to end.
+/// A rule that wants "the market is open" asks `session`; one that wants "how
+/// far into the trading day are we" asks the RTH clock. Collapsing them would
+/// make one of the two questions unaskable.
+#[test]
+fn regular_hours_are_scheduled_hours_not_actual_ones() {
+    let cal = shaped();
+    let after_the_early_close = cal.session_clock(utc(1_720_116_000));
+    assert_eq!(after_the_early_close.to_close_ns, -HOUR_NS);
+    assert_eq!(after_the_early_close.session, SessionId::Closed);
+    // 13:00 CDT to the scheduled 15:15 CDT close is 2 h 15 min.
+    assert_eq!(
+        after_the_early_close.to_rth_close_ns,
+        2 * HOUR_NS + 15 * MINUTE_NS
+    );
+}
+
+/// `session_open` and `session_close` are the same two instants
+/// `open_intervals` is built from, so a bucket grid and a coverage check cannot
+/// disagree about when a session ran.
+#[test]
+fn the_session_endpoints_are_the_ones_open_intervals_uses() {
+    for cal in [plain(), shaped()] {
+        for day in 1..=8 {
+            let date = d(2024, 1, day);
+            let intervals = cal.open_intervals(date);
+            if intervals.is_empty() {
+                continue;
+            }
+            assert_eq!(intervals[0].0, cal.session_open(date), "{date}");
+            assert_eq!(
+                intervals[intervals.len() - 1].1,
+                cal.session_close(date),
+                "{date}"
+            );
+        }
+    }
+}
+
+/// The halt refusal `resample` makes rests on this, so it has to be true of the
+/// fixtures and of the bundled tables.
+#[test]
+fn halts_are_declared_where_they_exist_and_nowhere_else() {
+    assert!(!plain().declares_halts());
+    assert!(shaped().declares_halts());
+    for id in Calendar::bundled_ids().expect("bundled tables parse") {
+        let cal = Calendar::by_id(&id).expect("bundled table loads");
+        assert!(
+            !cal.declares_halts(),
+            "{id} declares a halt; `resample` now refuses it, and D-0077's \
+             per-day bucket anchor needs revisiting"
+        );
+    }
+}

@@ -39,6 +39,7 @@ use crucible_funnel::walkforward::{FoldError, FoldSpec};
 use crucible_strategies::combo::{
     ComboError, ComboSpec, ConfigHash, FloatAxis, Grid, IndicatorSpec, IntAxis, RuleSource,
 };
+use crucible_strategies::indicators::RollingSource;
 use serde::Deserialize;
 
 /// The only schema version this build understands.
@@ -149,6 +150,23 @@ pub enum IndicatorCfg {
         period: IntAxisCfg,
         /// Band width in population standard deviations.
         k: FloatAxisCfg,
+    },
+    /// Trailing-window z-score of a declared source (D-0080).
+    Zscore {
+        /// Window length in bars.
+        period: IntAxisCfg,
+        /// `close`, `volume` or `return`. **Required**: "the z-score of what"
+        /// is not a detail worth defaulting, and two slots differing only in it
+        /// are two different features.
+        source: String,
+    },
+    /// Trailing-window population standard deviation of a declared source
+    /// (D-0080).
+    Stdev {
+        /// Window length in bars.
+        period: IntAxisCfg,
+        /// `close`, `volume` or `return`.
+        source: String,
     },
 }
 
@@ -559,6 +577,27 @@ pub fn load(path: &Path) -> Result<LoadedConfig, ConfigError> {
             message: e.to_string(),
         })?;
 
+    // `source` is the one indicator field that is a name rather than a number,
+    // so it is checked here — where a `ConfigError` can name the slot — before
+    // the transcription below, which has no error channel (D-0060, D-0080).
+    for (name, cfg) in &file.indicators {
+        if let Some(source) = cfg.declared_source()
+            && RollingSource::parse(source).is_none()
+        {
+            return Err(ConfigError::Field {
+                field: "indicators.<slot>.source",
+                message: format!(
+                    "slot {name:?} declares source = {source:?}; a rolling statistic                      normalizes one of: {}. There is no default, because \"the z-score of                      what\" is not a detail — two slots differing only in it are two                      different features",
+                    RollingSource::all()
+                        .iter()
+                        .map(|s| s.name())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            });
+        }
+    }
+
     let slots: Vec<(String, IndicatorSpec)> = file
         .indicators
         .iter()
@@ -594,6 +633,18 @@ pub fn load(path: &Path) -> Result<LoadedConfig, ConfigError> {
 }
 
 impl IndicatorCfg {
+    /// The `source` string this slot declared, for the kinds that take one.
+    const fn declared_source(&self) -> Option<&String> {
+        match self {
+            IndicatorCfg::Sma { .. }
+            | IndicatorCfg::Ema { .. }
+            | IndicatorCfg::Bollinger { .. } => None,
+            IndicatorCfg::Zscore { source, .. } | IndicatorCfg::Stdev { source, .. } => {
+                Some(source)
+            }
+        }
+    }
+
     /// Transcribes into the strategies crate's plain-data spec. No judging
     /// happens here — [`ComboSpec::new`] owns every domain rule, including the
     /// refusal of [`FloatAxisCfg::Range`].
@@ -608,6 +659,17 @@ impl IndicatorCfg {
             IndicatorCfg::Bollinger { period, k } => IndicatorSpec::Bollinger {
                 period: period.to_axis(),
                 k: k.to_axis(),
+            },
+            // `source` is validated in `load`, before this runs, because a
+            // transcription cannot report an error and this module does no
+            // judging of its own (D-0060).
+            IndicatorCfg::Zscore { period, source } => IndicatorSpec::ZScore {
+                period: period.to_axis(),
+                source: RollingSource::parse(source).unwrap_or(RollingSource::Close),
+            },
+            IndicatorCfg::Stdev { period, source } => IndicatorSpec::Stdev {
+                period: period.to_axis(),
+                source: RollingSource::parse(source).unwrap_or(RollingSource::Close),
             },
         }
     }
