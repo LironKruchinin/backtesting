@@ -124,7 +124,10 @@
 //! - **`ManifestRecord.symbols` is the requested key plus every raw symbol
 //!   observed in the delivered file's DBN metadata** (D-0033). Recording only
 //!   the key would make `coverage("ESU6")` report the full range as missing
-//!   and re-buy it forever.
+//!   and re-buy it forever. Only the *key* has to survive the path-component
+//!   rule; the rest are coverage data and may carry the spaces and colons CME
+//!   puts in spread names (D-0066). [`supplement`] repairs records written
+//!   before that distinction existed.
 //! - **A delivery is verified before it is placed** (D-0031): the catalog
 //!   hashes whatever is on disk, so an unchecked truncated download would be
 //!   recorded and thereafter certified by the manifest as the real thing.
@@ -144,6 +147,7 @@ pub mod money;
 pub mod plan;
 pub mod provider;
 pub mod quote;
+pub mod supplement;
 pub mod window;
 
 pub use clock::Clock;

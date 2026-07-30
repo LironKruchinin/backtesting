@@ -10,23 +10,32 @@
 //! 1. **Reject unaligned windows.** Both bounds must be UTC midnight. This
 //!    is not fussiness — the archive path template names a window, and an
 //!    unaligned window has no unambiguous name (see [`super::window`]).
-//! 2. **Clip to the provider's dataset range**, fetched live rather than
+//! 2. **Reject a requested key that cannot be a path component**, via
+//!    [`check_symbol_key`](crate::catalog::check_symbol_key). This module owns
+//!    the check because this module is the only place a symbol becomes a
+//!    directory name — `raw/{dataset}/{schema}/{key}/{stem}.dbn.zst` — and the
+//!    check runs before the (free) provider call, so an unarchivable key costs
+//!    nothing at all. It used to happen incidentally inside
+//!    [`Catalog::coverage`](crate::catalog::Catalog::coverage), which had to
+//!    stop banning spaces so that vendor spread names could be recorded and
+//!    credited at all (D-0066); the guard moved here rather than disappearing.
+//! 3. **Clip to the provider's dataset range**, fetched live rather than
 //!    hardcoded. `mbo` begins in 2017 while everything else begins in 2010;
 //!    baking those dates into the source means they are wrong the first time
 //!    the vendor extends history, and a request for data that does not exist
 //!    is an error worth catching before it is priced.
-//! 3. **Subtract what we own**, via
-//!    [`Catalog::coverage`](crate::catalog::Catalog::coverage) — which
-//!    validates the request with the same rules as an append (D-0020),
-//!    because a symbol with a stray space matches no record and would
-//!    otherwise report the whole range as missing and re-buy it.
-//! 4. **Cut the remaining gaps into month-aligned windows** and name them.
-//! 5. **Verify the windows tile the gaps exactly.** Pure, free, and the
-//!    cheapest possible place to catch an off-by-one in step 4: a plan that
+//! 4. **Subtract what we own**, via
+//!    [`Catalog::coverage`](crate::catalog::Catalog::coverage) — which still
+//!    validates the request (D-0020), because an unusable symbol matches no
+//!    record and would otherwise report the whole range as missing and re-buy
+//!    it.
+//! 5. **Cut the remaining gaps into month-aligned windows** and name them.
+//! 6. **Verify the windows tile the gaps exactly.** Pure, free, and the
+//!    cheapest possible place to catch an off-by-one in step 5: a plan that
 //!    skips an hour buys an archive with a hole, and a plan that overlaps
 //!    buys the same bytes twice.
 //!
-//! Step 5 deserves its own note. It is tempting to check window splitting by
+//! Step 6 deserves its own note. It is tempting to check window splitting by
 //! comparing the sum of per-window quotes against one aggregate quote from
 //! the vendor. That costs a network round trip to test arithmetic we already
 //! control, and it cannot distinguish a splitting bug from a pricing
@@ -35,7 +44,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::catalog::{Catalog, CoverageRequest, TsRange};
+use crate::catalog::{Catalog, CoverageRequest, TsRange, check_symbol_key};
 use crate::ingest::error::IngestError;
 use crate::ingest::provider::{BatchProvider, QuoteQuery, StypeIn};
 use crate::ingest::window;
@@ -158,6 +167,8 @@ impl PullPlan {
 /// # Errors
 /// - [`IngestError::InvalidWindow`] if the requested range is not
 ///   UTC-midnight aligned on both ends.
+/// - [`IngestError::Catalog`] if a requested symbol key could not be a path
+///   component (checked before the provider call, so it costs nothing).
 /// - [`IngestError::Provider`] if the dataset range cannot be fetched.
 ///   Planning refuses rather than assuming a range.
 /// - [`IngestError::WindowOutsideDatasetRange`] if nothing requested is
@@ -182,6 +193,13 @@ pub fn plan(
             reason: "both bounds must be UTC midnight; the archive path \
                      template cannot name a sub-day window unambiguously",
         });
+    }
+
+    // Every requested symbol becomes a `{key}` directory below, so every one of
+    // them must survive the path-component rule. Before the provider call by
+    // design: a key that cannot be archived must cost nothing, not a quote.
+    for key in &request.symbols {
+        check_symbol_key(key)?;
     }
 
     let available = provider
@@ -400,6 +418,47 @@ mod tests {
                 file_path: rel,
             })
             .expect("append owned slice");
+    }
+
+    #[test]
+    fn a_requested_key_that_cannot_be_a_path_is_refused_before_the_provider() {
+        // The money guard, and the planted control for D-0066's narrowing: the
+        // *key* becomes `{key}` in `raw/{dataset}/{schema}/{key}/{stem}.dbn.zst`,
+        // so a key carrying a space, a separator or a colon must stop the pull —
+        // and stop it before even the free provider call, let alone a quote.
+        // (Before D-0066 this happened incidentally inside `coverage`, which now
+        // has to accept spaces so vendor spread names can be credited at all.)
+        let dir = TempDir::new();
+        let catalog = empty_catalog(&dir);
+        for bad_key in ["CL:BF F0-G0-H0", "ES FUT", "ES/FUT", "ES:FUT", ".."] {
+            let mut provider = FakeProvider::new(glbx_range());
+            let result = plan(
+                &catalog,
+                &mut provider,
+                &request(&[bad_key], dates((2024, 1, 1), (2024, 2, 1))),
+            );
+            assert!(
+                matches!(result, Err(IngestError::Catalog(_))),
+                "key {bad_key:?} must be refused, got {result:?}"
+            );
+            assert!(
+                provider.calls.is_empty(),
+                "key {bad_key:?} must be refused before the provider is touched, \
+                 calls: {:?}",
+                provider.calls
+            );
+        }
+        // A second key being bad refuses the whole plan, not just its own share.
+        let mut provider = FakeProvider::new(glbx_range());
+        assert!(matches!(
+            plan(
+                &catalog,
+                &mut provider,
+                &request(&["ES.FUT", "ES FUT"], dates((2024, 1, 1), (2024, 2, 1))),
+            ),
+            Err(IngestError::Catalog(_))
+        ));
+        assert!(provider.calls.is_empty());
     }
 
     #[test]

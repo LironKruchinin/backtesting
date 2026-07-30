@@ -1147,25 +1147,34 @@ mod tests {
         let mut provider = FakeProvider::new(glbx());
         let inspector = FakeInspector::new().with_symbols(
             &delivered_name(),
-            // Deliberately unsorted, with the key repeated and one symbol the
-            // catalog would reject outright.
-            &["ESM4", "ES.FUT", "ESH4", "ES BAD"],
+            // Deliberately unsorted, with the key repeated, one real CME spread
+            // name (spaces and colons — recordable since D-0066) and one symbol
+            // the catalog still rejects outright.
+            &["ESM4", "ES.FUT", "ESH4", "CL:BF F0-G0-H0", "ES\tBAD"],
         );
         let report = run(&dir, &mut provider, &inspector, &clock(), &opts()).expect("execute");
 
         assert_eq!(
             report.acquired[0].symbols,
-            vec!["ES.FUT".to_string(), "ESH4".to_string(), "ESM4".to_string()],
+            vec![
+                "ES.FUT".to_string(),
+                "CL:BF F0-G0-H0".to_string(),
+                "ESH4".to_string(),
+                "ESM4".to_string()
+            ],
             "requested key first, then observed contracts, sorted and deduped"
         );
-        assert_eq!(report.dropped_symbols, vec!["ES BAD".to_string()]);
+        assert_eq!(report.dropped_symbols, vec!["ES\tBAD".to_string()]);
         assert!(
-            report.to_string().contains("ES BAD"),
+            report.to_string().contains("ES\tBAD"),
             "an omitted symbol must be visible, not swallowed: {report}"
         );
 
-        // The point of the union: a contract-level query is now covered.
+        // The point of the union: a contract-level query is now covered — and
+        // so is the spread, which the old whitespace ban would have dropped
+        // (D-0066: 21,736 symbols were lost exactly here).
         assert!(coverage_gaps(&dir, "ESH4").is_empty());
+        assert!(coverage_gaps(&dir, "CL:BF F0-G0-H0").is_empty());
         assert_eq!(coverage_gaps(&dir, "ESU4"), vec![jan()], "not in this file");
     }
 
