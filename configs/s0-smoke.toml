@@ -1,0 +1,115 @@
+# The S0 null harness: the same seeded random walk as `combo-smoke.toml`, with
+# the predictor stage declared. A trailing 20-bar z-score of the close on a
+# random walk predicts nothing, so the honest S0 answer is |IC| ~ 0 and a KILL
+# at s0 — anything else here is a bug in the join, not an edge (D-0085).
+#
+#   crucible funnel --config configs/s0-smoke.toml
+#   crucible funnel --config configs/s0-smoke.toml --out results --hash-only
+#
+# The last form is the S0 determinism gate.
+
+schema_version = 1
+
+[meta]
+name = "syn-sma-cross-null"
+hypothesis_family = "null-harness-sma-cross"
+economic_rationale = "None, deliberately: the feed is a seeded random walk, so this config exists to prove the machinery is deterministic and fair, never to find edge."
+
+[universe]
+# The synthetic random walk emits SYN:RW, and the config has to say so — a
+# contract spec labelled with an instrument the feed never emits is a header
+# that lies.
+instruments = ["SYN:RW"]
+timeframes = ["1m"]
+
+[data]
+source = "synthetic"
+# Seeds the bar generator (SplitMix64, D-0011). Distinct from [run] seed,
+# which seeds strategy randomness — no strategy takes one yet.
+seed = 42
+bars = 20000
+start_price_points = "5000"
+vol_ticks = 4
+
+[contract]
+tick_points = "0.25"
+point_value_usd = 50
+
+[indicators.fast]
+kind = "sma"
+period = [10, 20]
+
+[indicators.slow]
+kind = "sma"
+period = { start = 50, end = 100, step = 25 }
+
+# Stop-and-reverse: the same crossover exits one side and enters the other, so
+# a cross emits one order for twice the size. This is `SmaCross` written in
+# TOML, and there is a test asserting the two produce identical intents.
+[indicators.z]
+kind = "zscore"
+period = 20
+source = "close"
+
+[rules]
+enter_long = "fast crosses_above slow"
+exit_long = "fast crosses_below slow"
+enter_short = "fast crosses_below slow"
+exit_short = "fast crosses_above slow"
+
+[execution]
+fill_model = "spread_cross"
+half_spread_ticks = 1
+fee_per_contract_usd = "1.25"
+
+# Folds for `crucible walk-forward`, in TRADING DAYS (D-0062). The synthetic
+# feed has no exchange, so "trading day" here means UTC civil day and the
+# command says so on every run. 20,000 1m bars is just under 14 of them.
+[walk_forward]
+scheme = "rolling"
+train_days = 5
+test_days = 2
+step_days = 2
+
+# Pre-registered kill criteria for `crucible funnel`, written BEFORE the run
+# and stored verbatim on the registry row that is inserted before the run.
+#
+# This config is the null harness, so the honest thresholds are the ones a
+# random walk fails: the sample minimums are set low enough that the 20,000-bar
+# fixture reaches them (so the gates are actually exercised rather than
+# short-circuiting at S0), and the performance bars are set where a real idea
+# would have to clear them. A run of this file that reports anything other than
+# KILL for every combo is a bug in the engine, not an edge.
+# S0's pre-registration. Declared BEFORE the run, like every other criterion
+# here (D-0085). `z` is a trailing z-score of the close, so the score is
+# point-in-time by construction; the horizons are minutes because `ohlcv` has
+# no bar for an interval that did not trade.
+[s0]
+score = "z"
+horizons_minutes = [1, 5, 10, 20]
+buckets = 5
+bootstrap_draws = 500
+min_abs_ic = 0.02
+
+[funnel]
+# s0 runs here (D-0085). s3 is still NOT implemented, and a config naming it
+# is refused rather than silently skipped.
+stages = ["s0", "s1", "s2"]
+# Mandatory, all four levels (CLAUDE.md §2.4). Every entry must be a whole
+# number of half-ticks — a price grid has half-ticks, not tenths (D-0073).
+cost_sensitivity_ticks = [0.0, 0.5, 1.0, 2.0]
+min_oos_trades = 5
+min_oos_sessions = 4
+min_oos_return_pct_free_fills = 0.0
+min_oos_sharpe_after_costs = 0.5
+kill_if_dead_at_ticks = 1.0
+require_controls_beaten = true
+# Declared and echoed; NOT evaluated by this build, which is why the scorecard
+# renders both as named holes rather than leaving them out.
+max_pbo = 0.5
+require_plateau = true
+
+[run]
+seed = 42
+initial_cash_usd = "100000"
+qty_contracts = 1

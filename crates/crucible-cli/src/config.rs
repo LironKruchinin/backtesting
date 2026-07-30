@@ -68,6 +68,9 @@ pub struct ConfigFile {
     /// The fold layout. Consumed by `crucible walk-forward`; named as
     /// unconsumed by every other command that prints a report.
     pub walk_forward: Option<WalkForward>,
+    /// What S0 measures, required when — and only when — `[funnel].stages`
+    /// declares `s0` (D-0085).
+    pub s0: Option<S0Cfg>,
     /// Declared; consumed by `crucible funnel` (M3).
     pub funnel: Option<FunnelCfg>,
     /// Run-level settings.
@@ -287,6 +290,34 @@ impl WalkForward {
 /// rationalization with a number in it. The funnel prints these back at the
 /// top of every scorecard, next to the verdict they produced, so a reader can
 /// check that the bar was set before the jump.
+/// What the S0 predictor stage measures, declared **before** the run
+/// (D-0085).
+///
+/// This block is required exactly when `[funnel].stages` contains `s0`, and
+/// refused when it does not. A declared-but-unrun block is a config that thinks
+/// it asked for something; a stage with no block is a stage with no criteria,
+/// which is the thing pre-registration exists to prevent.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct S0Cfg {
+    /// The indicator slot the continuous score is read from — `"z"` for a
+    /// scalar indicator, `"bb.upper"` for one with bands. The slot must be one
+    /// of `[indicators]`.
+    pub score: String,
+    /// Forward horizons, in **minutes**. Written in minutes rather than bars
+    /// because `ohlcv` has no bar for an interval that did not trade, so a bar
+    /// count is a different question on every grain (D-0082).
+    pub horizons_minutes: Vec<u32>,
+    /// Equal-count quantile buckets of the score.
+    pub buckets: usize,
+    /// Block-bootstrap resamples, over whole sessions.
+    pub bootstrap_draws: usize,
+    /// **Pre-registered kill criterion**: the smallest `|IC|` at any declared
+    /// horizon that counts as a relationship. Below it at every horizon, the
+    /// score predicts nothing and nothing downstream can rescue it.
+    pub min_abs_ic: f64,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FunnelCfg {
@@ -337,7 +368,7 @@ impl FunnelCfg {
     /// judgeable before a bar is replayed is judged here, because a criterion
     /// that turns out to be unevaluable after an hour of grid replay has
     /// already cost the hour.
-    pub fn to_criteria(&self) -> Result<Criteria, ConfigError> {
+    pub fn to_criteria(&self, s0_min_abs_ic: Option<f64>) -> Result<Criteria, ConfigError> {
         Criteria::new(&CriteriaSource {
             stages: &self.stages,
             cost_sensitivity_ticks: &self.cost_sensitivity_ticks,
@@ -347,6 +378,7 @@ impl FunnelCfg {
             min_oos_sharpe_after_costs: self.min_oos_sharpe_after_costs,
             kill_if_dead_at_ticks: self.kill_if_dead_at_ticks,
             require_controls_beaten: self.require_controls_beaten,
+            s0_min_abs_ic,
             max_pbo: self.max_pbo,
             require_plateau: self.require_plateau,
         })

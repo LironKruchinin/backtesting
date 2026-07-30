@@ -2413,3 +2413,74 @@ propose a superseding entry — don't silently diverge.
   hashes `1b6ac5e72c106c0b` and under the new one `8c6d9ed042df24b3`. So the
   label is live in the hash, the null harness simply never visits it — and no
   re-pin was manufactured to make the change look bigger than it is.
+- **D-0085** (2026-07-31) — **The S0 caller: a config declares what to measure,
+  a combo emits the score, the registry charges the trial, and the `s0` refusal
+  lifts.** The second half of D-0081's seam; D-0082 was the measurement.
+  **Score extraction.** `crucible-strategies::combo::ComboScorer` is a
+  *score-emitting* projection of the same `ComboSpec` and `Combo` the strategy
+  is built from — one continuous reading per bar, no orders, no position, no
+  fills. Built from the same spec rather than a parallel definition, so the two
+  cannot drift. The score is a named indicator slot (`"z"`, or `"bb.upper"` for
+  a banded one); every indicator in that crate is trailing by construction
+  (D-0080), which is what makes a score at `avail_ts` computable only from what
+  was available then — the property the forward-return join depends on and
+  cannot itself check.
+  **The config surface.** `[s0]` carries `score`, `horizons_minutes`, `buckets`,
+  `bootstrap_draws` and `min_abs_ic`, under `deny_unknown_fields`. It is
+  required **exactly when** `stages` declares `s0` and refused when it does not:
+  a stage with no block is a stage with no pre-registration, and a block for a
+  stage nobody asked for is a config that thinks it asked for something. Both
+  refusals name themselves. Horizons are **minutes**, not bars, for D-0082's
+  reason: `ohlcv` has no bar for an interval that did not trade.
+  **The criterion needs BOTH halves at ONE horizon** — `|IC| >= min_abs_ic`
+  *and* a mean forward return whose bootstrap interval excludes zero — and this
+  is the one design change the null harness itself forced. The first version
+  read `|IC|` alone; run against 20,000 bars of seeded random walk it measured
+  `|IC| = 0.0378` and **passed** a 0.02 bar. Size without significance is what a
+  large enough sample of noise gives away for free, and significance without
+  size is an effect too small to trade. The threshold was *not* raised to make
+  the harness fail — that would have been fitting the number to the fixture, the
+  direction §9's seed-29 rule forbids. The criterion was made correct instead,
+  and the null harness now reads `0 of 6 combo(s) cleared S0`.
+  **It is a gate, not a report beside one.** S0 runs ahead of S1/S2, its reading
+  reaches `Evidence`, and `assess` evaluates it directly after admission and
+  before S1 — so a score that predicts nothing is dead before any equity curve
+  is judged, which is the entire argument for a predictor-first stage. Every
+  combo gets a registry row claimed *before* it is measured and a trial charged
+  to `meta.hypothesis_family`, exactly like S1 and S2; `fill_model` records
+  `"none (s0 takes no position)"` rather than leaving the field to imply one
+  (§2.4). On the null harness the funnel now exits 5 with all six combos
+  **KILL at s0**.
+  **The refusal lifts here and nowhere earlier.** `Stage::S0::is_implemented()`
+  is true, a config declaring `s0` is accepted, and
+  `research/backlog/H-008-short-horizon-overreaction.md` is unblocked — all in
+  this commit, which is what D-0075 and D-0081 both asked for.
+  **The S0 determinism hash is `91107aeb6e6802c0`**, from `crucible funnel
+  --config configs/s0-smoke.toml --out results --hash-only`. Its inputs: the
+  `configs/combo-smoke.toml` seeded random walk (`[data] source = "synthetic"`,
+  **seed 42**, 20,000 bars, start 4000.00 points, 1-tick vol), a 6-point
+  SMA-crossover grid plus `zscore(period=20, source="close")` as the score,
+  horizons 1/5/10/20 minutes, 5 buckets, 500 bootstrap draws, `min_abs_ic =
+  0.02`, and `[run].seed = 42`. Each combo's bootstrap seed derives from
+  `derive_run_seed(config_hash, root_seed, account, combo_index, 0)` XOR a
+  per-horizon constant, so two horizons of one combo never share a resample
+  (D-0064). **The three engine hashes and the pre-existing funnel hash are
+  unmoved** — S0 evidence enters `verdict_hash` only when a config declares
+  `s0`, so every gate pinned before today still answers what it answered.
+  **The negative control, end to end through the CLI.** D-0082's controls test
+  the join; once a caller exists they are decoration on their own. The same
+  `configs/s0-smoke.toml` command was run with the join correct and with a leak
+  planted in it (the score replaced by the forward return it is about to be
+  joined to): **IC −0.0378 → +1.0000** at every horizon, restored byte-exactly
+  afterwards and re-measured at −0.0378. `s0_runs_end_to_end_and_kills_the_null_
+  harness_at_s0` pins the silent side permanently. The firing side stays a
+  **watched mutation rather than a permanent test**, and deliberately: making a
+  leak reachable from TOML is exactly what D-0080 refuses, so there is no config
+  that can plant one. That is a real limitation and it is written down rather
+  than papered over.
+  **What the leak does NOT do, which is worth knowing.** It moves the IC to
+  1.0000 and does *not* flip the verdict: the mean forward return of a
+  zero-drift walk is still indistinguishable from zero, so the significance half
+  still fails and the combo is still killed. S0's *verdict* is therefore not a
+  leak detector — the IC readout is. Detecting a leak is the permutation and
+  truncation harnesses' job, which is `stats` and still owed.

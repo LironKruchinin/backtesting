@@ -1,7 +1,8 @@
 //! S0 — signal triage: a score goes in, forward-return evidence comes out, and
 //! **nothing trades**.
 //!
-//! This module is the measurement half of the S0 predictor seam (D-0081). It
+//! This module is the S0 predictor seam (D-0081): the measurement (D-0082) and,
+//! below, the stage that calls it (D-0085). It
 //! answers the only question worth asking before an equity curve exists: *does
 //! this score predict the return that follows it, at what horizon, and by how
 //! much* — with no orders, no fills, no portfolio and no fill model, because
@@ -440,3 +441,268 @@ pub fn block_bootstrap_mean(pairs: &[Pair], draws: usize, seed: u64) -> Option<I
 
 #[cfg(test)]
 mod tests;
+
+// ---------------------------------------------------------------------------
+// The caller: S0 as a funnel stage (D-0085)
+// ---------------------------------------------------------------------------
+
+/// What S0 was asked to measure, declared in the config's `[s0]` block before
+/// the run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct S0Spec {
+    /// The indicator slot the score is read from, e.g. `z` or `bb.upper`.
+    pub score_slot: String,
+    /// Forward horizons, in nanoseconds, in the order declared.
+    pub horizons_ns: Vec<i64>,
+    /// Quantile buckets of the score.
+    pub buckets: usize,
+    /// Bootstrap resamples.
+    pub bootstrap_draws: usize,
+    /// **Pre-registered**: the smallest `|IC|` at a declared horizon that
+    /// counts as a relationship.
+    ///
+    /// A relationship needs **both** halves: `|IC| >= min_abs_ic` *and* a mean
+    /// forward return whose bootstrap interval excludes zero, at the **same**
+    /// horizon. Size without significance is what a large enough sample of
+    /// noise produces for free — the null harness measures `|IC| = 0.0378` on
+    /// 20,000 bars of seeded random walk, which would clear any bar low enough
+    /// to be useful. Significance without size is an effect too small to trade.
+    /// Requiring both at one horizon is what makes this a gate rather than a
+    /// formality (D-0085).
+    pub min_abs_ic: f64,
+}
+
+/// One horizon's evidence about one combo.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HorizonEvidence {
+    /// The horizon, in nanoseconds.
+    pub horizon_ns: i64,
+    /// Score/return pairs that survived the join.
+    pub n_pairs: usize,
+    /// Scores whose window ran off the end of the series, or had no partner.
+    pub dropped: usize,
+    /// Spearman rank correlation, or `None` when there was nothing to
+    /// correlate.
+    pub ic: Option<f64>,
+    /// Equal-count buckets of the score, lowest first.
+    pub buckets: Vec<Bucket>,
+    /// Block-bootstrap interval for the mean forward return.
+    pub interval: Option<Interval>,
+}
+
+/// One combo's S0 evidence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct S0ComboReport {
+    /// Index into the expanded grid.
+    pub combo_index: usize,
+    /// Human-readable parameters.
+    pub label: String,
+    /// Bars consumed before the score had an opinion.
+    pub warmup_bars: usize,
+    /// Scores emitted (post-warmup bars).
+    pub scores: usize,
+    /// One entry per declared horizon, in declaration order.
+    pub horizons: Vec<HorizonEvidence>,
+    /// The largest `|IC|` across horizons, reported whether or not it was
+    /// significant.
+    pub best_abs_ic: Option<f64>,
+    /// The first horizon (in nanoseconds) that cleared BOTH halves of the
+    /// criterion, if any. `None` is the null-harness answer.
+    pub cleared_at_ns: Option<i64>,
+    /// Whether the pre-registered relationship criterion was met.
+    pub passed: bool,
+}
+
+/// The whole S0 stage over a grid.
+#[derive(Debug, Clone, PartialEq)]
+pub struct S0Report {
+    /// One entry per combo, in grid-index order.
+    pub combos: Vec<S0ComboReport>,
+    /// The slot the score was read from.
+    pub score_slot: String,
+    /// Combos whose evidence cleared the criterion.
+    pub survivors: usize,
+}
+
+/// Anything that stops S0 from running.
+#[derive(Debug)]
+pub enum S0Error {
+    /// The score slot could not be resolved against the config's indicators.
+    Scorer(crucible_strategies::combo::ScorerError),
+    /// The registry could not be claimed or written.
+    Registry(crate::registry::RegistryError),
+}
+
+impl std::fmt::Display for S0Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            S0Error::Scorer(e) => write!(f, "s0: {e}"),
+            S0Error::Registry(e) => write!(f, "s0: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for S0Error {}
+
+impl From<crate::registry::RegistryError> for S0Error {
+    fn from(e: crate::registry::RegistryError) -> S0Error {
+        S0Error::Registry(e)
+    }
+}
+
+/// Everything S0 needs, supplied by the caller. No clock, no I/O.
+pub struct S0Inputs<'a> {
+    /// The shared bar series, in availability order.
+    pub events: &'a [crucible_core::prelude::MarketEvent],
+    /// One trading-day key per bar, the caller-computed slice (D-0071).
+    pub day_keys: &'a [i64],
+    /// The expanded grid.
+    pub grid: &'a crucible_strategies::combo::Grid,
+    /// The spec the grid came from.
+    pub spec: &'a crucible_strategies::combo::ComboSpec,
+    /// What to measure, declared before the run.
+    pub s0: &'a S0Spec,
+    /// Config hash, root seed, account.
+    pub identity: &'a crate::walkforward::RunIdentity,
+    /// The pre-registered criteria, stored verbatim on the registry row.
+    pub criteria: &'a crate::stages::Criteria,
+    /// `meta.hypothesis_family`. Mandatory: an S0 report that charged no family
+    /// is a measurement nobody counted.
+    pub hypothesis_family: &'a str,
+    /// Repository revision (§2.5).
+    pub git_sha: &'a str,
+    /// blake3 of every archived file the series was read from (§2.5).
+    pub data_manifest_ids: &'a [String],
+    /// Wall clock, supplied by the caller.
+    pub now: &'a str,
+}
+
+/// Runs S0 over a grid: score, join, measure, and **record**.
+///
+/// Every combo gets a registry row claimed *before* it is measured and a trial
+/// charged to `hypothesis_family`, exactly like S1 and S2 — an S0 report that
+/// existed outside the registry would be a number nobody counted, which is the
+/// whole reason the predictor workbench arrives as a funnel stage rather than
+/// beside one (D-0081).
+///
+/// Single-threaded on purpose: S0 is one streaming pass per combo with no
+/// replay behind it, so there is nothing here for rayon to win back.
+///
+/// # Errors
+/// [`S0Error::Scorer`] if the declared score slot does not resolve;
+/// [`S0Error::Registry`] if a row cannot be claimed or written.
+pub fn run_s0(
+    inputs: &S0Inputs<'_>,
+    registry: &mut crate::registry::Registry,
+) -> Result<S0Report, S0Error> {
+    use crate::registry::{RunKey, RunRow, RunStatus};
+    use crucible_core::prelude::MarketEvent;
+
+    let mut combos = Vec::with_capacity(inputs.grid.len());
+
+    for combo in inputs.grid.iter() {
+        let mut scorer = crucible_strategies::combo::ComboScorer::build(
+            inputs.spec,
+            &combo,
+            &inputs.s0.score_slot,
+        )
+        .map_err(S0Error::Scorer)?;
+
+        // Claim before measuring (registry rule 1). `fold: None` — S0 is one
+        // pass over the whole series, not a fold table; the seed is the
+        // combo's, derived from the same lineage every other run uses (D-0064).
+        // Fold index 0: S0 is one pass over the whole series, so it has the
+        // shape of a single fold rather than a table of them.
+        let seed = crate::walkforward::derive_run_seed(
+            &inputs.identity.config_hash,
+            inputs.identity.root_seed,
+            inputs.identity.account_id.as_deref(),
+            combo.index,
+            0,
+        );
+        let key = RunKey {
+            config_hash: inputs.identity.config_hash.to_string(),
+            account_id: inputs.identity.account_id.clone(),
+            combo_index: combo.index,
+            fold: None,
+            seed,
+        };
+        let row = RunRow {
+            key: key.clone(),
+            hypothesis_family: inputs.hypothesis_family.to_owned(),
+            params: combo.label(),
+            // S0 takes no position, so it has no execution assumption to name.
+            // Saying so beats leaving the field to imply one (§2.4).
+            fill_model: "none (s0 takes no position)".to_owned(),
+            git_sha: inputs.git_sha.to_owned(),
+            data_manifest_ids: inputs.data_manifest_ids.to_vec(),
+            started_at: inputs.now.to_owned(),
+            criteria: inputs.criteria.clone(),
+        };
+        registry.insert_running(&row)?;
+
+        // Score every bar, in availability order.
+        let mut scored: Vec<ScoredBar> = Vec::with_capacity(inputs.events.len());
+        for (i, ev) in inputs.events.iter().enumerate() {
+            let MarketEvent::Bar(bar) = ev;
+            if let Some(score) = scorer.update(bar) {
+                scored.push(ScoredBar {
+                    avail_ts: bar.avail_ts().0,
+                    session_key: inputs.day_keys.get(i).copied().unwrap_or(0),
+                    score,
+                    price_points: bar.close.as_points_f64(),
+                });
+            }
+        }
+
+        let mut horizons = Vec::with_capacity(inputs.s0.horizons_ns.len());
+        let mut best_abs_ic: Option<f64> = None;
+        for (h, &horizon_ns) in inputs.s0.horizons_ns.iter().enumerate() {
+            let joined = join(&scored, horizon_ns);
+            let ic = information_coefficient(&joined.pairs);
+            if let Some(v) = ic {
+                best_abs_ic = Some(best_abs_ic.map_or(v.abs(), |b: f64| b.max(v.abs())));
+            }
+            // The bootstrap's seed is derived from the run's, per horizon, so
+            // two horizons of one combo do not share a resample (D-0064).
+            let draw_seed = seed ^ ((h as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            horizons.push(HorizonEvidence {
+                horizon_ns,
+                n_pairs: joined.pairs.len(),
+                dropped: joined.dropped_no_partner + joined.dropped_zero_price,
+                ic,
+                buckets: buckets(&joined.pairs, inputs.s0.buckets),
+                interval: block_bootstrap_mean(&joined.pairs, inputs.s0.bootstrap_draws, draw_seed),
+            });
+        }
+
+        // Both halves, at the same horizon.
+        let cleared_at_ns = horizons
+            .iter()
+            .find(|h| {
+                h.ic.is_some_and(|ic| ic.abs() >= inputs.s0.min_abs_ic)
+                    && h.interval.is_some_and(|iv| iv.excludes_zero())
+            })
+            .map(|h| h.horizon_ns);
+        let passed = cleared_at_ns.is_some();
+        registry.finish(&key, RunStatus::Done, None, inputs.now)?;
+
+        combos.push(S0ComboReport {
+            combo_index: combo.index,
+            label: combo.label(),
+            warmup_bars: scorer.warmup_bars(),
+            scores: scored.len(),
+            horizons,
+            best_abs_ic,
+            cleared_at_ns,
+            passed,
+        });
+    }
+
+    let survivors = combos.iter().filter(|c| c.passed).count();
+    Ok(S0Report {
+        combos,
+        score_slot: inputs.s0.score_slot.clone(),
+        survivors,
+    })
+}

@@ -4,26 +4,25 @@ slug: short-horizon-overreaction
 topic: momentum-horizon
 grade: A
 hypothesis_family: es-short-horizon-reversal
-status: blocked
-blocked_on: s0-predictor-seam
+status: backlog
 created: 2026-07-30
 ---
 
-> **BLOCKED — do not run.** Gate 0 and Gate 0b below are no-trading
-> measurements of forward returns conditional on the signal. That is the
-> funnel's **S0**, which is **refused at load** in this build: the combo
-> grammar's rules produce *positions*, not a continuous score to bucket
-> forward returns by (`crucible-funnel::stages`). Closing it means **the S0
-> predictor seam** — named, and scheduled as M3's first block (D-0081,
-> `docs/MILESTONES.md`) — and **this file is its first consumer and half its
-> specification.**
+> **UNBLOCKED 2026-07-31.** The S0 predictor seam landed (D-0085), so Gate 0
+> and Gate 0b — no-trading measurements of forward returns conditional on the
+> signal — are runnable in the registered order. `stages = ["s0", ...]` is
+> accepted, and an `[s0]` block declares the score slot, the horizons, and the
+> `|IC|` below which the score predicts nothing.
 >
-> The gates are pre-registered **in order**, and the order is binding
-> (README §2.4). Running Gate 1 first because Gate 0 is inconvenient would mean
-> reading the predictor result with the equity curve already known — which is
-> the specific failure pre-registration exists to prevent. The grade stays
-> **A** because the strategy is expressible today; the grade never overrides a
-> registered order.
+> **Two caveats before anyone runs this.** The seam measures forward returns as
+> **fractions**, and Gate 0b registers its bar in **ticks** (one ES tick =
+> 0.25 points = $12.50). Converting a mean fractional return to ticks at a
+> given price level is arithmetic this build does not do for you — do it
+> explicitly and write it down, because the whole point of Gate 0b is the
+> comparison against the spread. And the sample ceiling is unchanged: one
+> contract's life is ~60 sessions, which no adequacy criterion worth
+> registering is satisfiable at, so the first run is a **triage run** until
+> registry pooling lands (README §6.2, unlock 5).
 
 # H-008 — Short-horizon overreaction and reversal
 

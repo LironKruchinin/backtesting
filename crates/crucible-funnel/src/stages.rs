@@ -2,11 +2,10 @@
 //!
 //! ## Stage contracts
 //!
-//! **S0 — signal triage** (seconds; no trading, no fills). Compute the
-//! signal on bars, bucket forward returns by signal quantile, check for a
-//! monotonic relationship and a nonzero information coefficient. No
-//! relationship ⇒ `Kill` — nothing downstream can rescue a signal that
-//! predicts nothing. **Not implemented** (see below).
+//! **S0 — signal triage** (seconds; no trading, no fills). Score the bars,
+//! join each score to the return that followed it, bucket by score quantile,
+//! and measure the information coefficient. No relationship ⇒ `Kill` — nothing
+//! downstream can rescue a signal that predicts nothing.
 //!
 //! **S1 — coarse grid, free fills** (seconds–minutes). Wide-step grid under
 //! `FreeFills`. This is the ONLY sanctioned use of `FreeFills` (CLAUDE.md
@@ -24,20 +23,20 @@
 //!
 //! ## What this build actually runs, and what it refuses
 //!
-//! S1 and S2. A config that declares `s0` or `s3` is **refused at load**, with
-//! a message naming what each needs, because the alternative is a run that
-//! prints a fold table under a heading the config asked a different question
-//! of. `crucible-funnel::stats` still owes S3's battery; S0 needs a
-//! signal-extraction seam the combo grammar does not have — its rules produce
-//! *positions*, not a continuous score to bucket forward returns by.
+//! S0, S1 and S2. A config that declares `s3` is **refused at load**, with a
+//! message naming what it needs, because the alternative is a run that prints a
+//! fold table under a heading the config asked a different question of.
+//! `crucible-funnel::stats` still owes S3's battery.
 //!
-//! S0's **measurement half exists** as [`crate::s0`] (D-0082): the
+//! **S0 landed 2026-07-31** (D-0085): [`crate::s0`] is the measurement — the
 //! forward-return join, the information coefficient, the quantile buckets and
-//! the session block bootstrap, with the leak control planted and watched
-//! firing. What it still lacks is a caller — a config surface, a score
-//! extracted from a combo, and a registry row. Until those land there is
-//! nothing for a declared `s0` to run, so [`Stage::is_implemented`] stays
-//! `false` here and the refusal stands (D-0075, D-0081).
+//! the session block bootstrap (D-0082) — and `crucible-cli::funnel` is the
+//! caller that scores a combo, charges its trial and records the row. Its
+//! criterion needs **both halves at one horizon**: `|IC| >= min_abs_ic` *and* a
+//! mean forward return whose bootstrap interval excludes zero. Size without
+//! significance is what a large enough sample of noise gives for free — the
+//! null harness reads `|IC| = 0.0378` on 20,000 bars of seeded random walk —
+//! and significance without size is an effect too small to trade.
 //!
 //! **The consequence: this build cannot award [`Verdict::Graduate`].** The
 //! glossary defines Graduate as "survived the full battery", and the battery
@@ -97,7 +96,7 @@ pub enum Stage {
     /// Ordered first so `decided_at` still sorts in evaluation order. Never
     /// parsed from a config — see [`Stage::from_str`].
     Admission,
-    /// Signal triage. Not implemented.
+    /// Signal triage: does the score predict the return after it (D-0085).
     S0,
     /// Free-fill coarse screen.
     S1,
@@ -111,22 +110,17 @@ impl Stage {
     /// Whether this build can run the stage.
     #[must_use]
     pub const fn is_implemented(self) -> bool {
-        matches!(self, Stage::Admission | Stage::S1 | Stage::S2)
+        matches!(self, Stage::Admission | Stage::S0 | Stage::S1 | Stage::S2)
     }
 
     /// What the stage still needs, for the refusal message.
     const fn missing_because(self) -> &'static str {
         match self {
-            Stage::S0 => {
-                "S0 buckets forward returns by signal quantile and needs a continuous score to \
-                 bucket by; the combo rule grammar produces positions, not scores, so there is \
-                 nothing to compute an information coefficient over yet"
-            }
             Stage::S3 => {
                 "S3 is deflated Sharpe, PBO/CSCV, the permutation nulls and the cross-instrument \
                  rhyme check — `crucible-funnel::stats`, which is still a module-doc spec"
             }
-            Stage::Admission | Stage::S1 | Stage::S2 => "",
+            Stage::Admission | Stage::S0 | Stage::S1 | Stage::S2 => "",
         }
     }
 }
@@ -190,6 +184,9 @@ pub struct Criteria {
     pub kill_if_dead_half_ticks: i64,
     /// S2: the combo must beat both mandatory controls on pooled OOS return.
     pub require_controls_beaten: bool,
+    /// S0: the smallest `|IC|` at any declared horizon that counts as a
+    /// relationship. `None` when the config did not declare `s0`.
+    pub s0_min_abs_ic: Option<f64>,
     /// S3, echoed and **not evaluated** by this build.
     pub max_pbo: f64,
     /// S3, echoed and not evaluated by this build.
@@ -199,6 +196,11 @@ pub struct Criteria {
 /// Why a `[funnel]` section does not describe runnable criteria.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CriteriaError {
+    /// `stages` declares `s0` but the config has no `[s0]` block.
+    S0BlockMissing,
+    /// The config has an `[s0]` block but `stages` does not declare `s0`.
+    S0BlockUnused,
+
     /// A stage name this build has never heard of.
     UnknownStage {
         /// What was written.
@@ -234,6 +236,19 @@ impl fmt::Display for CriteriaError {
             CriteriaError::UnknownStage { found } => write!(
                 f,
                 "unknown funnel stage {found:?}; this build names s0, s1, s2 and s3"
+            ),
+            CriteriaError::S0BlockMissing => write!(
+                f,
+                "`stages` declares `s0` but there is no `[s0]` block. S0 has to be told what to \
+                 measure BEFORE it runs — the score slot, the forward horizons, and the |IC| \
+                 below which the score predicts nothing. A stage with no criteria is a stage \
+                 with no pre-registration."
+            ),
+            CriteriaError::S0BlockUnused => write!(
+                f,
+                "there is an `[s0]` block but `stages` does not declare `s0`, so nothing would \
+                 read it. Add \"s0\" to `stages`, or delete the block — a config carrying \
+                 criteria nobody evaluates is a config that thinks it asked for something."
             ),
             CriteriaError::UnimplementedStage { stage } => write!(
                 f,
@@ -294,6 +309,8 @@ pub struct CriteriaSource<'a> {
     pub kill_if_dead_at_ticks: f64,
     /// `require_controls_beaten`.
     pub require_controls_beaten: bool,
+    /// `[s0].min_abs_ic`, or `None` when the config declares no `[s0]` block.
+    pub s0_min_abs_ic: Option<f64>,
     /// `max_pbo`.
     pub max_pbo: f64,
     /// `require_plateau`.
@@ -356,6 +373,16 @@ impl Criteria {
             });
         }
 
+        // A stage with no criteria is a stage with no pre-registration, and a
+        // criteria block for a stage nobody asked for is a config that thinks
+        // it asked for something (D-0085). Both are refused at load.
+        if stages.contains(&Stage::S0) && source.s0_min_abs_ic.is_none() {
+            return Err(CriteriaError::S0BlockMissing);
+        }
+        if !stages.contains(&Stage::S0) && source.s0_min_abs_ic.is_some() {
+            return Err(CriteriaError::S0BlockUnused);
+        }
+
         Ok(Criteria {
             stages,
             cost_sweep_half_ticks: sweep,
@@ -365,6 +392,7 @@ impl Criteria {
             min_oos_sharpe_after_costs: source.min_oos_sharpe_after_costs,
             kill_if_dead_half_ticks,
             require_controls_beaten: source.require_controls_beaten,
+            s0_min_abs_ic: source.s0_min_abs_ic,
             max_pbo: source.max_pbo,
             require_plateau: source.require_plateau,
         })
@@ -383,6 +411,7 @@ impl Criteria {
             min_oos_sharpe_after_costs: 0.0,
             kill_if_dead_half_ticks: 2,
             require_controls_beaten: true,
+            s0_min_abs_ic: None,
             max_pbo: 0.5,
             require_plateau: true,
         }
@@ -454,6 +483,10 @@ pub struct Evidence {
     pub random_entry_return_pct: Option<f64>,
     /// Pooled out-of-sample return of the buy-and-hold control.
     pub buy_and_hold_return_pct: Option<f64>,
+    /// The largest `|IC|` S0 measured across its declared horizons, or `None`
+    /// when S0 did not run. `None` is not a failure — it is the absence of a
+    /// measurement, and the criterion is only applied when S0 was asked for.
+    pub s0_best_abs_ic: Option<f64>,
 }
 
 /// One criterion, evaluated.
@@ -535,6 +568,28 @@ pub fn assess(criteria: &Criteria, evidence: &Evidence) -> Assessment {
     ];
     let mut failed = adequacy.iter().any(|r| !r.passed);
     reasons.extend(adequacy);
+
+    if !failed && criteria.runs(Stage::S0) {
+        decided_at = Stage::S0;
+        // A signal that predicts nothing is dead here, and nothing downstream
+        // can rescue it — that is the entire argument for a predictor-first
+        // gate (D-0081).
+        let threshold = criteria.s0_min_abs_ic.unwrap_or(0.0);
+        let s0 = vec![check(
+            Stage::S0,
+            evidence.s0_best_abs_ic.is_some_and(|ic| ic >= threshold),
+            match evidence.s0_best_abs_ic {
+                Some(ic) => format!(
+                    "|IC| {ic:.4} at its best declared horizon, {threshold:.4} required — a score                      that does not predict the return after it is dead before any equity curve"
+                ),
+                None => format!(
+                    "no information coefficient could be measured, {threshold:.4} required — an                      absent measurement is not a cleared bar (D-0075)"
+                ),
+            },
+        )];
+        failed = s0.iter().any(|r| !r.passed);
+        reasons.extend(s0);
+    }
 
     if !failed && criteria.runs(Stage::S1) {
         decided_at = Stage::S1;
@@ -670,6 +725,7 @@ mod tests {
             require_controls_beaten: true,
             max_pbo: 0.5,
             require_plateau: true,
+            s0_min_abs_ic: None,
         }
     }
 
@@ -688,6 +744,7 @@ mod tests {
             sharpe_at_kill_level: Some(0.9),
             random_entry_return_pct: Some(0.5),
             buy_and_hold_return_pct: Some(1.0),
+            s0_best_abs_ic: None,
         }
     }
 
@@ -723,18 +780,22 @@ mod tests {
     /// time. The message has to name what is missing, or the refusal is a wall.
     #[test]
     fn an_unimplemented_stage_is_refused_and_says_what_it_needs() {
-        for name in ["s0", "s3"] {
-            let stages = names(&["s1", "s2", name]);
-            let err = Criteria::new(&source(&stages, &[0.0, 0.5, 1.0, 2.0], 1.0))
-                .expect_err("must refuse");
-            let text = err.to_string();
-            assert!(text.contains("not implemented"), "{text}");
-            assert!(text.contains("refused \nrather than skipped") || text.contains("refused"));
-            assert!(
-                text.contains("information coefficient") || text.contains("PBO"),
-                "{text}"
-            );
-        }
+        // s3 is what remains unimplemented. `s0` left this list on 2026-07-31
+        // when its caller landed (D-0085) — the list IS the record of which
+        // stages this build cannot run, so removing s0 from it is the change.
+        let stages = names(&["s1", "s2", "s3"]);
+        let err =
+            Criteria::new(&source(&stages, &[0.0, 0.5, 1.0, 2.0], 1.0)).expect_err("must refuse");
+        let text = err.to_string();
+        assert!(text.contains("not implemented"), "{text}");
+        assert!(text.contains("refused"), "{text}");
+        assert!(text.contains("PBO"), "{text}");
+        // And s0 is now accepted rather than refused — but only with its
+        // `[s0]` block, which `source` supplies as `None` here.
+        let stages = names(&["s0", "s1", "s2"]);
+        let err =
+            Criteria::new(&source(&stages, &[0.0, 0.5, 1.0, 2.0], 1.0)).expect_err("needs [s0]");
+        assert_eq!(err, CriteriaError::S0BlockMissing, "{err}");
         assert_eq!(
             Stage::from_str("s9").expect_err("unknown"),
             CriteriaError::UnknownStage {

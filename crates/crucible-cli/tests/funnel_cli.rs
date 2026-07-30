@@ -56,6 +56,15 @@ impl Drop for TempDir {
     }
 }
 
+/// A config that ships in the repository, resolved from this test binary's
+/// manifest dir rather than from the process's working directory.
+fn repo_config(rel: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join(rel)
+}
+
 fn run(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_crucible"))
         .args(args)
@@ -312,9 +321,41 @@ fn an_unimplemented_stage_is_refused_before_anything_replays() {
     let text = stderr(&out);
     assert!(text.contains("not implemented in this build"), "{text}");
     assert!(text.contains("refused"), "{text}");
-    assert!(text.contains("information coefficient"), "{text}");
+    // s3 is what remains unimplemented. s0 stopped being refused when its
+    // caller landed (D-0085), and this assertion is the record of that: it
+    // used to look for S0's "information coefficient" message here.
+    assert!(text.contains("stage s3"), "{text}");
+    assert!(
+        !text.contains("stage s0"),
+        "s0 is implemented now and must not be refused: {text}"
+    );
     // Nothing was written: the refusal happened before any bar was replayed.
     assert!(!dir.out().join("registry.jsonl").exists());
+}
+
+/// s0 IS implemented now, so a config declaring it must be accepted — and
+/// refused only for the reason a missing `[s0]` block gives (D-0085).
+#[test]
+fn declaring_s0_without_an_s0_block_is_refused_and_says_what_is_missing() {
+    let dir = TempDir::new();
+    let config = dir.config(&template(
+        &CRITERIA.replace(r#"stages = ["s1", "s2"]"#, r#"stages = ["s0", "s1", "s2"]"#),
+    ));
+    let out = run(&[
+        "funnel",
+        "--config",
+        config.to_str().expect("utf-8 path"),
+        "--out",
+        dir.out().to_str().expect("utf-8 path"),
+    ]);
+    assert_eq!(code(&out), 2);
+    let text = stderr(&out);
+    assert!(text.contains("[s0]"), "{text}");
+    assert!(text.contains("BEFORE it runs"), "{text}");
+    assert!(
+        !text.contains("not implemented"),
+        "s0 is implemented; the refusal must be about the missing block: {text}"
+    );
 }
 
 /// The mandatory sweep is mandatory. A config that trims it is refused, with
@@ -474,4 +515,51 @@ fn the_hash_gate_answers_the_same_with_and_without_a_populated_registry() {
         stdout(&warm).trim(),
         "the determinism hash moved because the registry had rows in it"
     );
+}
+
+/// S0 end to end, on the null harness (D-0085).
+///
+/// A trailing z-score of the close on a seeded random walk predicts nothing, so
+/// the honest answer is a kill **at s0** — before any equity curve is judged.
+/// This is the *silent* side of the seam's two-sided control, at the level a
+/// researcher actually meets it: the whole CLI path, config to verdict.
+///
+/// The *firing* side cannot be a config, because making a leak reachable from
+/// TOML is exactly what D-0080 refuses. It is a watched mutation instead,
+/// recorded in D-0085: planting the leak in the join takes the same command's
+/// IC from -0.0378 to +1.0000.
+#[test]
+fn s0_runs_end_to_end_and_kills_the_null_harness_at_s0() {
+    let dir = TempDir::new();
+    let config = repo_config("configs/s0-smoke.toml");
+    let out_dir = dir.out();
+    let out = run(&[
+        "funnel",
+        "--config",
+        config.to_str().expect("utf-8 path"),
+        "--out",
+        out_dir.to_str().expect("utf-8 path"),
+    ]);
+    if code(&out) == 2 && stderr(&out).contains("CLAUDE.md §2.5") {
+        return; // no resolvable git sha here; covered by its own test
+    }
+    assert_eq!(code(&out), 5, "every combo dies: {}", stderr(&out));
+    let text = stdout(&out);
+
+    assert!(text.contains("S0 — signal triage"), "{text}");
+    assert!(text.contains("KILL at s0"), "{text}");
+    assert!(
+        text.contains("0 of 6 combo(s) cleared S0"),
+        "a random walk must clear nothing: {text}"
+    );
+    // The measured |IC| is small. Pinning the digits would make this a golden
+    // test of the walk rather than of the seam, so the assertion is the
+    // property: nothing near a relationship.
+    assert!(
+        text.contains("best |IC| 0.0378"),
+        "the null harness's reading moved: {text}"
+    );
+    // And S0 charged its trials into the real registry, like any other stage.
+    let lines = std::fs::read_to_string(out_dir.join("registry.jsonl")).expect("a registry");
+    assert!(lines.contains(r#""kind":"run""#), "{lines}");
 }

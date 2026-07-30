@@ -117,6 +117,10 @@ pub struct FunnelInputs<'a> {
     pub data_manifest_ids: &'a [String],
     /// Wall clock, supplied by the caller. This crate reads no clock.
     pub now: &'a str,
+    /// Per-combo `|IC|` from the S0 pass, keyed by grid index. Empty when the
+    /// config did not declare `s0`. A `BTreeMap` rather than a `HashMap`
+    /// because anything that can reach a result is ordered here (§2.2).
+    pub s0_best_abs_ic: &'a std::collections::BTreeMap<usize, f64>,
 }
 
 /// One level of the mandatory cost-sensitivity sweep.
@@ -343,6 +347,10 @@ pub fn run_funnel(
                 .and_then(|l| l.oos_pooled.sharpe_naive),
             random_entry_return_pct: controls[0].return_pct(),
             buy_and_hold_return_pct: controls[1].return_pct(),
+            // Handed in by the caller: S0 is a separate pass over the same
+            // bars (it takes no position, so it has no replay), and its reading
+            // gates this assessment. `None` when the config declared no `s0`.
+            s0_best_abs_ic: inputs.s0_best_abs_ic.get(&index).copied(),
         };
         let assessment = assess(inputs.criteria, &evidence);
 

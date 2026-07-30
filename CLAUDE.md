@@ -32,7 +32,7 @@ walk-forward with costs → S3 statistical battery) is described in
 `crucible-funnel`'s crate docs. Most ideas must die cheaply at S0–S1.
 
 **Current milestone:** M3 (funnel + statistics) — see `docs/MILESTONES.md`.
-`crucible funnel <config>` runs the funnel end to end today; what is still
+`crucible funnel <config>` runs S0, S1 and S2 end to end today; what is still
 owed is the statistics battery (`crucible-funnel::stats`), which is why the
 build **cannot award `Graduate`** (D-0075).
 

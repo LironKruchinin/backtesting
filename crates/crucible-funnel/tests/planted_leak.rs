@@ -254,6 +254,9 @@ fn the_planted_leak_survives_todays_gates() {
         .sharpe_naive,
         random_entry_return_pct: Some(random_oos_pct),
         buy_and_hold_return_pct: Some(bnh.total_return_pct),
+        // S0 did not run in this fixture: the leak is an equity-curve
+        // phenomenon and this test is about the S1/S2 gates seeing it.
+        s0_best_abs_ic: None,
     };
     let assessment = assess(&criteria, &evidence);
 
@@ -313,6 +316,7 @@ fn the_same_criteria_kill_an_honest_strategy_on_the_same_data() {
         sharpe_at_kill_level: oos.sharpe_naive,
         random_entry_return_pct: Some(0.0),
         buy_and_hold_return_pct: Some(0.0),
+        s0_best_abs_ic: None,
     };
     let assessment = assess(&criteria(), &evidence);
     assert_eq!(
@@ -336,6 +340,7 @@ fn criteria() -> Criteria {
         require_controls_beaten: true,
         max_pbo: 0.5,
         require_plateau: true,
+        s0_min_abs_ic: None,
     })
     .expect("the smoke config's criteria")
 }

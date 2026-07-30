@@ -97,7 +97,7 @@ pub fn run_cmd(args: &FunnelArgs) -> i32 {
         );
         return EXIT_USAGE;
     };
-    let criteria = match cfg.to_criteria() {
+    let criteria = match cfg.to_criteria(loaded.file.s0.as_ref().map(|c| c.min_abs_ic)) {
         Ok(criteria) => criteria,
         Err(e) => {
             eprintln!("error: {e}");
@@ -208,6 +208,62 @@ pub fn run_cmd(args: &FunnelArgs) -> i32 {
         account_id: None,
     };
     let now = timestamp();
+    // ---- S0, ahead of everything, because a score that predicts nothing is
+    // dead before any equity curve exists (D-0081/D-0085). It takes no
+    // position, so it has no fill model and no replay: one streaming pass per
+    // combo over the same bars.
+    let mut s0_ic: std::collections::BTreeMap<usize, f64> = std::collections::BTreeMap::new();
+    let mut s0_report = None;
+    if criteria.runs(crucible_funnel::stages::Stage::S0) {
+        let Some(cfg_s0) = loaded.file.s0.as_ref() else {
+            eprintln!("error: `stages` declares s0 but there is no `[s0]` block");
+            return EXIT_USAGE;
+        };
+        let spec = crucible_funnel::s0::S0Spec {
+            score_slot: cfg_s0.score.clone(),
+            horizons_ns: cfg_s0
+                .horizons_minutes
+                .iter()
+                .map(|m| i64::from(*m) * 60_000_000_000)
+                .collect(),
+            buckets: cfg_s0.buckets,
+            bootstrap_draws: cfg_s0.bootstrap_draws,
+            min_abs_ic: cfg_s0.min_abs_ic,
+        };
+        let s0_inputs = crucible_funnel::s0::S0Inputs {
+            events: &series.events,
+            day_keys: &days.keys,
+            grid: &loaded.grid,
+            spec: loaded.grid.spec(),
+            s0: &spec,
+            identity: &identity,
+            criteria: &criteria,
+            hypothesis_family: &loaded.file.meta.hypothesis_family,
+            git_sha: &git_sha,
+            data_manifest_ids: &series.data_manifest_ids,
+            now: &now,
+        };
+        match crucible_funnel::s0::run_s0(&s0_inputs, &mut registry) {
+            Ok(r) => {
+                for c in &r.combos {
+                    // Only a reading that cleared BOTH halves of the criterion
+                    // is handed on as evidence; a large but insignificant |IC|
+                    // must not clear the gate downstream either.
+                    if c.passed
+                        && let Some(ic) = c.best_abs_ic
+                    {
+                        s0_ic.insert(c.combo_index, ic);
+                    }
+                }
+                s0_report = Some(r);
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                return EXIT_USAGE;
+            }
+        }
+    }
+
     let inputs = FunnelInputs {
         events: &series.events,
         day_keys: &days.keys,
@@ -226,7 +282,14 @@ pub fn run_cmd(args: &FunnelArgs) -> i32 {
         git_sha: &git_sha,
         data_manifest_ids: &series.data_manifest_ids,
         now: &now,
+        s0_best_abs_ic: &s0_ic,
     };
+
+    if let Some(r) = s0_report.as_ref()
+        && !args.hash_only
+    {
+        print_s0(r, loaded.file.s0.as_ref().map_or(0.0, |c| c.min_abs_ic));
+    }
 
     let report = match run_funnel(&inputs, &mut registry) {
         Ok(report) => report,
@@ -237,7 +300,7 @@ pub fn run_cmd(args: &FunnelArgs) -> i32 {
     };
 
     if args.hash_only {
-        println!("{:016x}", verdict_hash(&report));
+        println!("{:016x}", verdict_hash(&report, s0_report.as_ref()));
         return 0;
     }
 
@@ -287,7 +350,10 @@ pub fn run_cmd(args: &FunnelArgs) -> i32 {
     print_report(&loaded, &report, &criteria, &days, series.events.len());
     println!("  registry       {}", registry.path().display());
     println!("  scorecard      {}", card.display());
-    println!("  determinism    {:016x}", verdict_hash(&report));
+    println!(
+        "  determinism    {:016x}",
+        verdict_hash(&report, s0_report.as_ref())
+    );
     print_footer(&loaded, &report);
 
     if report
@@ -497,9 +563,35 @@ fn control_gap(c: &ComboOutcome, which: usize) -> String {
 /// result. What is inside is the verdict, the stage that decided it, and every
 /// pooled statistic it was decided on — so a change that moves a verdict fails
 /// the gate and a change that only moves a timestamp does not.
-fn verdict_hash(report: &FunnelReport) -> u64 {
+fn verdict_hash(report: &FunnelReport, s0: Option<&crucible_funnel::s0::S0Report>) -> u64 {
     let mut h = crate::Fnv64::new();
     let i64_of = |n: usize| i64::try_from(n).unwrap_or(i64::MAX);
+    // S0 first, because it runs first. Absent when the config declared no
+    // `s0`, in which case nothing is written and the hash is unmoved — which
+    // is what keeps every pre-S0 config's pinned gate valid (D-0085).
+    if let Some(s0) = s0 {
+        for c in &s0.combos {
+            h.write_i64(i64_of(c.combo_index));
+            h.write_i64(i64_of(c.scores));
+            h.write_i64(i64::from(c.passed));
+            hash_f64(&mut h, c.best_abs_ic);
+            for hz in &c.horizons {
+                h.write_i64(hz.horizon_ns);
+                h.write_i64(i64_of(hz.n_pairs));
+                h.write_i64(i64_of(hz.dropped));
+                hash_f64(&mut h, hz.ic);
+                for b in &hz.buckets {
+                    h.write_i64(i64_of(b.n));
+                    hash_f64(&mut h, Some(b.mean_return));
+                }
+                if let Some(iv) = hz.interval {
+                    hash_f64(&mut h, Some(iv.point));
+                    hash_f64(&mut h, Some(iv.lo));
+                    hash_f64(&mut h, Some(iv.hi));
+                }
+            }
+        }
+    }
     for c in &report.combos {
         h.write_i64(i64_of(c.id.combo_index));
         h.write_i64(match c.assessment.verdict {
@@ -575,4 +667,71 @@ fn print_footer(loaded: &LoadedConfig, report: &FunnelReport) {
     for section in unconsumed {
         println!("    {section}");
     }
+}
+
+/// Prints the S0 evidence: what the score predicted, at what horizon, and
+/// whether it cleared the bar declared before the run.
+fn print_s0(report: &crucible_funnel::s0::S0Report, min_abs_ic: f64) {
+    println!();
+    println!(
+        "S0 — signal triage. Score = `{}`. No orders, no fills, no equity curve:
+            this stage asks only whether the score predicts the return that follows it.
+            Pre-registered: |IC| >= {min_abs_ic:.4} at some declared horizon.",
+        report.score_slot
+    );
+    for c in &report.combos {
+        println!();
+        println!(
+            "  combo {:>3}  {:<34}  {} scores, warmup {}",
+            c.combo_index, c.label, c.scores, c.warmup_bars
+        );
+        println!(
+            "    {:>9}  {:>8}  {:>9}  {:>10}  {:>24}",
+            "horizon", "pairs", "dropped", "IC", "mean fwd return 95% CI"
+        );
+        for hz in &c.horizons {
+            let minutes = hz.horizon_ns / 60_000_000_000;
+            let ic = hz
+                .ic
+                .map_or_else(|| "     n/a".to_owned(), |v| format!("{v:+8.4}"));
+            let ci = hz.interval.map_or_else(
+                || "                 ABSENT".to_owned(),
+                |iv| {
+                    format!(
+                        "{:+.5}% [{:+.5}%, {:+.5}%]{}",
+                        iv.point * 100.0,
+                        iv.lo * 100.0,
+                        iv.hi * 100.0,
+                        if iv.excludes_zero() { " *" } else { "" }
+                    )
+                },
+            );
+            println!(
+                "    {:>7}m  {:>8}  {:>9}  {:>10}  {}",
+                minutes, hz.n_pairs, hz.dropped, ic, ci
+            );
+        }
+        match (c.best_abs_ic, c.cleared_at_ns) {
+            (Some(b), Some(h)) => println!(
+                "    best |IC| {b:.4}; cleared at {}m (|IC| >= {min_abs_ic:.4} AND its interval                  excludes zero) — PASS",
+                h / 60_000_000_000
+            ),
+            (Some(b), None) => {
+                println!("    best |IC| {b:.4}, but no horizon clears BOTH halves — KILL at s0.");
+                println!(
+                    "      Size without significance is what a large enough sample of noise                      gives for free."
+                );
+            }
+            (None, _) => println!(
+                "    no IC could be measured — KILL at s0 (an absent measurement is not a cleared                  bar)"
+            ),
+        }
+    }
+    println!();
+    println!(
+        "  {} of {} combo(s) cleared S0. A forward return is measurement-space only: it is
+           joined to a score at the score's avail_ts and never reaches anything signal-side.",
+        report.survivors,
+        report.combos.len()
+    );
 }

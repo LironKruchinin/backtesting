@@ -13,8 +13,8 @@ use crucible_core::prelude::*;
 use crate::indicators::{Bollinger, Ema, RollingStdev, RollingZScore, Sma};
 
 use super::grid::Combo;
-use super::rules::{EvalCtx, Expr, RuleSet, SessionPosition, SlotOut};
-use super::spec::{ComboSpec, IndicatorParams};
+use super::rules::{EvalCtx, Expr, RuleSet, SessionPosition, SlotField, SlotOut};
+use super::spec::{ComboSpec, IndicatorKind, IndicatorParams};
 
 /// One session-clock reading per bar of the series a grid is replayed on.
 ///
@@ -558,6 +558,161 @@ mod tests {
             let mut strategy = grid.strategy(index);
             let _ = drive(&mut strategy, &[10.0; 4]);
             assert_eq!(strategy.session_gaps(), 0, "combo {index}");
+        }
+    }
+}
+
+/// A **score-emitting** evaluation of one combo: one continuous reading per
+/// bar, no orders, no position, no fills (D-0085).
+///
+/// This is the strategies half of the funnel's S0 seam. The combo rule grammar
+/// produces *positions*, which is why S0 was refused for so long; a score is a
+/// different projection of the same slots, so it is built from the same
+/// [`ComboSpec`] and the same [`Combo`] rather than from a parallel definition
+/// that could drift from it.
+///
+/// The score is a named indicator slot's output. It is trailing by
+/// construction — every indicator in this crate is (D-0080) — so a score at a
+/// bar's `avail_ts` is computed only from what was available then, which is the
+/// property S0's forward-return join depends on and cannot itself check.
+#[derive(Debug, Clone)]
+pub struct ComboScorer {
+    state: SlotState,
+    field: SlotField,
+    warmup_bars: usize,
+    slot_name: String,
+}
+
+/// Why a scorer could not be built from a config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScorerError {
+    /// The config named a slot the spec does not declare.
+    UnknownSlot {
+        /// What the config asked for.
+        wanted: String,
+        /// What it could have asked for.
+        available: Vec<String>,
+    },
+    /// The slot exists but its field is not a single number.
+    NotScalar {
+        /// The slot named.
+        slot: String,
+        /// Its kind's config spelling.
+        kind: &'static str,
+        /// The fields it does offer.
+        fields: &'static str,
+    },
+}
+
+impl std::fmt::Display for ScorerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ScorerError::UnknownSlot { wanted, available } => write!(
+                f,
+                "no indicator slot named `{wanted}`; this config declares {}",
+                if available.is_empty() {
+                    "none".to_owned()
+                } else {
+                    available.join(", ")
+                }
+            ),
+            ScorerError::NotScalar { slot, kind, fields } => write!(
+                f,
+                "slot `{slot}` is a `{kind}`, which has no single scalar output — name one of \
+                 its fields instead ({fields}), e.g. `{slot}.{}`",
+                fields.split(", ").next().unwrap_or("mid")
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ScorerError {}
+
+impl ComboScorer {
+    /// Builds the scorer for one grid point, reading `slot` — either a bare
+    /// slot name (`"z"`) for a scalar indicator, or `slot.field`
+    /// (`"bb.upper"`) for one that has bands.
+    ///
+    /// # Errors
+    /// [`ScorerError`] when the named slot does not exist, or names an
+    /// indicator with no scalar output and no field was given.
+    ///
+    /// # Panics
+    /// Panics if `combo` did not come from `spec`, which is a construction bug
+    /// — both are produced together by `ComboSpec::expand`.
+    pub fn build(spec: &ComboSpec, combo: &Combo, slot: &str) -> Result<ComboScorer, ScorerError> {
+        assert_eq!(
+            combo.slots.len(),
+            spec.slots().len(),
+            "INVARIANT: a combo carries one entry per slot of the spec it came from"
+        );
+        let (name, field_text) = match slot.split_once('.') {
+            Some((n, f)) => (n, Some(f)),
+            None => (slot, None),
+        };
+        let index = spec
+            .slots()
+            .iter()
+            .position(|s| s.name == name)
+            .ok_or_else(|| ScorerError::UnknownSlot {
+                wanted: slot.to_owned(),
+                available: spec.slots().iter().map(|s| s.name.clone()).collect(),
+            })?;
+        let declared = &spec.slots()[index];
+        let field = match (field_text, declared.kind) {
+            (None, IndicatorKind::Bollinger) => {
+                return Err(ScorerError::NotScalar {
+                    slot: name.to_owned(),
+                    kind: declared.kind.name(),
+                    fields: "mid, upper, lower",
+                });
+            }
+            (None, _) => SlotField::Value,
+            (Some("mid"), _) => SlotField::Mid,
+            (Some("upper"), _) => SlotField::Upper,
+            (Some("lower"), _) => SlotField::Lower,
+            (Some(other), _) => {
+                return Err(ScorerError::UnknownSlot {
+                    wanted: format!("{name}.{other}"),
+                    available: spec.slots().iter().map(|s| s.name.clone()).collect(),
+                });
+            }
+        };
+        Ok(ComboScorer {
+            state: SlotState::build(combo.slots[index].params),
+            field,
+            warmup_bars: combo.own_warmup_bars(),
+            slot_name: slot.to_owned(),
+        })
+    }
+
+    /// Bars this scorer consumes before it has an opinion.
+    #[must_use]
+    pub const fn warmup_bars(&self) -> usize {
+        self.warmup_bars
+    }
+
+    /// The slot expression this scorer was built from, for the report.
+    #[must_use]
+    pub fn slot_name(&self) -> &str {
+        &self.slot_name
+    }
+
+    /// Feeds one bar and returns the score, or `None` while warming up.
+    ///
+    /// Must be called on every bar in availability order — the indicators are
+    /// streaming, so a skipped bar silently changes every later reading.
+    pub fn update(&mut self, bar: &Bar) -> Option<f64> {
+        let out = self.state.update(bar)?;
+        match (out, self.field) {
+            (SlotOut::Scalar(v), SlotField::Value) => Some(v),
+            (SlotOut::Bands(b), SlotField::Mid) => Some(b.mid),
+            (SlotOut::Bands(b), SlotField::Upper) => Some(b.upper),
+            (SlotOut::Bands(b), SlotField::Lower) => Some(b.lower),
+            // A scalar slot asked for a band field, or vice versa. `build`
+            // refuses both, so reaching here is a construction bug rather than
+            // a config error.
+            _ => None,
         }
     }
 }

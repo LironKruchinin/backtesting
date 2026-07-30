@@ -172,7 +172,7 @@ the funnel landed and the schema requires `min_oos_trades`,
 skipped**. Both configs would have failed to load. They are corrected; the
 lesson is the rule above.
 
-### 2.4 Registered gate order is binding, and S0 is the next build
+### 2.4 Registered gate order is binding, and S0 now runs
 
 Several files here pre-register a **predictor-first** gate — a no-trading
 measurement of forward returns conditional on the signal — ahead of any equity
@@ -181,13 +181,16 @@ S0 is **not implemented**: a config declaring it is refused at load, because
 *the combo grammar's rules produce positions, not a continuous score to bucket
 forward returns by* (`crucible-funnel::stages`).
 
-Closing that gap now has a name and a place in the plan: **the S0 predictor
-seam** (D-0081) — a score-emitting evaluation path with forward-return joins,
-which is the M2.5 predictor workbench arriving *as* the funnel's S0 rather than
-beside it, so its report carries a trial count and a registry row instead of
-standing outside the thing that counts. It is **M3's first block**
-(`docs/MILESTONES.md`). Until it lands the refusal stands: `s0` stops being
-refused at load in the commit where S0 can run, never earlier.
+That gap is **closed** (D-0082, D-0085): the **S0 predictor seam** is a
+score-emitting evaluation path with forward-return joins — the M2.5 predictor
+workbench arriving *as* the funnel's S0 rather than beside it, so its report
+carries a trial count and a registry row instead of standing outside the thing
+that counts. `s0` stopped being refused at load in the commit where S0 could
+actually run, which is the ordering D-0075 asked for.
+
+**The six predictor-first files are no longer blocked on the seam.** Five of
+them are still blocked behind their own gaps (a volume-window aggregate, an
+options loader, a calendar operand); H-008 is runnable.
 
 **A file whose Gate 0 is a predictor measurement may not skip to Gate 1 because
 Gate 0 is inconvenient.** The order is part of the pre-registration: running the
@@ -391,11 +394,11 @@ it is not pending work (§2.2).
 
 ### 6.3 Blocked entries
 
-**H-008 is `blocked`**, despite being grade A. Its registered Gate 0 is a
-predictor-first measurement — the funnel's **S0** — which is refused at load
-because the combo grammar produces positions rather than a continuous score
-(§2.4). Running its Gate 1 first would break the registered order, so it waits.
-It is the **S0 predictor seam's first consumer and its specification** (D-0081):
+**H-008 is unblocked as of 2026-07-31.** Its registered Gate 0 is a
+predictor-first measurement — the funnel's **S0** — which was refused at load
+until the seam's caller landed (D-0085). `stages = ["s0", ...]` is now accepted
+and the gates can be run in their registered order.
+It was the **S0 predictor seam's first consumer and its specification** (D-0081):
 what that file asks for in Gate 0 and Gate 0b — forward returns bucketed at
 1/5/10/20 minutes, a block bootstrap over sessions, and the effect size in
 **ticks** so it can be compared against the spread — is half of what the seam

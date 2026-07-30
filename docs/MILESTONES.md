@@ -307,12 +307,22 @@ The quant-research payload. Specs live in `crucible-funnel` module docs.
             itself, caught by the *silent* control. `rand_chacha` adopted, its §6
             placeholder deleted. All four determinism hashes unmoved, because
             nothing calls it yet
-      - [ ] **The caller**: a config surface, a score extracted from a combo,
-            the registry row that charges the trial, the CLI path, and the S0
-            determinism hash. `Stage::S0.is_implemented()` stays `false` and the
-            `s0` load refusal stands until this lands — a declared stage that is
-            silently skipped is what D-0075 refuses. H-008 stays `blocked` for
-            the same reason
+      - [x] **The caller** (2026-07-31, D-0085): `ComboScorer` emits one score
+            per bar from the same spec the strategy is built from; `[s0]`
+            declares the score slot, horizons in minutes, buckets, draws and
+            `min_abs_ic`, required exactly when `stages` names `s0`; every combo
+            gets a registry row claimed before it is measured and a trial
+            charged. S0 runs **ahead of** S1/S2 and its reading reaches
+            `assess`, so a score that predicts nothing dies before any equity
+            curve is judged. **The null harness forced the criterion**: `|IC|`
+            alone measured 0.0378 on a random walk and passed a 0.02 bar, so the
+            rule became `|IC| >= min` AND a bootstrap interval excluding zero,
+            **at the same horizon** — the criterion was corrected rather than
+            the threshold fitted. `crucible funnel --config configs/s0-smoke.toml`
+            now exits 5 with 6/6 **KILL at s0**. S0 hash **`91107aeb6e6802c0`**;
+            the three engine hashes and the old funnel hash are unmoved.
+            `Stage::S0::is_implemented()` is true, `s0` configs are accepted and
+            H-008 is unblocked — all in that commit, as D-0075 asked
 - [ ] Stats: deflated Sharpe, PBO/CSCV, block-permutation nulls, empirical
       p-values — cited implementations with property tests. **The planted
       defect they will be measured against already exists**:

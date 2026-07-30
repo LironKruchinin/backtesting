@@ -264,7 +264,7 @@ pub mod grid;
 pub mod rules;
 pub mod spec;
 
-pub use build::{ComboStrategy, SessionSeries};
+pub use build::{ComboScorer, ComboStrategy, ScorerError, SessionSeries};
 pub use error::ComboError;
 pub use grid::{Combo, ComboId, ConfigHash, Grid, SlotParams};
 pub use rules::{RuleSet, RuleSource, SessionField, SessionPhase, SessionPosition};
