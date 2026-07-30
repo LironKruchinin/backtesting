@@ -26,6 +26,12 @@ design inverts each of those defaults:
   assumptions (`free_fills`, `spread_cross`, later an MBO-calibrated queue
   sim). Every result states the assumption that produced it, and every
   scorecard includes a cost-sensitivity sweep.
+- **Ambiguity is counted, not resolved in your favour.** An OHLC bar does not
+  say whether its high or its low printed first, so a stop and a target inside
+  one bar could both have been hit. One named convention decides
+  (`stop_first_intrabar`: the stop fills; a gap fills at the opening print,
+  never at the level) and every result reports how many of its exits rested on
+  that choice rather than on the data.
 - **Trials are counted automatically.** A registry records every run of every
   hypothesis family; reported Sharpe ratios ship with their deflated
   counterpart (Bailey & López de Prado) and PBO estimates.

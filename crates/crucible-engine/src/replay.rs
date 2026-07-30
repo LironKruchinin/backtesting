@@ -2,13 +2,31 @@
 //! engine — the ordering rules here ARE the no-lookahead guarantee.
 //!
 //! Per-event processing order (never reorder these steps):
-//! 1. **Fills.** Pending orders whose `placed_ts` is *strictly before* this
-//!    event's `avail_ts` are offered to the fill model. An order can never
-//!    fill against the event that triggered it.
+//! 1. **Fills.**
+//!    1. Pending orders whose `placed_ts` is *strictly before* this event's
+//!       `avail_ts` are offered to the fill model. An order can never fill
+//!       against the event that triggered it.
+//!    2. Then, if the position carries a live protective bracket, this bar is
+//!       tested against its levels.
 //! 2. **Mark.** The portfolio marks to this bar's close; one equity point is
 //!    recorded per bar.
 //! 3. **Decide.** The strategy sees the event and may emit intents, which
 //!    become orders stamped `placed_ts = this event's avail_ts`.
+//!
+//! Step 1.1 before 1.2 is not arbitrary. A market order fills at the bar's
+//! **opening** print, which is the first trade of the bar by definition, and a
+//! resting level can only be touched at or after it. Testing the bracket first
+//! would let a stop trigger on a bar whose open had already reversed the
+//! position out from under it.
+//!
+//! A bracket installed by a fill on *this* bar is eligible on *this* bar: it
+//! inherits its parent order's `placed_ts`, which is strictly before this
+//! event, and the resting order genuinely existed from the moment the parent
+//! filled. Deferring it to the next bar would leave every entry unprotected
+//! for exactly one bar — and a stop that cannot protect the bar you entered on
+//! is a stop that misses the move that matters. Which leg wins an ambiguous
+//! bar is decided by the named convention in [`crate::bracket`], counted in
+//! [`BacktestResult::path_sensitive_bars`], and printed.
 //!
 //! The loop also enforces the Feed contract (nondecreasing `avail_ts`) and
 //! aborts the run on violation — a misordered feed corrupts every number
@@ -18,6 +36,7 @@ use std::collections::VecDeque;
 
 use crucible_core::prelude::*;
 
+use crate::bracket::{ActiveBracket, Outcome, StopFirstIntrabar};
 use crate::metrics::Summary;
 use crate::portfolio::{ClosedTrade, FeeEvent, Portfolio};
 
@@ -45,6 +64,21 @@ pub struct BacktestResult {
     pub closed_trades: Vec<ClosedTrade>,
     /// Every nonzero commission, stamped with its fill. Same reason.
     pub fee_events: Vec<FeeEvent>,
+    /// Fills produced by a protective bracket leg rather than by a strategy
+    /// order. Included in `n_fills` as well — they are fills.
+    pub n_protective_exits: usize,
+    /// Bars on which a live bracket had **both** legs touched and the opening
+    /// print settled neither, so the exit reported rests on
+    /// `stop_first_intrabar` (see [`crate::bracket`]) rather than on the data.
+    ///
+    /// This is the path-sensitivity flag, and it is a count rather than a
+    /// boolean because the question a reader has is "how much of this result
+    /// turns on a convention?". Zero means every exit in the run was
+    /// determined by the bars. A number approaching `n_protective_exits` means
+    /// the run's PnL is largely an artifact of the worst-case rule, and a
+    /// different-but-equally-defensible rule would have produced a different
+    /// number — which is a reason to distrust the run, not to change the rule.
+    pub path_sensitive_bars: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +121,10 @@ where
     let mut last_avail: Option<Ts> = None;
     let mut next_order_id: u64 = 1;
     let mut n_fills = 0usize;
+    let mut n_protective_exits = 0usize;
+    let mut path_sensitive_bars = 0usize;
+    // At most one, because the portfolio holds one position.
+    let mut live_bracket: Option<ActiveBracket> = None;
 
     while let Some(ev) = feed.next_event() {
         let ts = ev.avail_ts();
@@ -97,7 +135,7 @@ where
         }
         last_avail = Some(ts);
 
-        // 1. Fills — only orders placed strictly before this event.
+        // 1.1. Fills — only orders placed strictly before this event.
         let mut still_pending = VecDeque::with_capacity(pending.len());
         while let Some(order) = pending.pop_front() {
             if order.placed_ts < ts {
@@ -106,6 +144,8 @@ where
                         debug_assert_eq!(fill.order_id, order.id);
                         portfolio.apply_fill(&fill);
                         n_fills += 1;
+                        live_bracket =
+                            rebracket(live_bracket, &order, &fill, portfolio.position(), spec);
                     }
                     None => still_pending.push_back(order),
                 }
@@ -115,8 +155,47 @@ where
         }
         pending = still_pending;
 
-        // 2. Mark to this bar's close and record equity.
         let MarketEvent::Bar(bar) = &ev;
+
+        // 1.2. Protective exits — the resting half of a bracketed order. The
+        //      `placed_ts` guard is the same §2.1 rule the loop above applies,
+        //      restated for the leg the strategy never re-placed.
+        if let Some(active) = live_bracket
+            && active.placed_ts < ts
+        {
+            let resolution = StopFirstIntrabar::resolve(&active, bar);
+            if resolution.path_sensitive {
+                path_sensitive_bars += 1;
+            }
+            if let Outcome::Touched { leg, at, gapped } = resolution.outcome {
+                let position = portfolio.position();
+                debug_assert!(
+                    position != Qty::ZERO,
+                    "INVARIANT: a live bracket has a position to protect"
+                );
+                let exit = ProtectiveExit {
+                    order_id: active.order_id,
+                    ts,
+                    side: active.exit_side,
+                    // A bracket exits the whole position. A partial protective
+                    // exit would leave the remainder naked, with no resting
+                    // order left to say so and nothing in the report to notice.
+                    qty: position.abs(),
+                    leg,
+                    touch_price: at,
+                    gapped,
+                };
+                let fill = fill_model.fill_protective_exit(&exit, spec);
+                debug_assert_eq!(fill.order_id, active.order_id);
+                portfolio.apply_fill(&fill);
+                n_fills += 1;
+                n_protective_exits += 1;
+                // One-cancels-the-other: the surviving leg is gone with it.
+                live_bracket = None;
+            }
+        }
+
+        // 2. Mark to this bar's close and record equity.
         portfolio.mark(bar.close);
         equity.push((ts, portfolio.equity_nano_usd()));
 
@@ -131,6 +210,7 @@ where
                 qty: intent.qty.abs(),
                 kind: intent.kind,
                 placed_ts: ts,
+                bracket: intent.bracket,
             });
             next_order_id += 1;
         }
@@ -152,5 +232,50 @@ where
         cancelled_at_eof,
         closed_trades,
         fee_events,
+        n_protective_exits,
+        path_sensitive_bars,
     })
+}
+
+/// The bracket bookkeeping that follows one strategy-order fill.
+///
+/// Three rules, in this order:
+/// 1. A fill that leaves the position **flat** cancels the bracket. There is
+///    nothing left to protect, and a resting stop under no position is how a
+///    backtest opens a trade nobody asked for.
+/// 2. A **bracketed** order that leaves a position installs levels measured
+///    from *its own* fill price, replacing anything already there. That is what
+///    makes the levels the ones the position actually got rather than the ones
+///    its strategy hoped for.
+/// 3. Otherwise the existing bracket survives — but only if it still protects
+///    the position's side. A fill that **flips** long to short leaves the old
+///    levels on the wrong side of the market, where they would exit the new
+///    position at once and for the wrong reason.
+///
+/// Note what rule 3 deliberately does *not* do: adding to a bracketed position
+/// with an unbracketed order keeps the original levels where they are, rather
+/// than re-centering them on the new average entry. A resting order does not
+/// move because you bought more.
+fn rebracket(
+    current: Option<ActiveBracket>,
+    order: &Order,
+    fill: &Fill,
+    position: Qty,
+    spec: &ContractSpec,
+) -> Option<ActiveBracket> {
+    let sign = position.as_i64();
+    if sign == 0 {
+        return None;
+    }
+    if let Some(bracket) = order.bracket {
+        return Some(ActiveBracket::from_fill(
+            order.id,
+            order.placed_ts,
+            bracket,
+            fill.price,
+            sign,
+            spec.tick,
+        ));
+    }
+    current.filter(|active| active.protects(sign))
 }

@@ -30,7 +30,9 @@ use crucible_data::calendar::Calendar;
 use crucible_data::curated::{CuratedError, ParquetBarFeed};
 use crucible_data::ingest::range_from_dates;
 use crucible_data::ingest::window::parse_civil_date;
-use crucible_engine::{BacktestParams, BacktestResult, FreeFills, SpreadCrossFills, run};
+use crucible_engine::{
+    BacktestParams, BacktestResult, FreeFills, INTRABAR_CONVENTION, SpreadCrossFills, run,
+};
 use crucible_strategies::Aligned;
 use crucible_strategies::combo::ComboStrategy;
 
@@ -115,6 +117,10 @@ pub fn run_cmd(args: &ComboArgs) -> i32 {
     print_run_context(&loaded, &events, bars_per_year);
     print_results(&loaded, &results);
     println!("  determinism hash {:016x}", grid_hash(&results));
+    print_path_sensitivity(
+        results.iter().map(|r| r.result.n_protective_exits).sum(),
+        results.iter().map(|r| r.result.path_sensitive_bars).sum(),
+    );
     print_footer(&loaded);
     0
 }
@@ -520,6 +526,31 @@ fn print_results(loaded: &LoadedConfig, results: &[Replay]) {
             "\n  {cancelled} order(s) were still pending when the series ended, and were cancelled."
         );
     }
+}
+
+/// The path-sensitivity flag, summed over a grid.
+///
+/// Printed even when it is zero, and printed with the *reason* it is zero:
+/// "there were no ambiguous bars" and "nothing here can have ambiguous bars"
+/// are different facts, and a reader who cannot tell them apart does not know
+/// whether the grid's returns depend on an intrabar convention. Shared by
+/// `combo` and `walk-forward` so the two cannot drift.
+pub(crate) fn print_path_sensitivity(exits: usize, sensitive: usize) {
+    if exits == 0 {
+        println!(
+            "\n  intrabar       no combo declared a stop or target, so no exit above is\n\
+             \x20                path-dependent and {INTRABAR_CONVENTION} never had to choose.\n\
+             \x20                Brackets reach a replay through `crucible backtest\n\
+             \x20                --stop-ticks/--target-ticks` in this build; the combo grammar\n\
+             \x20                does not carry them yet (D-0068)."
+        );
+        return;
+    }
+    println!(
+        "\n  intrabar       {INTRABAR_CONVENTION} — {sensitive} of {exits} stop/target exit(s)\n\
+         \x20                across the grid came from a bar that touched BOTH levels, where the\n\
+         \x20                convention chose the outcome rather than the data (D-0068)."
+    );
 }
 
 fn print_footer(loaded: &LoadedConfig) {

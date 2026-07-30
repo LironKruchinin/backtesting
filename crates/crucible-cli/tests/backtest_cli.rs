@@ -192,6 +192,31 @@ fn a_malformed_contract_spec_is_a_usage_error() {
     }
 }
 
+// A bracket distance of zero puts the level on the entry price and a negative
+// one puts it on the wrong side of the market. `Bracket::new` asserts on both,
+// so catching them here is the difference between an explanation and a panic
+// backtrace (CLAUDE.md §5.1).
+#[test]
+fn a_nonpositive_bracket_distance_is_a_usage_error() {
+    let dir = TempDir::new();
+    let env = data_dir(&dir);
+    for bad in [
+        vec!["--stop-ticks", "0"],
+        vec!["--stop-ticks", "-8"],
+        vec!["--target-ticks", "0"],
+        vec!["--target-ticks", "-12"],
+    ] {
+        let args = with(&bad);
+        let out = run(dir.path(), &as_refs(&args), &refs(&env));
+        assert_eq!(out.status.code(), Some(2), "{bad:?}: {}", stderr(&out));
+        assert!(
+            stderr(&out).contains("positive tick distance"),
+            "{bad:?}: {}",
+            stderr(&out)
+        );
+    }
+}
+
 // "not found" has to be actionable: curated data is built, not downloaded.
 #[test]
 fn missing_curated_data_names_the_command_that_builds_it() {

@@ -159,14 +159,25 @@ impl Portfolio {
         self.cash_nano_usd + self.unrealized_nano_usd()
     }
 
+    /// The signed position: long > 0, short < 0.
+    ///
+    /// Separate from [`Portfolio::view`] because the replay loop asks this
+    /// question after every fill — to decide whether a protective bracket
+    /// still has anything to protect — and does not need equity marked to
+    /// answer it.
     #[must_use]
-    pub fn view(&self) -> PortfolioView {
+    pub fn position(&self) -> Qty {
         #[expect(
             clippy::cast_possible_truncation,
             reason = "positions are small i64 by construction"
         )]
+        Qty(self.position as i32)
+    }
+
+    #[must_use]
+    pub fn view(&self) -> PortfolioView {
         PortfolioView {
-            position: Qty(self.position as i32),
+            position: self.position(),
             avg_entry: (self.position != 0).then_some(self.avg_entry),
             cash_nano_usd: self.cash_nano_usd,
             equity_nano_usd: self.equity_nano_usd(),

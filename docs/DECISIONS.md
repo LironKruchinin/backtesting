@@ -1084,3 +1084,110 @@ propose a superseding entry — don't silently diverge.
   ($4,000, not $4,500 — corroborated by their own $154,100 safety net) and
   Topstep's consistency rule (best day ≤ 50 % of the *profit target*, not 30 % of
   total profit).
+- **D-0068** (2026-07-30) — **Stops and targets ride along with the order that
+  opens the position, and one named convention — `stop_first_intrabar` — decides
+  what an OHLC bar refuses to say. Ambiguous bars are counted and printed, not
+  refused.** M2's "worst-case intrabar ordering; flag path-sensitive results".
+  *The problem is real and unavoidable.* A bar records four prices and no
+  ordering. If a position's stop and its target both sit inside `[low, high]`,
+  the bar is equally consistent with either having printed first, and the two
+  readings differ by the entire width of the bracket — on the fixture in
+  `crucible-engine/tests/bracket_golden.rs`, $250 on one bar. Every bar-based
+  backtest picks a rule; the failure mode this project exists to prevent is
+  picking one *silently*. So the rule has a name, a module that is its
+  specification (`crucible-engine::bracket`), and a count that travels with
+  every result it touched.
+  **The rule, in three steps.** (1) *The opening print is known, and it wins.*
+  The open is the bar's first trade by definition, so a level the open already
+  passed was reached before anything else could happen — and the fill is **at
+  the opening print, never at the level**. A bar that opened three points
+  through your stop never offered your stop; filling there manufactures a price
+  the market did not print, which is a worse sin than being wrong about
+  ordering, because it is wrong about *prices*. This resolves gaps in both
+  directions: a gapped stop is worse than its level, a gapped target is better
+  than its level, and both are simply what traded. Rule 1 also settles the case
+  that looks like a counterexample to "stop first" — a bar opening through the
+  target fills the **target** even though the low later reached the stop,
+  because the alternative asserts the price passed a resting limit without
+  filling it, which is not pessimism, it is impossibility. (2) *Otherwise, both
+  legs touched ⇒ the **stop** fills, at its level.* Worst case for the strategy,
+  chosen because the ambiguity is genuine: a number handed to a reader must be
+  the pessimistic end of the range the data permits. (3) Otherwise whichever
+  single leg was touched, or neither. Only branch 2 increments the
+  path-sensitivity count — counting gaps would drown the signal in bars whose
+  path the open already settled.
+  **Rejected: resolve ambiguous bars by proximity to the open** ("whichever
+  level is nearer the open probably printed first"). It is intuitively
+  appealing, it is what several retail backtesters do, and it is unusable here —
+  it resolves roughly half of ambiguous bars *in the strategy's favour*, so a
+  strategy can be paid for a fact the data does not contain, and the payment
+  grows as the bracket tightens. A tight-bracket grid would show a plateau that
+  is an artifact of the tie-break. Also rejected: a seeded coin flip
+  (reproducible, but it makes the result a function of the seed, and §2.2's
+  determinism is not the same thing as honesty), and **refusing to replay
+  ambiguous bars at all**. Refusal is right when a wrong answer is
+  unrecoverable and a re-run is cheap (D-0029, D-0033); it is wrong here,
+  because ambiguity is not a defect in the input to be fixed upstream but a
+  permanent property of OHLC data. A 1m ES series has ambiguous bars for any
+  bracket narrow enough to be interesting, so refusing means refusing the
+  feature. Counting is what makes it honest: `combo`, `walk-forward` and
+  `backtest` all print the count beside the fill model, and `backtest` escalates
+  to a loud block naming the share and what a target-first rule would have paid
+  instead. A run whose PnL turns on many ambiguous bars is one to distrust, and
+  the report says so in those words.
+  **At the level exactly, the two legs are deliberately asymmetric**: a stop
+  triggers on `low <= stop` (a print *at* the stop proves the market got there,
+  and a stop is a market order from that instant), a target needs
+  `high > target` (a print at a resting limit proves nothing — there was a queue
+  in front of it). Both halves are the pessimistic reading, which is why they
+  point opposite ways, and the target's strictness is the only defence this
+  layer has against the queue-position optimism that keeps `OrderKind::Limit`
+  out of the engine until M4's `queue_sim`. It is a floor on the pessimism, not
+  a proof.
+  **Offsets from the fill price, not absolute levels, and the bracket is live on
+  the bar its parent filled on.** A strategy cannot know its entry price when it
+  places the entry (§2.1), so absolute levels would have to be computed from a
+  price it hoped for, or installed a bar late — leaving every entry naked for
+  exactly one bar, which is the bar a stop is for. Riding along with the parent
+  means the levels are the ones the position actually got, and the bracket
+  inherits the parent's `placed_ts`, so §2.1 still holds: it is only ever tested
+  against events strictly after the event that asked for it. Replay step 1
+  splits into 1.1 (market orders, at the open) then 1.2 (the bracket, against
+  this bar's range) — in that order, because the open is the first trade and a
+  resting level cannot be touched before it. A bracket is
+  one-cancels-the-other, is dropped when the position goes flat or flips, and
+  exits the whole position. Consequence worth naming: under `spread_cross`, a
+  stop closer than the half-spread lands at or beyond the opening print and
+  stops out immediately. That is the fill model being honest — you bought the
+  offer and put your stop on the bid.
+  **`FillModel` gains a second *required* method, `fill_protective_exit`.** Not
+  defaulted: a default would price every bracketed strategy's exits under an
+  assumption nobody named, and §2.4 does not allow that to exist. The two legs
+  are not the same trade — a stop is a market order once touched and crosses the
+  spread, a target is a resting limit the market came to and does not — so
+  `spread_cross` charges the half-spread on the stop leg only, and the
+  commission on both. `FreeFills` charges nothing on either, because a
+  half-costed screening model is worse than a frankly uncostless one (D-0006).
+  Ordering lives in the engine and costing in the fill model, so two fill models
+  can never disagree about the path a bar took.
+  **Not a new fill model name.** §4's `free_fills` / `spread_cross` /
+  `queue_sim` list is unchanged; this is an orthogonal named assumption that
+  applies inside all of them, and it is reported next to the fill model rather
+  than folded into it. **Not yet a config axis, either**: the combo grammar
+  cannot declare a bracket in this build, so `combo` and `walk-forward` print
+  zero and say *why* it is zero, and brackets reach a replay through
+  `crucible backtest --stop-ticks/--target-ticks` (or `strategies::Bracketed`,
+  the decorator that gives every strategy the same protective behaviour from one
+  implementation, as `Aligned` does for warmup). Grid axes over stop distance
+  are an S1 question and land with the funnel; the capability and its convention
+  land first, with the three determinism hashes (demo `b55747513df596ed`, combo
+  `0e1ab52d474b862b`, walk-forward `711e1cb34a2ee2b4`) provably unmoved.
+  **Negative controls, per §7.** Every branch has a fixture with hand arithmetic
+  and the counterfactual value written out, and the detector was watched
+  failing: disabling the `path_sensitive` flag fails four tests, making the rule
+  target-first fails the stop-first fixtures with exactly the $100,150 their
+  comments predict, and filling a gapped stop at its level instead of the open
+  fails with exactly the $99,900 its comment predicts. A bracketed run with no
+  ambiguous bar reports zero, and an unbracketed run reports zero however
+  violent its bars — a flag that fired on every exit would be
+  indistinguishable from one that worked.

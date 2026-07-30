@@ -19,7 +19,10 @@ pub mod types;
 
 pub mod prelude {
     //! Convenience re-exports: `use crucible_core::prelude::*;`
-    pub use crate::events::{Bar, Fill, MarketEvent, Order, OrderIntent, OrderKind, Side};
+    pub use crate::events::{
+        Bar, Bracket, BracketLeg, Fill, MarketEvent, Order, OrderIntent, OrderKind, ProtectiveExit,
+        Side,
+    };
     pub use crate::traits::{Actions, Feed, FillModel, Indicator, PortfolioView, Strategy};
     pub use crate::types::{
         ContractSpec, InstrumentId, NanoUsd, Price, Qty, TimeFrame, Ts, nano_usd_to_f64,

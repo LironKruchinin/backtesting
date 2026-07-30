@@ -92,6 +92,12 @@ the CI double-run hash gate.
 - `FreeFills` is sanctioned only for funnel stages S0–S1. Any number
   reported outside a screening context states its fill model.
 - Every scorecard includes the cost-sensitivity sweep (0/0.5/1/2 ticks).
+- The **intrabar ordering convention** is a second named assumption, reported
+  beside the fill model: an OHLC bar does not say whether its high or its low
+  printed first, so a stop and a target inside one bar are path-ambiguous.
+  `stop_first_intrabar` (`crucible-engine::bracket`, D-0068) resolves it, and
+  the bars where it decided the outcome are counted and printed. A run whose
+  PnL turns on many of them is a run to distrust.
 
 ### 2.5 Reproducibility of results
 Every persisted result carries: config hash (blake3 over canonicalized
@@ -164,6 +170,8 @@ introduce synonyms; do not repurpose these words.
 | **plateau** | contiguous grid region of similar performance (what we trust — vs a spike, which we don't) |
 | **avail_ts** | availability time (§2.1). The universal ordering key. |
 | **ts_open / event time** | when the thing happened in the market. Display only. |
+| **bracket** | protective stop and/or target attached to the order that opens a position, in ticks from *its fill price*; one-cancels-the-other |
+| **path-sensitive** | a result that depended on the intrabar ordering convention: some bar touched both a stop and a target, so the bar's own path had to be assumed (§2.4, D-0068) |
 
 Pinned conventions:
 - **Units in names.** Money fields end `_nano_usd`; percentages end `_pct`
@@ -175,6 +183,9 @@ Pinned conventions:
   (`ES.v.0` volume-roll, `ES.c.0` calendar-roll), synthetic `SYN:*`.
 - **Fill model names** (config values): `free_fills`, `spread_cross`,
   `queue_sim` (M4). Adding one = decision-log entry.
+- **Intrabar ordering convention name**: `stop_first_intrabar` — the only one,
+  orthogonal to the fill model and applying inside all of them (D-0068).
+  Adding a second = decision-log entry, and it must be reported per result.
 - **Orders**: positive `qty` magnitude + `Side`; **positions**: signed
   (long > 0). `Actions::target_position` is the idiomatic way to trade.
 - **Timestamps**: UTC nanoseconds (`Ts`) everywhere. Timezone/session logic
@@ -464,6 +475,36 @@ reference; supersede the decision if you disagree — don't hotfix.
   randomness yet** (D-0064). Building the derivation before its first consumer
   is the point: otherwise the first randomized component invents its own, in
   the least visible place.
+- **A bar that touched both the stop and the target fills the STOP**, always,
+  never the target and never the nearer level (D-0068). The bar does not record
+  which printed first; resolving ambiguity in the strategy's favour pays it for
+  a fact the data does not contain, and pays more the tighter the bracket. The
+  count of such bars is printed with the result — that is the flag, not a
+  debugging aid.
+- **A gapped level fills at the opening print, not at the level** — including
+  a gapped *target*, where the opening print is better than the level (D-0068).
+  The rule is "never manufacture a price the market did not offer", and it is
+  symmetric. It also means a bar that opens through the target fills the target
+  even if the low later reached the stop: the alternative asserts the price
+  passed a resting limit without filling it.
+- **A gapped exit is not counted as path-sensitive** though both levels may lie
+  inside the bar: the opening print settled the ordering, so nothing was
+  assumed. Counting it would bury the bars that actually depend on the
+  convention.
+- **A stop fills when the price merely touches it, but a target needs a print
+  strictly through it.** Deliberately asymmetric (D-0068): a trade at the stop
+  proves the market got there and a stop is a market order from that instant; a
+  trade at a resting limit proves only that there was a queue in front of it.
+  Both halves are the pessimistic reading, so they point opposite ways.
+- **A bracket can stop out on the same bar its entry filled on**, and under
+  `spread_cross` a stop closer than the half-spread stops out *immediately*
+  (D-0068). Both are correct. The bracket rests from the moment the parent
+  filled, and a stop one tick below a price you paid the offer for is sitting on
+  the bid.
+- **`combo` and `walk-forward` print an intrabar-convention line saying the
+  count is zero and why.** No config can declare a bracket in this build, so
+  "no number printed" and "no ambiguous bars" would look identical to a reader
+  otherwise — and only one of them means the returns are safe to quote.
 
 ---
 
@@ -484,6 +525,12 @@ cargo run -p crucible-cli -- layout-check      # is the tree the shape DATA_LAYO
 cargo run -p crucible-cli --features databento -- transcode
 cargo run -p crucible-cli -- backtest --instrument ESH4 --timeframe 1m \
   --start 2024-01-01 --end 2024-02-01 --fast 20 --slow 50
+
+# The same run with protective levels, in ticks from each entry's fill price.
+# Both flags are optional and either alone is legal; the header names the
+# intrabar convention and the result counts the bars where it chose (D-0068).
+cargo run -p crucible-cli -- backtest --instrument ESH4 --timeframe 1m \
+  --start 2024-01-01 --end 2024-02-01 --stop-ticks 8 --target-ticks 12
 
 # The combo path: a strategy defined in TOML rather than in Rust. Expansion
 # alone spends nothing and touches no archive; `--run` replays every combo on
