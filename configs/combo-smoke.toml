@@ -67,6 +67,33 @@ train_days = 5
 test_days = 2
 step_days = 2
 
+# Pre-registered kill criteria for `crucible funnel`, written BEFORE the run
+# and stored verbatim on the registry row that is inserted before the run.
+#
+# This config is the null harness, so the honest thresholds are the ones a
+# random walk fails: the sample minimums are set low enough that the 20,000-bar
+# fixture reaches them (so the gates are actually exercised rather than
+# short-circuiting at S0), and the performance bars are set where a real idea
+# would have to clear them. A run of this file that reports anything other than
+# KILL for every combo is a bug in the engine, not an edge.
+[funnel]
+# s0 (signal triage) and s3 (the overfitting battery) are NOT implemented, and
+# a config that names either is refused rather than silently skipped.
+stages = ["s1", "s2"]
+# Mandatory, all four levels (CLAUDE.md §2.4). Every entry must be a whole
+# number of half-ticks — a price grid has half-ticks, not tenths (D-0073).
+cost_sensitivity_ticks = [0.0, 0.5, 1.0, 2.0]
+min_oos_trades = 5
+min_oos_sessions = 4
+min_oos_return_pct_free_fills = 0.0
+min_oos_sharpe_after_costs = 0.5
+kill_if_dead_at_ticks = 1.0
+require_controls_beaten = true
+# Declared and echoed; NOT evaluated by this build, which is why the scorecard
+# renders both as named holes rather than leaving them out.
+max_pbo = 0.5
+require_plateau = true
+
 [run]
 seed = 42
 initial_cash_usd = "100000"

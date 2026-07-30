@@ -16,11 +16,29 @@ crucible-core = { path = "../crucible-core" }
 crucible-engine = { path = "../crucible-engine" }
 crucible-strategies = { path = "../crucible-strategies" }
 
-# --- Milestone M3 additions (do not add before implementing; CLAUDE.md §6) ---
-# rayon  = "..."      # run-level parallelism (the ONLY place threads are spawned)
-# duckdb = "..."      # results store + trial registry
-# serde / toml        # config parsing (deny_unknown_fields everywhere)
-# blake3 = "..."      # canonical config hashes
+# Run-level parallelism. THE ONLY place in the workspace that spawns threads
+# (CLAUDE.md §3, D-0005). Results merge by grid index, never by completion
+# order — see `scheduler`'s module docs for why that is a property of the shape
+# rather than a sort afterwards.
+rayon = "1.11"
+# The trial registry and its records. `duckdb` is what §6 blesses for this row
+# and it was tried first; its bundled build fails on this toolchain, so the
+# backend is append-only JSONL honouring the identical contract (D-0074).
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# Run ids: blake3 over the canonical run key, so two processes name the same
+# run identically without talking to each other (D-0012's device).
+blake3 = "1.8"
+
+# --- Milestone M3, still outstanding (do not add before implementing; §6) ---
+# rand_chacha = "..." # block permutation / bootstrap resampling, with `stats`
+
+[dev-dependencies]
+# `tests/planted_leak.rs` runs the planted lookahead defect on THIS project's
+# own null harness — the seeded random walk `configs/combo-smoke.toml` replays
+# — rather than on a fixture built to make the point. §3 sanctions a
+# dev-dependency on `data` for exactly this.
+crucible-data = { path = "../crucible-data" }
 
 [lints]
 workspace = true

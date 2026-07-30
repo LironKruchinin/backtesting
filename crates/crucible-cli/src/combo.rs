@@ -30,9 +30,7 @@ use crucible_data::calendar::Calendar;
 use crucible_data::curated::{CuratedError, ParquetBarFeed};
 use crucible_data::ingest::range_from_dates;
 use crucible_data::ingest::window::parse_civil_date;
-use crucible_engine::{
-    BacktestParams, BacktestResult, FreeFills, INTRABAR_CONVENTION, SpreadCrossFills, run,
-};
+use crucible_engine::{BacktestParams, BacktestResult, FreeFills, INTRABAR_CONVENTION, run};
 use crucible_strategies::Aligned;
 use crucible_strategies::combo::ComboStrategy;
 
@@ -43,9 +41,11 @@ use crate::pull::{EXIT_FAILED, EXIT_USAGE, data_dir};
 pub(crate) const NANOS_PER_YEAR: f64 = 365.2425 * 86_400.0 * 1e9;
 
 /// Combos above which a grid is more likely a mistyped `step` than a plan.
-/// `crucible-funnel::grid`'s spec says warn here; the funnel will refuse,
-/// once a run costs hours rather than seconds.
-pub(crate) const LOUD_COMBO_COUNT: usize = 10_000;
+///
+/// Re-exported from `crucible-funnel::grid` rather than restated: `combo`
+/// warns at this count and `funnel` refuses at a higher one, and two crates
+/// holding their own copy of either number is how they drift apart.
+pub(crate) use crucible_funnel::grid::LOUD_COMBO_COUNT;
 
 /// Combos listed in full before the listing is elided.
 const LIST_LIMIT: usize = 40;
@@ -92,13 +92,14 @@ pub fn run_cmd(args: &ComboArgs) -> i32 {
         return 0;
     }
 
-    let events = match collect_events(&loaded) {
-        Ok(events) => events,
+    let series = match collect_events(&loaded) {
+        Ok(series) => series,
         Err((code, message)) => {
             eprintln!("error: {message}");
             return code;
         }
     };
+    let events = series.events;
     if events.is_empty() {
         eprintln!("error: the data source produced no bars; there is nothing to replay");
         return EXIT_USAGE;
@@ -172,10 +173,7 @@ fn run_with_fill_model(
     if loaded.file.execution.fill_model == "free_fills" {
         run(feed, strategy, &mut FreeFills, &loaded.spec, params).expect(expect)
     } else {
-        let mut fills = SpreadCrossFills {
-            half_spread_ticks: loaded.file.execution.half_spread_ticks,
-            fee_per_contract_nano_usd: loaded.fee_per_contract_nano_usd,
-        };
+        let mut fills = loaded.spread_cross_fills();
         run(feed, strategy, &mut fills, &loaded.spec, params).expect(expect)
     }
 }
@@ -199,8 +197,21 @@ impl Feed for SliceFeed<'_> {
     }
 }
 
+/// One bar series, with the provenance §2.5 makes a stored result carry.
+pub(crate) struct Series {
+    /// The bars, in availability order.
+    pub events: Vec<MarketEvent>,
+    /// blake3 of every archived raw file the curated partitions came from —
+    /// the "data manifest ids" D-0013 requires and D-0014 defines. Empty for a
+    /// synthetic feed, which is generated rather than archived, and whose
+    /// whole provenance is the seed named in [`Series::description`].
+    pub data_manifest_ids: Vec<String>,
+    /// What the bars were, in one line, for a report header.
+    pub description: String,
+}
+
 /// Materializes the config's data source into one bar series.
-pub(crate) fn collect_events(loaded: &LoadedConfig) -> Result<Vec<MarketEvent>, (i32, String)> {
+pub(crate) fn collect_events(loaded: &LoadedConfig) -> Result<Series, (i32, String)> {
     let instrument = &loaded.file.universe.instruments[0];
     match &loaded.file.data {
         DataSource::Synthetic {
@@ -236,7 +247,18 @@ pub(crate) fn collect_events(loaded: &LoadedConfig) -> Result<Vec<MarketEvent>, 
                 loaded.spec.tick,
                 *vol_ticks,
             );
-            Ok(std::iter::from_fn(|| feed.next_event()).collect())
+            Ok(Series {
+                events: std::iter::from_fn(|| feed.next_event()).collect(),
+                // A generated series has no archived bytes to name. Its
+                // provenance is the seed, which is in the description below —
+                // an empty manifest list here is a fact, not an omission, and
+                // the scorecard says which one it is.
+                data_manifest_ids: Vec::new(),
+                description: format!(
+                    "synthetic random walk — seed {seed}, {bars} bars, from \
+                     {start_price_points} pt, ±{vol_ticks} ticks"
+                ),
+            })
         }
         DataSource::Curated { start, end } => {
             // A continuous alias needs a consumer that names which of the two
@@ -280,7 +302,27 @@ pub(crate) fn collect_events(loaded: &LoadedConfig) -> Result<Vec<MarketEvent>, 
                     };
                     (code, e.to_string())
                 })?;
-            Ok(std::iter::from_fn(|| feed.next_event()).collect())
+            // The manifest ids §2.5 requires, taken from the curated files'
+            // own metadata: each names exactly one raw file's blake3 (D-0036),
+            // which IS its manifest id (D-0014). Deduplicated and sorted,
+            // because a result's provenance is a set and a set printed in file
+            // order would change with the filesystem.
+            let mut data_manifest_ids: Vec<String> = feed
+                .sources()
+                .iter()
+                .map(|s| s.source_file_blake3.clone())
+                .collect();
+            data_manifest_ids.sort_unstable();
+            data_manifest_ids.dedup();
+            Ok(Series {
+                description: format!(
+                    "curated {instrument} {} {start}..{end} — {} source file(s)",
+                    loaded.timeframe,
+                    data_manifest_ids.len()
+                ),
+                data_manifest_ids,
+                events: std::iter::from_fn(|| feed.next_event()).collect(),
+            })
         }
     }
 }
@@ -555,7 +597,7 @@ pub(crate) fn print_path_sensitivity(exits: usize, sensitive: usize) {
 
 fn print_footer(loaded: &LoadedConfig) {
     println!("  not consumed by `combo`:");
-    for section in loaded.unconsumed_sections(false) {
+    for section in loaded.unconsumed_sections(config::Consumer::Combo) {
         println!("    {section}");
     }
     println!(

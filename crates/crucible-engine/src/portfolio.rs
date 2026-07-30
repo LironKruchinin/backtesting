@@ -37,6 +37,17 @@ pub struct ClosedTrade {
     pub closed_ts: Ts,
     /// Net PnL of the round-trip, fees included.
     pub net_nano_usd: NanoUsd,
+    /// Which way the episode was pointed: [`Side::Buy`] for a long episode,
+    /// [`Side::Sell`] for a short one.
+    ///
+    /// Constant over the episode by construction — a fill that reverses the
+    /// sign closes this round-trip and opens the next one, so there is no
+    /// episode with two directions. Recorded because a matched random-entry
+    /// control has to reproduce the *mix*: a strategy that was long 90 % of
+    /// the time and a coin-flip control are not comparable in a market with
+    /// drift, and a control that quietly gives itself a different direction
+    /// mix measures the drift instead of the timing.
+    pub direction: Side,
     /// `avail_ts` of the fill that left flat and opened this round-trip.
     ///
     /// A flip through zero closes one episode and opens another at the same
@@ -84,6 +95,9 @@ pub struct Portfolio {
     episode_net: NanoUsd,
     /// `avail_ts` of the fill that opened the round-trip currently open.
     episode_opened_ts: Option<Ts>,
+    /// Direction of the round-trip currently open, set by the fill that left
+    /// flat and never changed while it stays open.
+    episode_direction: Option<Side>,
     /// Running extremes of `episode_net + unrealized` over the marks the
     /// current round-trip has been open for. Seeded at zero, which is the
     /// account's position the instant before the opening fill.
@@ -108,6 +122,7 @@ impl Portfolio {
             last_mark: None,
             episode_net: 0,
             episode_opened_ts: None,
+            episode_direction: None,
             episode_mae_nano_usd: 0,
             episode_mfe_nano_usd: 0,
             closed_trades: Vec::new(),
@@ -150,6 +165,9 @@ impl Portfolio {
                 self.closed_trades.push(ClosedTrade {
                     closed_ts: fill.ts,
                     net_nano_usd: self.episode_net,
+                    direction: self
+                        .episode_direction
+                        .expect("INVARIANT: a position cannot close without having opened"),
                     opened_ts: self
                         .episode_opened_ts
                         .expect("INVARIANT: a position cannot close without having opened"),
@@ -158,6 +176,7 @@ impl Portfolio {
                 });
                 self.episode_net = 0;
                 self.episode_opened_ts = None;
+                self.episode_direction = None;
                 self.episode_mae_nano_usd = 0;
                 self.episode_mfe_nano_usd = 0;
                 self.avg_entry = Price::ZERO;
@@ -168,6 +187,7 @@ impl Portfolio {
         if remaining != 0 {
             if self.position == 0 {
                 self.episode_opened_ts = Some(fill.ts);
+                self.episode_direction = Some(if remaining > 0 { Side::Buy } else { Side::Sell });
                 self.avg_entry = fill.price;
                 self.position = remaining;
             } else {
@@ -354,6 +374,7 @@ mod tests {
             &[ClosedTrade {
                 closed_ts: Ts(40), // the CLOSING fill, not the opening one
                 net_nano_usd: 46_000_000_000,
+                direction: Side::Buy,
                 opened_ts: Ts(10),
                 // No mark happened while the position was open, so the
                 // excursions are the seed. Not the round-trip's PnL: MAE/MFE
@@ -429,6 +450,7 @@ mod tests {
             &[ClosedTrade {
                 closed_ts: Ts(50),
                 net_nano_usd: -54_000_000_000,
+                direction: Side::Buy,
                 opened_ts: Ts(10),
                 mae_nano_usd: -202_000_000_000,
                 mfe_nano_usd: 148_000_000_000,
@@ -569,11 +591,21 @@ mod tests {
         assert_eq!(t.opened_ts, Ts(1));
     }
 
-    /// 40 bytes per round-trip is what makes "retain in full at every grain"
-    /// affordable: 50,000 round-trips over 16 years is 2 MB.
+    /// 48 bytes per round-trip is what makes "retain in full at every grain"
+    /// affordable: 50,000 round-trips over 16 years is 2.4 MB.
+    ///
+    /// It was 40 until M3's matched random-entry control needed to reproduce
+    /// the direction mix of the trades it benchmarks; `direction` is one byte
+    /// that pads to eight. Pinned like `DayRecord`'s 56 (D-0071), and for the
+    /// same reason — a field added without thought should be a failing test
+    /// rather than a memory regression nobody measures. The retained artifact
+    /// here is O(round-trips) and not O(bars), which is the property that
+    /// actually matters: 48 bytes a *trade* stays small at any replay grain,
+    /// where 16 bytes a *bar* does not.
     #[test]
-    fn a_closed_trade_is_forty_bytes() {
-        // Ts + NanoUsd + Ts + NanoUsd + NanoUsd = 5 × 8.
-        assert_eq!(size_of::<ClosedTrade>(), 40);
+    fn a_closed_trade_is_forty_eight_bytes() {
+        // Ts + NanoUsd + Side(+7 pad) + Ts + NanoUsd + NanoUsd = 6 × 8.
+        assert_eq!(size_of::<ClosedTrade>(), 48);
+        assert_eq!(50_000 * size_of::<ClosedTrade>(), 2_400_000);
     }
 }

@@ -76,10 +76,7 @@ fn four_bar_golden_scenario() {
         .into_iter(),
     };
     let mut strategy = Scripted { bar_idx: 0 };
-    let mut fills = SpreadCrossFills {
-        half_spread_ticks: 1,
-        fee_per_contract_nano_usd: 1_250_000_000,
-    };
+    let mut fills = SpreadCrossFills::from_ticks(1, spec.tick).with_fee(1_250_000_000);
     let params = BacktestParams {
         initial_cash_nano_usd: 100_000_000_000_000,
         bars_per_year: 347_760.0,
@@ -121,10 +118,7 @@ fn out_of_order_feed_is_fatal() {
         .into_iter(),
     };
     let mut strategy = Scripted { bar_idx: 0 };
-    let mut fills = SpreadCrossFills {
-        half_spread_ticks: 1,
-        fee_per_contract_nano_usd: 0,
-    };
+    let mut fills = SpreadCrossFills::from_ticks(1, spec.tick).with_fee(0);
     let params = BacktestParams {
         initial_cash_nano_usd: 0,
         bars_per_year: 1.0,

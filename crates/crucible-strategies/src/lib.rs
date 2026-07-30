@@ -18,11 +18,13 @@
 pub mod align;
 pub mod bracket;
 pub mod combo;
+pub mod controls;
 pub mod indicators;
 pub mod sma_cross;
 
 pub use align::Aligned;
 pub use bracket::Bracketed;
 pub use combo::{ComboSpec, ComboStrategy, Grid};
+pub use controls::{BuyAndHold, ControlError, LeakyZScore, MatchedEpisode, RandomEntry};
 pub use indicators::{Bollinger, BollingerBands, Ema, Sma};
 pub use sma_cross::SmaCross;

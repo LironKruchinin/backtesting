@@ -134,26 +134,39 @@ pub struct PullArgs {
 /// touches the OS, kept here because library crates read no clock (D-0015,
 /// CLAUDE.md §2.2).
 ///
-/// Gated on either acquisition feature rather than on `databento` alone: it is
-/// not a Databento detail, it is *the* clock, and `thetadata` needs the same
-/// one to stamp `fetched_ts` on an inventory line. Two OS-clock implementations
-/// would be exactly the duplication D-0032 exists to prevent.
-#[cfg(any(feature = "databento", feature = "thetadata"))]
+/// The struct is **not** feature-gated, though the `Clock` trait impl is: the
+/// trait lives behind the acquisition features, but the clock itself is needed
+/// by `crucible funnel`, which is a default build. Gating the reader would mean
+/// a second `SystemTime::now` somewhere else in a default build, which is
+/// exactly the duplication D-0032 exists to prevent — so the OS read lives in
+/// the inherent method below and the trait impl delegates to it.
 pub struct SystemClock;
 
-#[cfg(any(feature = "databento", feature = "thetadata"))]
-impl crucible_data::ingest::clock::Clock for SystemClock {
+impl SystemClock {
+    /// Nanoseconds since the Unix epoch, from the OS.
+    ///
+    /// **THE** clock read in this workspace. Everything downstream takes the
+    /// instant as an argument (D-0015): `Catalog::append` takes an
+    /// `acquired_ts`, `crucible-funnel::registry` takes `started_at` as a
+    /// string, and neither can reach a clock even by accident.
     #[expect(
         clippy::disallowed_methods,
         reason = "D-0032: THE one implementation in the workspace that reads the \
                   OS clock, in a bin target for exactly that reason. Everything \
                   downstream takes the instant as an argument (D-0015)."
     )]
-    fn now_ts(&self) -> crucible_core::types::Ts {
+    pub fn now_ts(&self) -> crucible_core::types::Ts {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
         crucible_core::types::Ts(i64::try_from(nanos).unwrap_or(i64::MAX))
+    }
+}
+
+#[cfg(any(feature = "databento", feature = "thetadata"))]
+impl crucible_data::ingest::clock::Clock for SystemClock {
+    fn now_ts(&self) -> crucible_core::types::Ts {
+        SystemClock::now_ts(self)
     }
 
     fn sleep_secs(&self, secs: u64) {

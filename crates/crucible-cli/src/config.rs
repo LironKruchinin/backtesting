@@ -33,6 +33,8 @@ use std::path::{Path, PathBuf};
 
 use crucible_core::prelude::*;
 use crucible_data::ingest::money::parse_usd_to_nano;
+use crucible_engine::SpreadCrossFills;
+use crucible_funnel::stages::{Criteria, CriteriaError, CriteriaSource};
 use crucible_funnel::walkforward::{FoldError, FoldSpec};
 use crucible_strategies::combo::{
     ComboError, ComboSpec, ConfigHash, FloatAxis, Grid, IndicatorSpec, IntAxis, RuleSource,
@@ -259,26 +261,79 @@ impl WalkForward {
     }
 }
 
-/// `[funnel]` — parsed, not yet consumed.
+/// `[funnel]` — the pre-registered criteria, consumed by `crucible funnel`.
+///
+/// Every field here is written **before** the run and judged by a machine
+/// afterwards. That ordering is the whole point (`docs/PROJECT_PLAN.md` §7.2):
+/// a threshold chosen after seeing the result is not a criterion, it is a
+/// rationalization with a number in it. The funnel prints these back at the
+/// top of every scorecard, next to the verdict they produced, so a reader can
+/// check that the bar was set before the jump.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[expect(
-    dead_code,
-    reason = "pre-registered kill criteria are typo-checked here and evaluated by the funnel (M3); dropping them from the schema until then would let a config declare criteria nothing ever reads"
-)]
 pub struct FunnelCfg {
-    /// Which stages to run.
+    /// Which stages to run — `s0` / `s1` / `s2` / `s3`. A stage this build
+    /// does not implement is **refused**, not skipped: a config that asks for
+    /// the permutation battery and silently gets a fold table has been
+    /// answered with a different question than the one it asked.
     pub stages: Vec<String>,
-    /// The mandatory cost-sensitivity sweep (§2.4).
+    /// The mandatory cost-sensitivity sweep (§2.4), in ticks. Every entry must
+    /// be a whole number of half-ticks — `0.0`, `0.5`, `1.0`, `2.0` — because
+    /// that is what a price grid can express (D-0073).
     pub cost_sensitivity_ticks: Vec<f64>,
-    /// Pre-registered kill criterion.
+    /// S0 sample-adequacy criterion: a combo with fewer out-of-sample
+    /// round-trips than this is killed for having nothing to measure, before
+    /// any performance number is looked at.
+    pub min_oos_trades: usize,
+    /// S0 sample-adequacy criterion, the denominator §7.4 of the plan calls
+    /// "N independent days": out-of-sample trading days pooled across folds.
+    pub min_oos_sessions: usize,
+    /// S1 criterion, applied under `free_fills`: a strategy that cannot make
+    /// money cost-free is dead cheaply (D-0006).
+    pub min_oos_return_pct_free_fills: f64,
+    /// S2 criterion, applied under the config's own costed fill model.
     pub min_oos_sharpe_after_costs: f64,
-    /// Pre-registered kill criterion.
-    pub max_pbo: f64,
-    /// Pre-registered kill criterion.
-    pub require_plateau: bool,
-    /// Pre-registered kill criterion.
+    /// S2 criterion: the combo must still clear
+    /// `min_oos_sharpe_after_costs` at this many ticks of half-spread, or the
+    /// edge is a rounding error on the cost assumption.
     pub kill_if_dead_at_ticks: f64,
+    /// S2 criterion: the combo must beat both mandatory controls
+    /// (random-entry and buy-and-hold) on pooled out-of-sample return, or its
+    /// number is the market's and not the strategy's.
+    pub require_controls_beaten: bool,
+    /// S3 criterion. Parsed and echoed; **not evaluated** by this build, and
+    /// the report says so on every run — PBO needs the CSCV recombination
+    /// machinery that lands with the rest of `crucible-funnel::stats`.
+    pub max_pbo: f64,
+    /// S3 criterion. Parsed and echoed; not evaluated by this build, for the
+    /// same reason.
+    pub require_plateau: bool,
+}
+
+impl FunnelCfg {
+    /// The pre-registered criteria this section describes.
+    ///
+    /// # Errors
+    /// [`ConfigError::Criteria`] if a stage is unknown or unimplemented, or if
+    /// the mandatory cost sweep is incomplete or unrepresentable. Everything
+    /// judgeable before a bar is replayed is judged here, because a criterion
+    /// that turns out to be unevaluable after an hour of grid replay has
+    /// already cost the hour.
+    pub fn to_criteria(&self) -> Result<Criteria, ConfigError> {
+        Criteria::new(&CriteriaSource {
+            stages: &self.stages,
+            cost_sensitivity_ticks: &self.cost_sensitivity_ticks,
+            min_oos_trades: self.min_oos_trades,
+            min_oos_sessions: self.min_oos_sessions,
+            min_oos_return_pct_free_fills: self.min_oos_return_pct_free_fills,
+            min_oos_sharpe_after_costs: self.min_oos_sharpe_after_costs,
+            kill_if_dead_at_ticks: self.kill_if_dead_at_ticks,
+            require_controls_beaten: self.require_controls_beaten,
+            max_pbo: self.max_pbo,
+            require_plateau: self.require_plateau,
+        })
+        .map_err(ConfigError::Criteria)
+    }
 }
 
 /// `[run]`.
@@ -360,6 +415,8 @@ pub enum ConfigError {
     Spec(ComboError),
     /// `[walk_forward]` does not describe a fold layout.
     Folds(FoldError),
+    /// `[funnel]` does not describe runnable pre-registered criteria.
+    Criteria(CriteriaError),
     /// A field parsed as text but is not a valid value.
     Field {
         /// Dotted path of the field.
@@ -390,6 +447,7 @@ impl std::fmt::Display for ConfigError {
             ),
             ConfigError::Spec(e) => write!(f, "{e}"),
             ConfigError::Folds(e) => write!(f, "walk_forward: {e}"),
+            ConfigError::Criteria(e) => write!(f, "funnel: {e}"),
             ConfigError::Field { field, message } => write!(f, "{field}: {message}"),
         }
     }
@@ -584,31 +642,56 @@ impl FloatAxisCfg {
 }
 
 impl LoadedConfig {
+    /// The costed fill model this config declares.
+    ///
+    /// The half-spread reaches [`SpreadCrossFills`] as a **distance** rather
+    /// than a tick count (D-0073), so the funnel's mandatory 0 / 0.5 / 1 / 2
+    /// tick sweep can express its middle level; a config still writes whole
+    /// ticks, which is what `execution.half_spread_ticks` means.
+    #[must_use]
+    pub fn spread_cross_fills(&self) -> SpreadCrossFills {
+        SpreadCrossFills::from_ticks(self.file.execution.half_spread_ticks, self.spec.tick)
+            .with_fee(self.fee_per_contract_nano_usd)
+    }
+
     /// Names the sections that parsed but that the running command does not
     /// act on.
     ///
     /// Printed with every report. A declared kill criterion nothing evaluates
     /// is the quietest way for a config to be wrong, so the honest move is to
     /// say so on every run rather than to trust a reader to remember which
-    /// milestone consumes what. `walk_forward_consumed` is what makes the
-    /// list command-specific: `crucible combo` reports one number for the
-    /// whole series and genuinely ignores `[walk_forward]` and `[run].seed`;
-    /// `crucible walk-forward` reads both, so listing them there would be a
-    /// different lie from the one this method exists to prevent.
+    /// milestone consumes what. The `consumer` argument is what makes the list
+    /// command-specific: `crucible combo` reports one number for the whole
+    /// series and genuinely ignores `[walk_forward]`, `[funnel]` and
+    /// `[run].seed`; `crucible funnel` reads all three, so listing them there
+    /// would be a different lie from the one this method exists to prevent.
     #[must_use]
-    pub fn unconsumed_sections(&self, walk_forward_consumed: bool) -> Vec<&'static str> {
+    pub fn unconsumed_sections(&self, consumer: Consumer) -> Vec<&'static str> {
         let mut out = Vec::new();
-        if self.file.walk_forward.is_some() && !walk_forward_consumed {
+        if self.file.walk_forward.is_some() && consumer == Consumer::Combo {
             out.push("[walk_forward] — folds; run `crucible walk-forward` to consume them");
         }
-        if self.file.funnel.is_some() {
-            out.push("[funnel] — stages, the cost sweep and the kill criteria arrive with M3");
+        if self.file.funnel.is_some() && consumer != Consumer::Funnel {
+            out.push(
+                "[funnel] — stages, the cost sweep and the kill criteria; run `crucible funnel`",
+            );
         }
-        if !walk_forward_consumed {
+        if consumer == Consumer::Combo {
             out.push(
                 "[run].seed — nothing reads it here; `walk-forward` derives per-fold seeds from it",
             );
         }
         out
     }
+}
+
+/// Which command is asking [`LoadedConfig::unconsumed_sections`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Consumer {
+    /// `crucible combo` — one window, no folds, no gates.
+    Combo,
+    /// `crucible walk-forward` — folds and seeds, no gates.
+    WalkForward,
+    /// `crucible funnel` — everything.
+    Funnel,
 }

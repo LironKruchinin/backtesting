@@ -23,10 +23,7 @@ fn one_run() -> crucible_engine::BacktestResult {
         4,
     );
     let mut strategy = SmaCross::new(20, 50, Qty(1));
-    let mut fills = SpreadCrossFills {
-        half_spread_ticks: 1,
-        fee_per_contract_nano_usd: 1_250_000_000,
-    };
+    let mut fills = SpreadCrossFills::from_ticks(1, spec.tick).with_fee(1_250_000_000);
     let params = BacktestParams {
         initial_cash_nano_usd: 100_000_000_000_000,
         bars_per_year: 347_760.0,

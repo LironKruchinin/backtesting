@@ -38,6 +38,7 @@
 mod backtest;
 mod combo;
 mod config;
+mod funnel;
 mod layout_check;
 mod pull;
 mod qa;
@@ -120,6 +121,9 @@ enum Command {
     Combo(combo::ComboArgs),
     /// Replay a combo config in train/test folds and report out-of-sample.
     WalkForward(walkforward::WalkForwardArgs),
+    /// Evaluate a combo config against its pre-registered criteria and
+    /// write a verdict scorecard.
+    Funnel(funnel::FunnelArgs),
     /// Inspect curated bars for gaps, spikes, and vendor-reported problems.
     Qa(qa::QaArgs),
     /// Build a continuous-contract roll table from curated bars.
@@ -157,6 +161,7 @@ fn main() {
         Some(Command::Backtest(args)) => backtest::run(&args),
         Some(Command::Combo(args)) => combo::run_cmd(&args),
         Some(Command::WalkForward(args)) => walkforward::run_cmd(&args),
+        Some(Command::Funnel(args)) => funnel::run_cmd(&args),
         Some(Command::Qa(args)) => qa::run(&args),
         Some(Command::Rolls(args)) => rolls::run(&args),
         Some(Command::ThetaGolden(args)) => theta::run(&args),
@@ -272,10 +277,9 @@ fn one_run<M: FillModel>(fill_model: &mut M) -> BacktestResult {
 
 fn demo(hash_only: bool) {
     let free = one_run(&mut FreeFills);
-    let costed = one_run(&mut SpreadCrossFills {
-        half_spread_ticks: 1,
-        fee_per_contract_nano_usd: 1_250_000_000, // $1.25/contract/side
-    });
+    let costed = one_run(
+        &mut SpreadCrossFills::from_ticks(1, es_like_spec().tick).with_fee(1_250_000_000), // $1.25/contract/side
+    );
 
     if hash_only {
         let mut h = Fnv64::new();

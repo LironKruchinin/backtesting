@@ -153,6 +153,10 @@ struct Settings {
     spec: ContractSpec,
     initial_cash_nano_usd: NanoUsd,
     fills: SpreadCrossFills,
+    /// What the operator typed, kept for the header. The fill model carries
+    /// the half-spread as a distance so the funnel's sweep can express half a
+    /// tick (D-0073); this command's flag is whole ticks and says so.
+    half_spread_ticks: i64,
     /// Protective levels every entry carries, if any. `None` is a naked
     /// position, which is what this command did before M2's stops landed and
     /// still does by default.
@@ -349,10 +353,9 @@ fn parse(args: &BacktestArgs) -> Result<Settings, String> {
             point_value_usd: args.point_value_usd,
         },
         initial_cash_nano_usd,
-        fills: SpreadCrossFills {
-            half_spread_ticks: args.half_spread_ticks,
-            fee_per_contract_nano_usd,
-        },
+        fills: SpreadCrossFills::from_ticks(args.half_spread_ticks, tick)
+            .with_fee(fee_per_contract_nano_usd),
+        half_spread_ticks: args.half_spread_ticks,
         bracket: (args.stop_ticks.is_some() || args.target_ticks.is_some())
             .then(|| Bracket::new(args.stop_ticks, args.target_ticks)),
     })
@@ -494,7 +497,7 @@ fn print_header(
     );
     println!(
         "  fill model     spread_cross — {} tick half-spread, {}/contract/side",
-        settings.fills.half_spread_ticks,
+        settings.half_spread_ticks,
         usd(settings.fills.fee_per_contract_nano_usd)
     );
     match settings.bracket {

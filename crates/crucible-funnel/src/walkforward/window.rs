@@ -289,6 +289,7 @@ mod tests {
             ClosedTrade {
                 closed_ts: Ts(1),
                 net_nano_usd: 5_000_000_000,
+                direction: Side::Buy,
                 opened_ts: Ts(0),
                 mae_nano_usd: -1_000_000_000,
                 mfe_nano_usd: 6_000_000_000,
@@ -296,6 +297,7 @@ mod tests {
             ClosedTrade {
                 closed_ts: Ts(4),
                 net_nano_usd: -2_000_000_000,
+                direction: Side::Sell,
                 opened_ts: Ts(3),
                 mae_nano_usd: -3_000_000_000,
                 mfe_nano_usd: 0,

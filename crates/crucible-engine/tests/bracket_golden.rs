@@ -358,10 +358,7 @@ fn spread_cross_prices_a_target_exit_at_the_level_plus_commission() {
     events.push(bar(2, 100.00, 104.00, 99.50, 103.75));
     events.push(quiet_tail(3));
 
-    let mut fills = SpreadCrossFills {
-        half_spread_ticks: 1,
-        fee_per_contract_nano_usd: 1_250_000_000,
-    };
+    let mut fills = SpreadCrossFills::from_ticks(1, es_spec().tick).with_fee(1_250_000_000);
     let result = replay(events, &mut EnterOnceBracketed::long(), &mut fills);
 
     assert_eq!(result.summary.final_equity_nano_usd, 100_147_500_000_000);
@@ -388,10 +385,7 @@ fn spread_cross_prices_a_stop_exit_a_half_spread_worse_than_its_level() {
     events.push(bar(2, 100.00, 103.00, 98.00, 99.00));
     events.push(quiet_tail(3));
 
-    let mut fills = SpreadCrossFills {
-        half_spread_ticks: 1,
-        fee_per_contract_nano_usd: 1_250_000_000,
-    };
+    let mut fills = SpreadCrossFills::from_ticks(1, es_spec().tick).with_fee(1_250_000_000);
     let result = replay(events, &mut EnterOnceBracketed::long(), &mut fills);
 
     assert_eq!(result.summary.final_equity_nano_usd, 99_885_000_000_000);

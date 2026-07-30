@@ -26,7 +26,7 @@ use std::path::PathBuf;
 use crucible_core::prelude::*;
 use crucible_data::calendar::Calendar;
 use crucible_data::ingest::window::{CivilDate, civil_from_days, date_of, days_from_civil};
-use crucible_engine::{BacktestParams, FreeFills, SpreadCrossFills, Summary};
+use crucible_engine::{BacktestParams, FreeFills, Summary};
 use crucible_funnel::walkforward::{FoldPlan, FoldSpec, RunIdentity, WalkForwardReport, run_grid};
 
 use crate::combo::{annualization, collect_events, print_header, print_path_sensitivity};
@@ -81,13 +81,14 @@ pub fn run_cmd(args: &WalkForwardArgs) -> i32 {
         }
     };
 
-    let events = match collect_events(&loaded) {
-        Ok(events) => events,
+    let series = match collect_events(&loaded) {
+        Ok(series) => series,
         Err((code, message)) => {
             eprintln!("error: {message}");
             return code;
         }
     };
+    let events = series.events;
     if events.is_empty() {
         eprintln!("error: the data source produced no bars; there is nothing to replay");
         return EXIT_USAGE;
@@ -116,12 +117,14 @@ pub fn run_cmd(args: &WalkForwardArgs) -> i32 {
     let identity = RunIdentity {
         config_hash: loaded.config_hash,
         root_seed: loaded.file.run.seed,
+        account_id: None,
     };
     let expect = "INVARIANT: a collected bar series is already availability-ordered, and the \
                   plan was built from it";
     let report = if loaded.file.execution.fill_model == "free_fills" {
         run_grid(
             &events,
+            &days.keys,
             &loaded.grid,
             &plan,
             &loaded.spec,
@@ -132,15 +135,13 @@ pub fn run_cmd(args: &WalkForwardArgs) -> i32 {
     } else {
         run_grid(
             &events,
+            &days.keys,
             &loaded.grid,
             &plan,
             &loaded.spec,
             &params,
             &identity,
-            &SpreadCrossFills {
-                half_spread_ticks: loaded.file.execution.half_spread_ticks,
-                fee_per_contract_nano_usd: loaded.fee_per_contract_nano_usd,
-            },
+            &loaded.spread_cross_fills(),
         )
     }
     .expect(expect);
@@ -160,13 +161,13 @@ pub fn run_cmd(args: &WalkForwardArgs) -> i32 {
 }
 
 /// The trading-day key of every bar, and where the answer came from.
-struct TradingDays {
+pub(crate) struct TradingDays {
     /// One nondecreasing key per bar.
-    keys: Vec<i64>,
+    pub(crate) keys: Vec<i64>,
     /// Which calendar answered, or `None` for the UTC fallback.
-    calendar_id: Option<String>,
+    pub(crate) calendar_id: Option<String>,
     /// A caveat worth printing, if any.
-    caveat: Option<String>,
+    pub(crate) caveat: Option<String>,
 }
 
 impl TradingDays {
@@ -183,7 +184,10 @@ impl TradingDays {
 /// use availability time. For a 1m bar the two land on the same session
 /// anyway; for coarser bars they need not, and the availability answer is the
 /// one that cannot see the future.
-fn trading_days(loaded: &LoadedConfig, events: &[MarketEvent]) -> Result<TradingDays, String> {
+pub(crate) fn trading_days(
+    loaded: &LoadedConfig,
+    events: &[MarketEvent],
+) -> Result<TradingDays, String> {
     let calendar = Calendar::for_instrument(&loaded.spec.instrument)
         .map_err(|e| format!("bundled calendar tables are broken: {e}"))?;
 
@@ -480,7 +484,7 @@ fn print_footer(loaded: &LoadedConfig, plan: &FoldPlan, report: &WalkForwardRepo
         report.combos.iter().map(|c| c.path_sensitive_bars).sum(),
     );
     println!("\n  not consumed by `walk-forward`:");
-    let unconsumed = loaded.unconsumed_sections(true);
+    let unconsumed = loaded.unconsumed_sections(config::Consumer::WalkForward);
     if unconsumed.is_empty() {
         println!("    nothing — every section this config declares was read");
     }

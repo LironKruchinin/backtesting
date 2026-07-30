@@ -60,7 +60,6 @@ pub fn run(args: &SupplementArgs) -> i32 {
 fn inspect(dir: &std::path::Path, args: &SupplementArgs) -> i32 {
     use crate::pull::EXIT_FAILED;
     use crucible_data::Catalog;
-    use crucible_data::ingest::clock::Clock;
     use crucible_data::ingest::delivery::DbnDelivery;
     use crucible_data::ingest::supplement;
 

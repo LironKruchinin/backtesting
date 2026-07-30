@@ -120,10 +120,7 @@ fn a_round_trip_through_a_negative_price_settles_the_hand_computed_pnl() {
         .into_iter(),
     };
     let mut strategy = ShortThroughZero { bar_idx: 0 };
-    let mut fills = SpreadCrossFills {
-        half_spread_ticks: 1,
-        fee_per_contract_nano_usd: 1_500_000_000, // $1.50
-    };
+    let mut fills = SpreadCrossFills::from_ticks(1, cl_spec().tick).with_fee(1_500_000_000); // $1.50
     let params = BacktestParams {
         initial_cash_nano_usd: 100_000_000_000_000, // $100,000
         bars_per_year: 347_760.0,
@@ -186,10 +183,7 @@ fn the_losing_side_of_the_same_trade_is_the_exact_mirror() {
         .into_iter(),
     };
     let mut strategy = LongThroughZero { bar_idx: 0 };
-    let mut fills = SpreadCrossFills {
-        half_spread_ticks: 1,
-        fee_per_contract_nano_usd: 1_500_000_000,
-    };
+    let mut fills = SpreadCrossFills::from_ticks(1, cl_spec().tick).with_fee(1_500_000_000);
     let params = BacktestParams {
         initial_cash_nano_usd: 100_000_000_000_000,
         bars_per_year: 347_760.0,
