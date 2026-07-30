@@ -14,6 +14,25 @@
 //! governed by `avail_ts`. Keying anything on `ts_open` lets strategies see
 //! one bar into the future — the exact bias this project exists to prevent.
 //!
+//! ## Two price views on one bar (CLAUDE.md §2.3, D-0042, D-0076)
+//!
+//! A [`Bar`]'s four `Price` fields are always the **tradeable** prices: what
+//! the market actually quoted, what a fill model may charge against, and the
+//! only thing `ContractSpec::pnl_nano_usd` will accept. Beside them sits
+//! [`Bar::signal_offset`], an additive shift into **signal space**, and four
+//! accessors that apply it and hand back an
+//! [`AdjustedPrice`](crate::types::AdjustedPrice) — a type with no way back to
+//! `Price`.
+//!
+//! The offset is zero for every outright contract and every synthetic series,
+//! so the two views coincide numerically there and nothing changes. It is
+//! nonzero only on a stitched continuous series, where the older segments are
+//! shifted onto the newest so an indicator does not see a step at each roll.
+//! Indicators and strategies read the signal view; fills, marks and PnL read
+//! the tradeable one. Which one a caller gets is decided by which method it
+//! names, and the type system refuses the confusion rather than trusting a
+//! comment.
+//!
 //! ## Brackets and the one thing an OHLC bar refuses to say
 //!
 //! [`Bracket`] attaches protective levels to an order. A resting stop or
@@ -25,9 +44,12 @@
 //! here and never per fill model, and every run counts the bars where it
 //! mattered.
 
-use crate::types::{InstrumentId, NanoUsd, Price, Qty, TimeFrame, Ts};
+use crate::types::{AdjustedPrice, InstrumentId, NanoUsd, Price, Qty, TimeFrame, Ts};
 
 /// One OHLCV bar. `ts_open` marks the interval start (Databento convention).
+///
+/// `open`/`high`/`low`/`close` are **tradeable** prices. The signal view of
+/// the same bar is `signal_*()`; see the module docs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Bar {
     pub instrument: InstrumentId,
@@ -39,6 +61,20 @@ pub struct Bar {
     pub low: Price,
     pub close: Price,
     pub volume: u64,
+    /// Additive shift from tradeable space into **signal space**, nanopoints.
+    ///
+    /// [`Price::ZERO`] for every bar of a real contract and every synthetic
+    /// one — a price nobody adjusted is its own signal. Nonzero only on a
+    /// stitched continuous series, where it is the sum of the roll gaps that
+    /// come *after* this bar's segment, so the whole history lines up on the
+    /// newest contract's scale (`crucible-data::continuous::adjust`).
+    ///
+    /// Carried as the offset rather than as a second set of prices for the
+    /// reason `RollTable` stores gaps rather than running offsets (D-0043):
+    /// the tradeable prices stay the bytes the archive holds, the adjustment
+    /// stays a load-time research choice, and there is exactly one way to
+    /// combine them — [`AdjustedPrice::from_tradeable`], which is one-way.
+    pub signal_offset: Price,
 }
 
 impl Bar {
@@ -47,6 +83,34 @@ impl Bar {
     #[must_use]
     pub const fn avail_ts(&self) -> Ts {
         self.ts_open.plus_ns(self.tf.duration_ns())
+    }
+
+    /// The bar's open in signal space. Indicators only.
+    #[must_use]
+    pub const fn signal_open(&self) -> AdjustedPrice {
+        AdjustedPrice::from_tradeable(self.open, self.signal_offset)
+    }
+
+    /// The bar's high in signal space. Indicators only.
+    #[must_use]
+    pub const fn signal_high(&self) -> AdjustedPrice {
+        AdjustedPrice::from_tradeable(self.high, self.signal_offset)
+    }
+
+    /// The bar's low in signal space. Indicators only.
+    #[must_use]
+    pub const fn signal_low(&self) -> AdjustedPrice {
+        AdjustedPrice::from_tradeable(self.low, self.signal_offset)
+    }
+
+    /// The bar's close in signal space. Indicators only.
+    ///
+    /// This is what an indicator consumes, and it is deliberately *not* what
+    /// `Portfolio::mark` consumes: marking to an adjusted close would price a
+    /// position at a level nobody traded.
+    #[must_use]
+    pub const fn signal_close(&self) -> AdjustedPrice {
+        AdjustedPrice::from_tradeable(self.close, self.signal_offset)
     }
 }
 
@@ -292,6 +356,7 @@ mod tests {
             low: Price::from_nanos(PRICE_SCALE),
             close: Price::from_nanos(PRICE_SCALE),
             volume: 1,
+            signal_offset: Price::ZERO,
         }
     }
 

@@ -25,6 +25,7 @@ pub mod prelude {
     };
     pub use crate::traits::{Actions, Feed, FillModel, Indicator, PortfolioView, Strategy};
     pub use crate::types::{
-        ContractSpec, InstrumentId, NanoUsd, Price, Qty, TimeFrame, Ts, nano_usd_to_f64,
+        AdjustedPrice, ContractSpec, InstrumentId, NanoUsd, Price, Qty, TimeFrame, Ts,
+        nano_usd_to_f64,
     };
 }

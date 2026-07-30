@@ -107,6 +107,7 @@ fn events() -> Vec<MarketEvent> {
                 low: price,
                 close: price,
                 volume: 1,
+                signal_offset: Price::ZERO,
             })
         })
         .collect()

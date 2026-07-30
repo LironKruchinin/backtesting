@@ -849,6 +849,7 @@ fn bar(ts_open: i64, tf: TimeFrame, close: i64, volume: u64) -> Bar {
         low: Price::from_points(close),
         close: Price::from_points(close),
         volume,
+        signal_offset: Price::ZERO,
     }
 }
 

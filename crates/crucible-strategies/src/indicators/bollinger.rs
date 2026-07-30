@@ -50,7 +50,7 @@ impl Indicator for Bollinger {
     }
 
     fn update(&mut self, bar: &Bar) -> Option<BollingerBands> {
-        let x = bar.close.as_points_f64();
+        let x = bar.signal_close().as_points_f64();
         self.window.push_back(x);
         self.sum += x;
         self.sumsq += x * x;
@@ -93,6 +93,7 @@ mod tests {
             low: p,
             close: p,
             volume: 1,
+            signal_offset: Price::ZERO,
         }
     }
 

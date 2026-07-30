@@ -90,6 +90,7 @@ fn bar(i: i64, o: f64, h: f64, l: f64, c: f64) -> MarketEvent {
         low: Price::from_points_f64_lossy(l),
         close: Price::from_points_f64_lossy(c),
         volume: 100,
+        signal_offset: Price::ZERO,
     })
 }
 

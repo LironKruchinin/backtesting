@@ -312,7 +312,15 @@ fn a_continuous_alias_is_refused_with_its_reason() {
     assert_eq!(code(&out), 2);
     let text = stderr(&out);
     assert!(text.contains("continuous alias"), "{text}");
-    assert!(text.contains("D-0042"), "{text}");
+    // The refusal survived D-0076, but its *reason* changed: `backtest` now
+    // replays a stitched series, so "nothing can name which price series it
+    // wants" is no longer true. What still holds is that a grid expands rules
+    // it has not seen, and a rule comparing a price to an absolute constant
+    // reads a level that back-adjustment took from the future. A test
+    // asserting only "it refused" would have kept passing over a stale reason.
+    assert!(text.contains("D-0076"), "{text}");
+    assert!(text.contains("absolute constant"), "{text}");
+    assert!(text.contains("backtest"), "{text}");
 }
 
 /// The contract spec must be labelled with the instrument the feed actually

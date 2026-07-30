@@ -463,6 +463,9 @@ mod tests {
             low: p,
             close: p,
             volume: 1,
+            // Synthetic outright bars carry no back-adjustment, so the signal
+            // view and the tradeable view coincide (D-0076).
+            signal_offset: Price::ZERO,
         })
     }
 

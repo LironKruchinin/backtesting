@@ -27,6 +27,7 @@ use std::path::PathBuf;
 use crucible_core::prelude::*;
 use crucible_data::SyntheticFeed;
 use crucible_data::calendar::Calendar;
+use crucible_data::continuous::ContinuousAlias;
 use crucible_data::curated::{CuratedError, ParquetBarFeed};
 use crucible_data::ingest::range_from_dates;
 use crucible_data::ingest::window::parse_civil_date;
@@ -261,18 +262,33 @@ pub(crate) fn collect_events(loaded: &LoadedConfig) -> Result<Series, (i32, Stri
             })
         }
         DataSource::Curated { start, end } => {
-            // A continuous alias needs a consumer that names which of the two
-            // price series it wants (D-0042), and this command has nowhere to
-            // put that choice. Refusing beats replaying back-adjusted levels
-            // through `pnl_nano_usd`, which the type system already forbids.
-            if instrument.contains('.') {
+            // Still refused, for a *different* reason than before D-0076.
+            //
+            // The old reason — nothing could say which of the two price series
+            // it wanted — is gone: a `Bar` now carries both, indicators read
+            // the signal view and PnL the tradeable one, and `crucible
+            // backtest --instrument ES.v.0` replays a stitched series.
+            //
+            // What has not gone away is that the rule grammar can write
+            // `close > 4500`, and on a back-adjusted series a *level* is not a
+            // level: where a 2010 bar sits depends on the sum of every roll
+            // gap after it, which had not happened yet (§2.1). A shift-
+            // invariant rule — an SMA crossover — is unaffected, and the
+            // grammar cannot tell the two apart, so the grid would silently
+            // mix a sound combo with a leaking one and rank them together.
+            // `backtest` runs one named strategy an operator chose; a grid
+            // runs whatever the config expands to.
+            if ContinuousAlias::looks_like(instrument) {
                 return Err((
                     EXIT_USAGE,
                     format!(
-                        "{instrument} is a continuous alias. Replaying one needs a consumer \
-                         that says whether a signal reads the adjusted series and PnL the \
-                         tradeable one (D-0042); `combo` and `walk-forward` both run raw \
-                         contracts (ESH4) until that consumer exists"
+                        "{instrument} is a continuous alias, and `combo` / `walk-forward` run \
+                         raw contracts (ESH2024) only (D-0076). `backtest` replays a stitched \
+                         series, because it runs one strategy an operator named; a grid \
+                         expands rules it has not seen, and a rule comparing a price to an \
+                         absolute constant is not safe on a back-adjusted series — the level \
+                         a bar sits at is the sum of every roll gap after it, which had not \
+                         happened at that bar (§2.1)"
                     ),
                 ));
             }

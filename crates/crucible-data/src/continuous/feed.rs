@@ -9,30 +9,36 @@
 //! was built over, and the concatenation has been verified strictly
 //! increasing in `ts_open`.
 //!
-//! ## What the engine sees today, and what M2 changes
+//! ## What the engine sees, and what M2 still owes
 //!
-//! [`MarketEvent`] has exactly one variant, `Bar`, carrying one set of
-//! prices. So [`Feed::next_event`] hands the engine the **tradeable** bar —
-//! the then-front contract's real prices, labelled with the continuous alias
-//! (`ES.v.0`) so a single-instrument portfolio sees one instrument across
-//! rolls. The adjusted series is reachable only through
-//! [`ContinuousFeed::next_continuous_bar`], which yields both at once as a
-//! [`ContinuousBar`].
+//! [`Feed::next_event`] hands the engine a [`Bar`] whose four `Price` fields
+//! are the **tradeable** ones — the then-front contract's real prices,
+//! labelled with the continuous alias (`ES.v.0`) so a single-instrument
+//! portfolio sees one instrument across rolls — and whose
+//! [`signal_offset`](Bar::signal_offset) carries the segment's back-adjustment
+//! (D-0076). Fills, marks and PnL read the prices; indicators read
+//! `bar.signal_*()`, which yields an
+//! [`AdjustedPrice`](crucible_core::types::AdjustedPrice) and has no way back
+//! to `Price`. [`ContinuousFeed::next_continuous_bar`] still yields both views
+//! as a [`ContinuousBar`], plus the contract behind them, for callers that
+//! want the pair explicitly.
 //!
-//! That is a real limitation, stated rather than papered over: a strategy run
-//! through the engine on this feed computes its indicators on unadjusted
-//! prices, so it sees a jump at every roll. Fixing it means either a second
-//! `MarketEvent` variant or an adjusted-price channel on `Bar`, and
-//! `crucible-core::events` says in as many words that adding a variant is a
-//! deliberate breaking change requiring every engine `match` to be revisited
-//! and a `docs/DECISIONS.md` entry. That is M2's work, along with the other
-//! half of the roll story the spec names: **a roll is a position event, not a
-//! price event** — rolling a position pays spread and fees twice, and the
-//! engine has to see it as a close-old/open-new pair of fills. Neither is
-//! smuggled in here.
+//! That was the adjusted-price channel on `Bar` this file used to name as one
+//! of two ways to remove the limitation; the other, a second [`MarketEvent`]
+//! variant, was not taken, because everything in the engine that touches a bar
+//! touches its tradeable prices and would have had to be revisited to keep
+//! doing exactly what it already did.
+//!
+//! What is **not** here is the other half of the roll story: **a roll is a
+//! position event, not a price event.** Rolling an open position pays the
+//! spread and the fee twice, and the engine sees none of that — a position
+//! held across a roll in this build is carried at no cost. That is M2's, it is
+//! stated rather than papered over, and `crucible backtest` prints the roll
+//! count with the result so a reader can size the omission.
 //!
 //! [`ParquetBarFeed`]: crate::curated::ParquetBarFeed
 //! [`MarketEvent`]: crucible_core::events::MarketEvent
+//! [`Bar`]: crucible_core::events::Bar
 
 use std::path::Path;
 
@@ -238,6 +244,10 @@ impl ContinuousFeed {
         let segment = self.segments.get(self.segment_cursor)?;
         self.cursor += 1;
 
+        // The two views ride on one bar: the four `Price` fields are the
+        // then-front contract's real prices, and `signal_offset` is what
+        // shifts them into signal space. Fills and marks read the former;
+        // indicators read `signal_*()`, which cannot be converted back.
         let tradeable = Bar {
             instrument: self.alias.clone(),
             tf: self.tf,
@@ -247,9 +257,10 @@ impl ContinuousFeed {
             low: Price::from_nanos(self.bars.low[row]),
             close: Price::from_nanos(self.bars.close[row]),
             volume: self.bars.volume[row],
+            signal_offset: segment.offset,
         };
         Some(ContinuousBar {
-            adjusted: AdjustedOhlc::of(&tradeable, segment.offset),
+            adjusted: AdjustedOhlc::of(&tradeable),
             tradeable,
             contract: segment.contract.clone(),
             offset: segment.offset,

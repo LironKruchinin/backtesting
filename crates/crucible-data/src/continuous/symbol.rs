@@ -475,6 +475,130 @@ fn validate_root(root: &str) -> Result<(), ContinuousError> {
     Ok(())
 }
 
+/// A continuous-contract alias, in the one spelling CLAUDE.md §4 pins:
+/// `{root}.{v|c}.{depth}`.
+///
+/// `ES.v.0` is the volume-roll front month, `ES.c.0` the calendar-roll front
+/// month. The alias names the **rule**, never its parameters: `confirm_days`
+/// and `days` live in the stored [`RollTable`](super::RollTable), which is why
+/// resolving an alias to a table is a lookup that can find two answers and
+/// refuse (see [`roll_tables_for`](super::roll_tables_for)).
+///
+/// Deliberately narrow in two directions:
+///
+/// - **`.n` does not parse.** Open-interest rolls are not a
+///   [`RollRule`](super::RollRule) variant at all (D-0044) — they need the
+///   `statistics` schema's open-interest series, which M1 has not curated. A
+///   name that parses and then means something else is worse than one that
+///   does not parse.
+/// - **Only depth `0` parses.** A deferred continuous series (`ES.v.1`, the
+///   second month) is a different chain, built from contracts the roll table
+///   does not record. Accepting the spelling and replaying the front month
+///   would answer a question nobody asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContinuousAlias {
+    root: String,
+    rule_letter: char,
+    depth: u32,
+}
+
+impl ContinuousAlias {
+    /// Whether `text` is *shaped* like a continuous alias — three
+    /// dot-separated parts — whether or not it parses.
+    ///
+    /// The seam a command needs before it decides which store to look in.
+    /// `ES.n.0` and `ES.v.1` are plainly attempts at an alias and deserve
+    /// [`ContinuousAlias::parse`]'s refusal, which says *why*; `ESH2024`,
+    /// `SYN:RW` and `ES.FUT` are not, and must fall through to the curated
+    /// contract path. Getting it backwards turns "that roll rule does not
+    /// exist" into "no curated data for ES.n.0", which sends an operator to
+    /// look in the wrong place.
+    #[must_use]
+    pub fn looks_like(text: &str) -> bool {
+        text.split('.').count() == 3
+    }
+
+    /// Parses `{root}.{v|c}.{depth}`.
+    ///
+    /// # Errors
+    /// [`ContinuousError::NotAnAlias`] naming which part of the form failed.
+    /// A name with no dots, or with the wrong number of them, fails here
+    /// rather than being treated as an odd contract — which is what lets
+    /// `crucible backtest` try this parse first and fall through to the
+    /// curated-contract path on failure.
+    pub fn parse(text: &str) -> Result<ContinuousAlias, ContinuousError> {
+        let bad = |reason: String| ContinuousError::NotAnAlias {
+            text: text.to_owned(),
+            reason,
+        };
+        let parts: Vec<&str> = text.split('.').collect();
+        let [root, rule, depth] = parts.as_slice() else {
+            return Err(bad(format!(
+                "expected three dot-separated parts, found {}",
+                parts.len()
+            )));
+        };
+        validate_root(root).map_err(|e| bad(e.to_string()))?;
+        let rule_letter = match *rule {
+            "v" => 'v',
+            "c" => 'c',
+            "n" => {
+                return Err(bad(
+                    "the open-interest roll (`.n`) is not a rule this build has, and \
+                     not merely one it has not implemented: it needs the `statistics` \
+                     schema's open-interest series, which is not curated (D-0044)"
+                        .to_owned(),
+                ));
+            }
+            other => return Err(bad(format!("{other:?} is not a roll rule; use `v` or `c`"))),
+        };
+        let depth: u32 = depth
+            .parse()
+            .map_err(|_| bad(format!("{depth:?} is not a month depth")))?;
+        if depth != 0 {
+            return Err(bad(format!(
+                "depth {depth} names the {} deferred month, which is a different \
+                 contract chain from the one a roll table records. Only `.0`, the \
+                 front month, is stitched",
+                match depth {
+                    1 => "first".to_owned(),
+                    2 => "second".to_owned(),
+                    n => format!("{n}th"),
+                }
+            )));
+        }
+        Ok(ContinuousAlias {
+            root: (*root).to_owned(),
+            rule_letter,
+            depth,
+        })
+    }
+
+    /// Product root, e.g. `ES`.
+    #[must_use]
+    pub fn root(&self) -> &str {
+        &self.root
+    }
+
+    /// `v` or `c` — which [`RollRule`](super::RollRule) family this names.
+    #[must_use]
+    pub const fn rule_letter(&self) -> char {
+        self.rule_letter
+    }
+
+    /// Month depth. Always `0` in this build; see the type docs.
+    #[must_use]
+    pub const fn depth(&self) -> u32 {
+        self.depth
+    }
+}
+
+impl fmt::Display for ContinuousAlias {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}.{}", self.root, self.rule_letter, self.depth)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

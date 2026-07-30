@@ -224,6 +224,7 @@ mod tests {
             low: Price::from_points_f64_lossy(4999.00),
             close: Price::from_points_f64_lossy(5000.50),
             volume: 100,
+            signal_offset: Price::ZERO,
         };
         (spec, order, MarketEvent::Bar(bar))
     }

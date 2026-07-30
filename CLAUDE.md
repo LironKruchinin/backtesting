@@ -488,7 +488,45 @@ reference; supersede the decision if you disagree — don't hotfix.
 - **`AdjustedPrice` cannot be converted to `Price`, and that is the feature**
   (D-0042). Back-adjusted levels are for signals; PnL uses the tradeable price
   of the then-front contract. Adding a `From` impl reintroduces the classic
-  silent-corruption bug this whole type exists to prevent.
+  silent-corruption bug this whole type exists to prevent. It lives in
+  `crucible-core::types` because `crucible-strategies` — where indicators are —
+  may not depend on `crucible-data` (D-0076); `crucible_data::continuous::
+  AdjustedPrice` is a re-export and the compile-fail proof exists on both paths.
+- **Every `Bar` carries a `signal_offset`, and every indicator reads
+  `bar.signal_*()` rather than `bar.close`** (D-0076). The four `Price` fields
+  are always tradeable — fills, marks and `pnl_nano_usd` use those. The offset
+  is zero for every outright contract and every synthetic bar, so the two views
+  coincide and nothing moved; it is nonzero only on a stitched series. An
+  indicator switched back to `bar.close` sees a step at every roll while its
+  neighbours in the same rule do not, which is a signal that fires on the roll
+  table rather than on the market.
+- **A back-adjusted level is not §2.1 lookahead for a shift-invariant strategy,
+  and IS for a level-sensitive one** (D-0076). Every bar visible at time `T`
+  carries the same additive constant, so crossovers, returns and differences
+  are unaffected and it cancels; `close > 4500` is not, because where a bar sits
+  depends on rolls that had not happened. That asymmetry is why `backtest`
+  replays `ES.v.0` and `combo` / `walk-forward` refuse it — one runs a strategy
+  an operator named, the other expands rules it has not seen.
+- **A position carried across a roll books the raw gap as PnL and pays nothing
+  for the roll** (D-0076). A roll is a *position* event and this build models it
+  as a price event only; the fills a real roll generates arrive in M2.
+  `backtest` prints the bound — `Σ |gap| × point_value × qty` — so the omission
+  has a size rather than a mention. On the 16-year ES run it is $56,950 against
+  a $3.44 M loss.
+- **`backtest` narrows a date request to the roll table's span and says so;
+  `ContinuousFeed::open` still refuses** (D-0076). `--start 2010-06-06` is a
+  calendar day and the first ES bar opens at 22:00 that day, so the request
+  overhangs the span by the difference between a date and an instant, which no
+  rebuild fixes. A request with no overlap at all still refuses. The narrowing
+  is printed with the table path and the rebuild command, because a table the
+  archive has outgrown is the case D-0045 actually cares about.
+- **`backtest` prints an `INSOLVENT` block instead of hiding the ratios it
+  invalidates** (D-0076). There is no margin model, so a replay can carry a
+  position no broker would and equity goes negative. The dollar figures stay
+  exact; the naive Sharpe is computed only over steps whose starting equity was
+  positive, so it describes the solvent prefix — +0.23 beside a −3,443 % return
+  on the ES run — and max drawdown passes 100 %. Fixing `Summary::compute` is
+  its own decision; suppressing the number would be worse than explaining it.
 - **`raw/` and `curated/` nest in opposite orders** — `{dataset}/{schema}/
   {symbol}` vs `{kind}/{instrument}/{grain}`. Deliberate, argued at length in
   `docs/DATA_LAYOUT.md` (D-0049); unifying them destroys either coverage
@@ -725,6 +763,15 @@ cargo run -p crucible-cli --features databento -- transcode
 cargo run -p crucible-cli --features databento -- transcode --include-spreads
 cargo run -p crucible-cli -- backtest --instrument ESH2024 --timeframe 1m \
   --start 2024-01-01 --end 2024-02-01 --fast 20 --slow 50
+
+# The same command over a CONTINUOUS series (D-0076). `--instrument` takes the
+# §4 aliases `{root}.v.0` (volume roll) and `{root}.c.0` (calendar roll); each
+# needs its roll table built first. `--adjustment back_adjust|none` names how
+# the strategy's indicators see the stitch — it never reaches PnL, which uses
+# the tradeable price of the then-front contract in both cases.
+cargo run -p crucible-cli -- rolls --root ES --timeframe 1m --write
+cargo run -p crucible-cli -- backtest --instrument ES.v.0 --timeframe 1m \
+  --start 2010-06-06 --end 2026-07-28 --fast 20 --slow 50
 
 # The same run with protective levels, in ticks from each entry's fill price.
 # Both flags are optional and either alone is legal; the header names the

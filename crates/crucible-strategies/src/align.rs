@@ -130,6 +130,7 @@ mod tests {
             low: p,
             close: p,
             volume: 1,
+            signal_offset: Price::ZERO,
         })
     }
 

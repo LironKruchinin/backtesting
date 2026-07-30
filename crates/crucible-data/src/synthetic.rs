@@ -126,6 +126,7 @@ impl Feed for SyntheticFeed {
             low: self.price(low_ticks),
             close: self.price(close_ticks),
             volume,
+            signal_offset: Price::ZERO,
         };
 
         self.next_ts_open = self.next_ts_open.plus_ns(self.tf.duration_ns());
