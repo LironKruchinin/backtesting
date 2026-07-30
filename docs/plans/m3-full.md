@@ -120,6 +120,35 @@ accordingly. That is *correct* — it is exactly what §4.6 wants — but it mus
 stated consequence rather than a surprise, and the scorecard must show the trial
 count's composition (combos × accounts) rather than a bare integer.
 
+**The sixteen account-trials are NOT independent, the raw count over-deflates,
+and that is accepted deliberately.** Deflated Sharpe's trial count is a
+multiple-testing correction, and its usual reading assumes trials that are at
+least roughly independent searches. Sixteen accounts are not: they are **one
+signal under sixteen risk overlays**. The same combo, the same bars, the same
+fills — what differs is the drawdown rule, the ratchet basis and the profit
+target. The *effective* number of independent trials is therefore much closer to
+the combo count than to combos × 16, and correcting by the raw product deflates
+harder than the statistics strictly justify.
+
+We use the raw count anyway, and the reason is a direction rather than a
+degree: **the preferred error is against the strategy.** An over-deflated Sharpe
+makes a real edge harder to claim; an under-deflated one makes a spurious edge
+easier to publish. This project's whole discipline is to prefer the first, and
+it is the same asymmetry the registry module already states about trial counts
+(wrong large costs power, wrong small flatters everything downstream).
+
+Two rules fall out and are binding on the implementation:
+
+- **The over-deflation is reported, not hidden.** The scorecard states the trial
+  count's composition *and* that the account dimension is a risk overlay rather
+  than an independent search, so a reader can see the correction is
+  conservative rather than mistaking it for a precise one.
+- **Nobody may "fix" this by dividing the account dimension out.** An effective-
+  N estimator that shrinks the denominator is a change that makes results look
+  better, and it needs its own decision entry, its own justification, and a
+  control showing it does not resurrect a known-spurious edge. Until then the
+  conservative count stands.
+
 ---
 
 ## Block C — registry pooling across contracts (unlock 5)
@@ -212,10 +241,19 @@ is untested in one direction.
 **Contradiction watch:** **flagged, and the sharpest in this document.** D-0075
 says the ceiling is `Iterate` and "do not 'enable' it by relaxing the stage
 list". This block *removes* that ceiling and therefore **supersedes D-0075's
-ceiling clause** — that must be an explicit superseding decision entry, not a
-quiet edit to the stage list. Every report and scorecard currently *states* the
-ceiling in words; those strings are part of the contract and change in the same
-commit.
+ceiling clause**.
+
+**That requires an explicit superseding decision entry** — not a quiet edit to
+the stage list, and not an inference from this plan. The entry must, at minimum:
+cite **D-0075 by number**, name **which clause** it supersedes (the `Iterate`
+ceiling, *not* the stage-refusal clause, which stays), state that the battery
+D-0075 said was missing now exists, and list the ten conditions above as what
+"survived the full battery" is now defined to mean. Every report and scorecard
+currently *states* the ceiling in words; those strings are part of the contract
+and change in the same commit as the entry. Landing the code without the entry
+would leave §9's "can never print `GRADUATE`" reading as current guidance while
+the build printed it — the exact contradiction 4297fbb had to repair once
+already.
 
 ---
 
