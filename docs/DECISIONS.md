@@ -2177,3 +2177,81 @@ propose a superseding entry — don't silently diverge.
   canonical form → the identity test; the grid's warmup ignoring the source →
   the alignment test; and the leaky reference made causal → the planted control
   itself, above.
+- **D-0081** (2026-07-30) — **The S0 predictor seam is named as the next build,
+  and the M2.5 predictor workbench arrives AS the funnel's S0 rather than
+  beside it.** Why: S0 is the only outstanding item that makes a *refused*
+  question askable; everything else outstanding makes an answer we already
+  produce better.
+  **What is named.** A score-emitting evaluation path with forward-return
+  joins: a signal emits a continuous score per bar, the seam joins each score
+  to the return over configured horizons ahead, buckets, and reports — no
+  orders, no fills, no equity curve. `crucible-funnel::stages`' module doc
+  already carries half the contract (bucket forward returns by signal quantile,
+  monotonic relationship, nonzero information coefficient) and H-008's Gate 0 /
+  Gate 0b carry the other half (horizons at 1/5/10/20 minutes, a block
+  bootstrap over sessions, and the effect size reported **in ticks** so it can
+  be compared against the spread). **Both halves are owed** — they are not the
+  same statistic, and shipping the IC without the tick-denominated effect size
+  answers the general question while leaving H-008's registered gates
+  unrunnable. The module-doc spec gets extended in the commit that implements
+  it (CLAUDE.md §8), not after.
+  **Why as S0 and not beside it.** `docs/PROJECT_PLAN.md` §6 scopes M2.5 as a
+  score-emitting trait beside `Strategy` with its own report. Landing it there
+  would create two places that answer "does this score predict forward
+  returns", and only one of them charges a trial, declares a hypothesis family,
+  stores its criteria before the run, or reaches the registry. A number
+  produced outside the funnel is a number nobody counted (D-0074's rules are
+  about ordering and identity, and a workbench sidesteps both). M2.5's exit
+  criterion — one signal family evaluated predictor-first, in a report worth
+  sending to an external reviewer — is *satisfied* by an S0 report and
+  strengthened by it, because the S0 report arrives with a trial count
+  attached.
+  **Why it is first.** S0-refused blocks the **front** of the funnel for every
+  predictor-shaped idea, and the block is not a delay — it is a stop. Six
+  backlog files register a predictor-first Gate 0 (H-001, H-008, H-011, H-012,
+  H-013, H-014), the registered gate order is binding, and a file may not run
+  its equity-curve gate first because the predictor gate is inconvenient:
+  reading a predictor result with the backtest already known is the exact
+  failure pre-registration exists to prevent (`research/backlog/README.md`
+  §2.4). So those six cannot advance by any route that does not pass through
+  this build. The M3-full plan treats it as block one.
+  **The first consumer is also the specification.**
+  `research/backlog/H-008-short-horizon-overreaction.md` is marked
+  `blocked_on: s0-predictor-seam` and states what the seam must do in the terms
+  a consumer needs, which is why it is the specification rather than merely the
+  first client. Its Gate 0b is the demanding half: *is the reversion bigger
+  than one tick* is a question a backtest answers badly (the answer arrives
+  entangled with the fill model) and a predictor report answers directly. An
+  S0 that cannot produce "real, and smaller than our costs" has not been built.
+  **The lookahead trap, stated before the code exists.** A forward return is by
+  construction information from after the decision point. It is legal in
+  *measurement* space and is §2.1 lookahead the instant it can reach a
+  decision. Therefore: the join lives in the evaluation path and never in the
+  `Strategy` / `Feed` path; nothing computed from a forward window may feed
+  back into a score; and scores obey the ordinary rule — a score at bar `t` is
+  computed from what was available at `t`, which for indicators means
+  `bar.signal_*()` (D-0076). The negative control is the one that plants the
+  defect rather than the one that shows the happy path: a "signal" that IS the
+  forward return must report a perfect relationship, and a test asserting that
+  is what proves the join runs the direction it claims rather than joining a
+  score to its own past. Per CLAUDE.md §7 it must be watched firing on a
+  deliberately reversed join.
+  **What this does NOT do**, because the leverage here is easy to overstate.
+  It changes **no triage grade** — grades measure cost to express and this
+  measures whether we are allowed to look yet. It does **not** fix the sample
+  problem: a grade-A config still replays one contract's life, and turning ~60
+  sessions into a verdict sample is registry pooling, the fifth unlock, which
+  is separate work. It does **not** make `Graduate` awardable — D-0075 stands
+  until S3's battery exists. And it does **not** lift the stage refusal ahead
+  of itself: `s0` stops being refused at load in the commit where S0 can
+  actually run, never before, because a declared stage that is silently skipped
+  is precisely what D-0075 refuses to ship.
+  **Ordering against the other open block.** `docs/MILESTONES.md` said the
+  account-evaluation bootstrap evaluator "is the next block". It is the next
+  block **of `docs/ACCOUNT_EVAL_SPEC.md` §4**; the S0 seam is the first block
+  of M3-full, and the milestone line is corrected to say which it means — two
+  lines each claiming "next" is how a plan stops being one. The two are not
+  rivals for the same component: both need a **block bootstrap over sessions**
+  (§4 over daily PnL records, S0 over forward returns), so whichever lands
+  first builds it in `crucible-funnel::stats` where the other consumes it,
+  rather than each growing a private resampler whose seeds derive differently.

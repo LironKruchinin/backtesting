@@ -973,9 +973,12 @@ bottom is the fastest way to see what a verdict is made of. Then
 `crucible-funnel::stages` for the criteria and why `Graduate` is unreachable,
 `crucible-funnel::registry` for the five contract rules and why the backend is
 JSONL, and `crucible-strategies::controls` for the two benchmarks and the
-planted leak. `crucible-funnel::stats` is still a **spec in module docs** and
-is what M3 owes; `crucible-funnel/tests/planted_leak.rs` is the measurement of
-what its absence currently costs.
+planted leak. M3 owes **two builds, in this order** (D-0081): first the **S0
+predictor seam** — score-emitting evaluation with forward-return joins, the
+M2.5 predictor workbench arriving *as* S0 — because S0-refused stops the front
+of the funnel for every predictor-shaped idea and no other open item unblocks
+anything; then `crucible-funnel::stats`, still a **spec in module docs**, whose
+absence `crucible-funnel/tests/planted_leak.rs` measures.
 
 Known open questions (decide when reached, log when decided): margin
 modeling (M2); multi-instrument portfolio accounting (post-M4); Welford vs

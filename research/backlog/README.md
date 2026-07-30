@@ -112,27 +112,106 @@ Three properties are worth knowing before stating an idea on coarse bars:
   is refused. The single-contract ceiling in this section still applies.
 
 **`combo` and `walk-forward` replay raw contracts only — this is the hard
-ceiling on grade A.** A continuous alias (`ES.v.0`) is *refused*, not
-unsupported-by-accident: replaying a back-adjusted series needs a consumer that
-says which of the two price series it wants — signals read the adjusted series,
-PnL reads the tradeable one — and neither grid command has anywhere to put that
-choice (D-0042, and the refusal is quoted in `crucible-cli::combo`). Separately,
-`curated/rolls/` is empty, so no roll table has been generated yet either.
+ceiling on grade A, and it is now a deliberate exclusion rather than a missing
+part.** The continuous replay path **exists**: D-0073/D-0076 wired
+`ContinuousFeed` into replay, roll tables are built (`curated/rolls/` holds ES,
+NQ, RTY, CL), and **`backtest` replays a stitched `ES.v.0` series today**.
 
-The consequence is concrete and it constrains every grade A in this directory:
-**the longest sample a grade-A config can replay today is one contract's active
-life** — roughly a quarter for ES. That is an S0 triage sample, not a verdict
-sample. A verdict needs one of:
+The grid commands are excluded on purpose. `crucible-cli::combo` refuses a
+continuous alias because *a grid expands rules it has not seen*, and a rule
+comparing a price to an absolute constant is not safe on a back-adjusted series
+— the level a bar sits at is the sum of every roll gap after it. `backtest`
+gets the stitched series because it runs one strategy an operator named and
+read; a grid does not have that guarantee. Do not read this as a gap waiting to
+be closed.
 
-1. the D-0042 consumer, so a stitched multi-year series can be replayed; or
-2. running the same config across many individual contracts (`ESH4`, `ESM4`,
-   `ESU4`, `ESZ4`, …) and **pooling** the results — which needs the M3 registry
-   to pool honestly, and which charges every contract as a trial.
+The consequence still constrains every grade A here: **the longest sample a
+grade-A config can replay is one contract's active life** — roughly a quarter
+for ES, ~60 sessions. That is a triage sample, not a verdict sample. Turning
+one into the other needs **registry pooling**: running the same config across
+many contracts (`ESH2024`, `ESM2024`, `ESU2024`, …) and pooling honestly
+through the M3 registry, which charges every contract as a trial. That is the
+**fifth unlock** (§6), and it is the one that converts this whole directory's
+grade-A column from "runnable" into "answerable".
 
-So "grade A" means *runnable this week*, and nothing stronger. No file in this
-directory may issue a `Graduate` verdict off a single-contract sample.
+**Contract keys carry a four-digit year** (D-0072): `ESH2024`, never the
+vendor's `ESH4`. A CME year code has one digit and repeats every ten years, and
+our windows are sixteen years long. The grid commands do **not** resolve the
+shorthand — only `backtest` prints `ESH4 -> ESH2024`, and only when
+unambiguous. **Every config in this directory must spell the four-digit key.**
 
----
+**This build cannot award `Graduate`** (D-0075). S3's battery is still owed, so
+the ceiling is `Iterate` and every report says so. No file here may register a
+criterion whose passing implies `Graduate` — the honest top outcome of anything
+in this directory today is `Iterate`.
+
+### 2.3 The `[funnel]` schema is owned elsewhere — this directory carries values, not schema
+
+`[funnel]` is parsed by `crucible-cli::config::FunnelCfg`, and **the funnel
+workstream owns it**. `configs/example-combo.toml` is the canonical, shipped,
+parser-checked instance. This directory does **not** get a second copy of that
+schema.
+
+The rule, and the reason for it: `deny_unknown_fields` means a `[funnel]` block
+that has drifted from the parser is a **hard load error**, and a *missing*
+required field is equally fatal. A backlog file that inlines a stale schema
+turns a pre-registration into a config that will not load — which is the
+strictness working, but at the cost of a confusing failure at the worst moment.
+
+So: hypothesis files pre-register **threshold values and the reasoning behind
+them**, and any config block they carry is explicitly marked as a copy whose
+canonical source is `configs/example-combo.toml`. **If the two disagree, the
+shipped config wins and the backlog file is stale.** Before running a config
+from this directory, diff its `[funnel]` block against the shipped one.
+
+This has already bitten once. The first draft of H-007 and H-008 carried
+`stages = ["s0", "s1", "s2", "s3"]` and only four criterion fields. Since then
+the funnel landed and the schema requires `min_oos_trades`,
+`min_oos_sessions`, `min_oos_return_pct_free_fills` and
+`require_controls_beaten`, and **`s0`/`s3` are refused at load rather than
+skipped**. Both configs would have failed to load. They are corrected; the
+lesson is the rule above.
+
+### 2.4 Registered gate order is binding, and S0 is the next build
+
+Several files here pre-register a **predictor-first** gate — a no-trading
+measurement of forward returns conditional on the signal — ahead of any equity
+curve, per `docs/PROJECT_PLAN.md` §7.3. That gate is the funnel's **S0**, and
+S0 is **not implemented**: a config declaring it is refused at load, because
+*the combo grammar's rules produce positions, not a continuous score to bucket
+forward returns by* (`crucible-funnel::stages`).
+
+Closing that gap now has a name and a place in the plan: **the S0 predictor
+seam** (D-0081) — a score-emitting evaluation path with forward-return joins,
+which is the M2.5 predictor workbench arriving *as* the funnel's S0 rather than
+beside it, so its report carries a trial count and a registry row instead of
+standing outside the thing that counts. It is **M3's first block**
+(`docs/MILESTONES.md`). Until it lands the refusal stands: `s0` stops being
+refused at load in the commit where S0 can run, never earlier.
+
+**A file whose Gate 0 is a predictor measurement may not skip to Gate 1 because
+Gate 0 is inconvenient.** The order is part of the pre-registration: running the
+equity-curve gate first and the predictor gate afterwards means the predictor
+result is read with the backtest already known, which is the failure
+pre-registration exists to prevent. Such a file is marked `blocked_on:` in its
+front-matter and stays blocked until the seam lands. Grade A means *expressible
+today*; it does not override a registered order.
+
+**Six files carry a predictor-first gate**: H-001, H-008, H-011, H-012, H-013,
+H-014. Only H-008 is marked `blocked` today, because the other five are already
+blocked behind larger gaps (a resampler, a volume operand, an options loader)
+and would not be runnable even with the seam. But all six ultimately want the
+same thing — *bucket forward returns by a signal, without trading* — so the seam
+is one piece of work serving six hypotheses, and it does not change a single
+grade. That is worth saying plainly: it is the highest-leverage item here that
+the grading scheme is structurally blind to, because the grades measure cost to
+express and this measures whether we are allowed to look yet.
+
+That is also the reason it is scheduled first rather than merely noticed
+(D-0081): S0-refused stops the **front** of the funnel, so for these six the
+block is not a delay that a faster machine shortens — no route to a verdict
+exists that does not pass through it. Every other open M3 item improves an
+answer this build already produces.
 
 ## 3. What we actually own (2026-07-30)
 
@@ -151,14 +230,20 @@ asset; **curated** is derived, disposable, and currently mid-build.
 | `tbbo` | **ES only** | 2025-07-28 → 2026-07-28 |
 | `mbo` | **ES only** | 2026-06-28 → 2026-07-28 |
 
-### Curated (replayable) — **1m only, and incomplete**
+### Curated (replayable) — **1m only, now broadly complete**
 
-Bulk transcode is in progress. At the time of writing: GC (120 contracts), RTY
-(38) and CL (1) have the full 2010→2026 window; **ES has only January 2024 and
-2024-02-01 → 2026-07-28** — the 2010→2024 ES window is not transcoded yet.
-Curated data is derived and rebuildable, so this is a scheduling fact, not a
-constraint on what is *ownable*. Any file that says "grade A" means A *once the
-relevant contract is transcoded*, which costs a command, not a purchase.
+Bulk transcode has advanced a long way since the first draft of this directory:
+**371 contract partitions**, all carrying four-digit year keys (D-0072), with ES
+fully transcoded across **69 contracts** and 6E, GC, RTY, CL present. Each
+carries the tiled window set (`2010-06-06--2024-01-01`, `2024-01`,
+`2024-02-01--2026-07-28`).
+
+**Roll tables are built** — `curated/rolls/` holds ES, NQ, RTY and CL — so
+`ES.v.0` is loadable and `backtest` replays it. The grid commands still do not
+(§2.2, and deliberately).
+
+Curated data is derived and rebuildable, so anything missing here costs a
+command, not a purchase.
 
 ### Not owned / not built
 
@@ -187,7 +272,8 @@ slug: short-kebab-slug
 topic: one of the topic keys in §5
 grade: A | B | C
 hypothesis_family: the pre-registered trial-registry key
-status: backlog
+status: backlog | blocked
+blocked_on: (optional) what must land before the REGISTERED FIRST GATE can run
 created: YYYY-MM-DD
 ---
 
@@ -238,7 +324,7 @@ someone found in a finite sample and the file should say so.
 | [H-005](H-005-intraday-periodicity.md) | Half-hourly periodicity at multiples of a trading day | `intraday-session` | C | `es-intraday-periodicity` |
 | [H-006](H-006-time-series-momentum.md) | Time-series momentum at 1–12 month horizons | `momentum-horizon` | C | `futures-tsmom-horizon` |
 | [H-007](H-007-trend-following-span.md) | Cost-optimal trend-following span | `momentum-horizon` | A | `es-trend-span-cost-optimal` |
-| [H-008](H-008-short-horizon-overreaction.md) | Short-horizon overreaction and reversal | `momentum-horizon` | A | `es-short-horizon-reversal` |
+| [H-008](H-008-short-horizon-overreaction.md) | Short-horizon overreaction and reversal | `momentum-horizon` | A · **blocked** | `es-short-horizon-reversal` |
 | [H-009](H-009-volatility-managed-exposure.md) | Volatility-managed exposure | `vol-regime` | B | `futures-vol-managed-exposure` |
 | [H-010](H-010-vol-managed-oos-rebuttal.md) | The out-of-sample rebuttal to volatility management | `vol-regime` | B | `futures-vol-managed-exposure` |
 | [H-011](H-011-variance-risk-premium.md) | Variance risk premium as a return predictor | `vol-regime` | C | `es-variance-risk-premium` |
@@ -264,11 +350,59 @@ retired and the decision that did it.
 Grade tally: **2 A · 8 B · 5 C**. That distribution is the honest one, and the
 shape of it is the sweep's main structural finding: the combo grammar is three
 indicators and six comparison operators, and almost every published intraday
-result is stated in terms of a clock the grammar cannot read. Four pieces of
-code — a **time-of-day predicate**, a **1m→5m/daily resampler**, a **volume
-operand**, and a **rolling normalizer** — would move most of the B column into
-A. **All four landed on 2026-07-30** (D-0077 … D-0080); §6.1 says which row each
-one retired, and the grades above are unchanged because re-grading is triage.
+result was stated in terms of a clock the grammar could not read — until
+2026-07-30, when four of the five unlocks below landed at once. **That tally is
+the pre-unlock triage**, kept as the historical record; the re-grade against the
+grammar that now exists is recorded per file, in each file's own changelog.
+
+### 6.2 The five unlocks — four landed, and the fifth is the one that matters
+
+Four pieces of code moved most of the B column's *expressibility* problem, and
+§6.1 says which row each retired. The fifth does something different and more
+important: it is what makes any grade-A result *mean* anything, and it is still
+pending. None of the five costs a purchase.
+
+| # | Unlock | Status | What it frees |
+|---|---|---|---|
+| 1 | **Time-of-day / session predicates** (+ session anchors, D-0071 pattern) | **landed** (D-0078) | H-001, H-002, H-004, H-012, H-014 |
+| 2 | **1m→5m/15m/1h/1d resampler** | **landed** (D-0077) | H-003, H-006, H-009, H-014 |
+| 3 | **Volume operand** in the rule grammar | **landed** (D-0079) | H-004, H-012, H-013 |
+| 4 | **Rolling normalizer** (point-in-time standardization) | **landed** (D-0080) | H-004, H-009, H-015 |
+| 5 | **Registry pooling across contracts** | **pending** | *every grade A* — turns a ~60-session triage sample into a verdict sample (§2.2) |
+
+Unlock 5 is not a convenience. Grade A means "runnable on one contract's life",
+and no sample-adequacy criterion worth registering is satisfiable at ~60
+sessions — so today's A-grade runs are guaranteed to be killed for sample size,
+correctly, by the machine. That is the pre-registration working, but it means
+**the A column produces no verdicts until pooling lands**. That has not changed
+today and is the thing to keep in view: promoting a file from B to A moves it
+from *inexpressible* to *runnable*, **not** to *answerable*. The four unlocks
+grew the set of ideas we can state; only the fifth grows the set we can settle.
+
+One prediction in this section was wrong and is left visible rather than
+quietly corrected: it read "registry pooling ... likely arrives before any of
+unlocks 1–4". Unlocks 1–4 arrived first, on 2026-07-30. Pooling is still the M3
+workstream's.
+
+A sixth item is *not* on this list on purpose: the continuous-series consumer
+exists already (D-0073/D-0076) and grids are excluded from it deliberately, so
+it is not pending work (§2.2).
+
+### 6.3 Blocked entries
+
+**H-008 is `blocked`**, despite being grade A. Its registered Gate 0 is a
+predictor-first measurement — the funnel's **S0** — which is refused at load
+because the combo grammar produces positions rather than a continuous score
+(§2.4). Running its Gate 1 first would break the registered order, so it waits.
+It is the **S0 predictor seam's first consumer and its specification** (D-0081):
+what that file asks for in Gate 0 and Gate 0b — forward returns bucketed at
+1/5/10/20 minutes, a block bootstrap over sessions, and the effect size in
+**ticks** so it can be compared against the spread — is half of what the seam
+has to do, the other half being the quantile/IC contract in
+`crucible-funnel::stages`' module doc. Both halves are owed.
+
+**H-007 is runnable now.** Its primary test reads the cost-sensitivity sweep and
+per-round-trip PnL out of S1/S2 and needs no S0 seam.
 
 Two entries carry a warning the grade does not: **H-012** and **H-013** are
 graded on cost to test, and both have **no refereed empirical support** for
