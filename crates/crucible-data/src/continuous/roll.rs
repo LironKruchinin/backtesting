@@ -99,7 +99,7 @@ use std::path::{Path, PathBuf};
 use crucible_core::types::{InstrumentId, Price, TimeFrame, Ts};
 use serde::{Deserialize, Serialize};
 
-use crate::catalog::ts_serde;
+use crate::catalog::{TsRange, ts_serde};
 use crate::curated::path::encode_instrument;
 
 use super::error::ContinuousError;
@@ -315,6 +315,51 @@ impl RollTable {
     #[must_use]
     pub fn alias(&self) -> InstrumentId {
         InstrumentId::new(format!("{}.{}.0", self.root, self.rule.alias_letter()))
+    }
+
+    /// The half-open `ts_open` window this table can answer about:
+    /// `[first_ts_open, last_ts_open + tf)`.
+    ///
+    /// The end is the *availability* end of the last bar expressed back in
+    /// `ts_open` terms, so a request for "everything up to and including the
+    /// last bar" is covered exactly rather than by one interval short.
+    ///
+    /// # Errors
+    /// [`ContinuousError::MalformedTable`] if the span runs backwards, which
+    /// [`RollTable::validate`] also refuses.
+    pub fn covered_range(&self) -> Result<TsRange, ContinuousError> {
+        TsRange::new(
+            self.first_ts_open,
+            self.last_ts_open.plus_ns(self.tf.duration_ns()),
+        )
+        .map_err(|e| ContinuousError::MalformedTable {
+            detail: format!("the table's own span is not a range: {e}"),
+        })
+    }
+
+    /// `requested` narrowed to [`covered_range`](RollTable::covered_range), or
+    /// `None` when the two do not overlap at all.
+    ///
+    /// Not a weakening of the D-0045 refusal, which
+    /// [`ContinuousFeed::open`](super::ContinuousFeed::open) still makes
+    /// against whatever window it is handed. This is the *caller's* question:
+    /// a `--start`/`--end` pair is a pair of dates, and a date is a request for
+    /// whatever part of it exists — the same thing
+    /// [`ParquetBarFeed`](crate::curated::ParquetBarFeed) does for an outright,
+    /// where a window reaching past the first bar simply yields the bars there
+    /// are. What must never happen is doing it *quietly*: a caller that narrows
+    /// is expected to say so, because a table built before the archive grew
+    /// covers less than the archive holds, and silence there is a replay
+    /// missing whole contracts (D-0073).
+    ///
+    /// # Errors
+    /// [`ContinuousError::MalformedTable`] via
+    /// [`covered_range`](RollTable::covered_range).
+    pub fn narrow(&self, requested: TsRange) -> Result<Option<TsRange>, ContinuousError> {
+        let covered = self.covered_range()?;
+        let start = requested.start_ts().max(covered.start_ts());
+        let end = requested.end_ts().min(covered.end_ts());
+        Ok(TsRange::new(start, end).ok())
     }
 
     /// Checks every invariant a reader depends on.
@@ -620,6 +665,112 @@ pub fn roll_table_path(
         .join(format!("{}.json", rule.slug())))
 }
 
+/// Every stored roll table for a root and interval whose rule matches
+/// `rule_letter` (`v` or `c`), by path, sorted.
+///
+/// The lookup a continuous alias needs, and it is a *search* rather than a
+/// path join because [`ContinuousAlias`](super::ContinuousAlias) names the
+/// rule and not its parameters: `ES.v.0` says "volume roll", while the file is
+/// `v-confirm1.json` or `v-confirm3.json`. Returning every match and letting
+/// the caller refuse a tie is the D-0029 shape — a second candidate stops the
+/// run rather than losing to sort order.
+///
+/// An absent directory is an empty result, not an error: a roll table is
+/// curated data and not building one is a normal state of the archive.
+///
+/// # Errors
+/// [`ContinuousError::Curated`] if the root cannot name a path component, and
+/// [`ContinuousError::Io`] if the directory exists but cannot be listed.
+pub fn roll_tables_for(
+    data_dir: &Path,
+    root: &str,
+    tf: TimeFrame,
+    rule_letter: char,
+) -> Result<Vec<PathBuf>, ContinuousError> {
+    let encoded = encode_instrument(root)?;
+    let dir = data_dir
+        .join(CURATED_ROLLS_DIR)
+        .join(encoded)
+        .join(tf.to_string());
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let entries = std::fs::read_dir(&dir).map_err(|source| ContinuousError::Io {
+        path: dir.clone(),
+        during: "listing",
+        source,
+    })?;
+    let prefix = format!("{rule_letter}-");
+    let mut out = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|source| ContinuousError::Io {
+            path: dir.clone(),
+            during: "listing",
+            source,
+        })?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        if path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .is_some_and(|stem| stem.starts_with(&prefix))
+        {
+            out.push(path);
+        }
+    }
+    // Sorted so the *listing* in a refusal is stable; the caller still refuses
+    // a tie rather than taking the first (CLAUDE.md §2.2).
+    out.sort();
+    Ok(out)
+}
+
+/// The stored roll table a continuous alias names, with the path it came from.
+///
+/// One lookup, three outcomes, and two of them refuse:
+///
+/// - nothing stored → [`ContinuousError::NoRollTable`], naming the `crucible
+///   rolls` invocation that would build it;
+/// - two or more stored → [`ContinuousError::AmbiguousRollTable`], listing
+///   them. `ES.v.0` says "the volume rule" and not `confirm_days`, so an
+///   archive holding two volume tables genuinely has two answers;
+/// - exactly one → read and validated, like any other table off disk.
+///
+/// # Errors
+/// The two above, plus [`ContinuousError::Io`] / [`ContinuousError::Json`] /
+/// [`ContinuousError::MalformedTable`] from reading the file itself.
+pub fn roll_table_for_alias(
+    data_dir: &Path,
+    alias: &super::ContinuousAlias,
+    tf: TimeFrame,
+) -> Result<(RollTable, PathBuf), ContinuousError> {
+    let mut found = roll_tables_for(data_dir, alias.root(), tf, alias.rule_letter())?;
+    match found.len() {
+        0 => Err(ContinuousError::NoRollTable {
+            alias: alias.to_string(),
+            dir: data_dir
+                .join(CURATED_ROLLS_DIR)
+                .join(encode_instrument(alias.root())?)
+                .join(tf.to_string()),
+            rule_letter: alias.rule_letter(),
+        }),
+        1 => {
+            let path = found.remove(0);
+            let table = read_roll_table(&path)?;
+            Ok((table, path))
+        }
+        _ => Err(ContinuousError::AmbiguousRollTable {
+            alias: alias.to_string(),
+            candidates: found
+                .iter()
+                .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
+                .map(str::to_owned)
+                .collect(),
+        }),
+    }
+}
+
 /// Writes a table to its canonical path, atomically, and returns that path.
 ///
 /// Write-to-temp-then-rename, matching
@@ -719,6 +870,7 @@ mod tests {
             low: Price::from_nanos(close),
             close: Price::from_nanos(close),
             volume,
+            signal_offset: Price::ZERO,
         }
     }
 

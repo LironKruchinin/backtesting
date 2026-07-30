@@ -93,6 +93,20 @@ deadline-driven (see `crucible-data::ingest` module docs).
       table under `curated/rolls/`, back-adjustment applied at load and never
       stored, and `AdjustedPrice` as a distinct type so a back-adjusted level
       cannot reach `pnl_nano_usd` (D-0041..D-0046)
+      - [x] Wired into the replay path (2026-07-30): `backtest --instrument
+            ES.v.0 / ES.c.0` (D-0073). `ContinuousFeed` had been complete and
+            unused; a `Bar` now carries `signal_offset` beside its tradeable
+            prices, so indicators read `bar.signal_*()` while fills, marks and
+            `pnl_nano_usd` read the then-front contract's real prices. The
+            offset is zero everywhere else, so no golden value and no
+            determinism hash moved. 16 years of ES: **5,640,031 bars, 66
+            contracts, 65 rolls, 129,536 round trips, −$3,343,328.75 under
+            `spread_cross`** — the fill model, not the signal. `combo` and
+            `walk-forward` stay outright-only, because a rule comparing a price
+            to an absolute constant is not safe on a back-adjusted series.
+            **Still owed to M2:** a roll is a position event; a position carried
+            through one pays no spread and books the raw gap, bounded at $56,950
+            on that run and printed with it
 - [x] Data QA report (2026-07-28): coverage against the calendar, gaps,
       out-of-session bars, zero-volume runs, robust spike detection, DST
       boundaries, and the vendor's own `condition.json` — `crucible qa`,
@@ -108,7 +122,10 @@ validated local ES archive; the demo strategy runs on real ES 1m bars.
 ESH4 January-2024 1m bars, 30,167 bars, −23.51% under `spread_cross`.
 *Reproduced bit-identically 2026-07-30* after D-0072 re-keyed the curated store;
 the contract is now spelled `ESH2024` and `--instrument ESH4` still resolves to
-it while it is the only ESH the store holds.
+it while it is the only ESH the store holds. *Reproduced again the same day*
+after D-0073 gave every `Bar` a signal channel — same 30,167 bars, −23.51%, 665
+round trips, 27.1% win rate, $76,486.25 — and the same command now also runs on
+the whole stitched sixteen years as `--instrument ES.v.0`.
 
 ## M2 — Engine hardening + combos (~3–4 weeks)
 

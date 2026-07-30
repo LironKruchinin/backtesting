@@ -1626,3 +1626,143 @@ propose a superseding entry — don't silently diverge.
   the identity itself becomes unknowable — measured at zero across all seven
   roots. Reported rather than hotfixed: `crucible rolls --expiries auto` on GC
   still exits 4, and superseding D-0046 is its own decision.
+- **D-0073** (2026-07-30) — **A `Bar` carries two price views: the tradeable
+  prices it always did, plus an additive `signal_offset` into signal space.
+  `ContinuousFeed` is wired into `crucible backtest`, so `--instrument ES.v.0`
+  and `ES.c.0` replay a stitched series. `combo` and `walk-forward` stay
+  outright-only, for a new reason.**
+  *Extends D-0042 (the `AdjustedPrice` barrier is unchanged and now lives in
+  `crucible-core::types`); resolves the limitation `continuous::feed`'s module
+  docs named as M2's; supersedes nothing.*
+  **What was missing.** `ContinuousFeed` was complete and had no consumer: a
+  workspace grep found no user outside its own module. M1 ticked "Continuous
+  contracts v1" for the roll table, the back-adjustment and the type, and the
+  replay path was never connected — `backtest --instrument ES.v.0` looked for a
+  curated directory literally named `ES.v.0` and said it did not exist.
+  **The seam, and why it is on `Bar` and not on `MarketEvent`.** `feed.rs`
+  named the two ways to route both series to the engine: a second
+  `MarketEvent` variant, or an adjusted-price channel on `Bar`. The channel
+  won. `Bar` gains `signal_offset: Price` and four `signal_*()` accessors
+  returning `AdjustedPrice`; indicators and rule operands read those, and
+  fills, `Portfolio::mark` and `pnl_nano_usd` keep reading `open`/`high`/
+  `low`/`close` exactly as before. A variant would have forced every `match`
+  and every irrefutable `let MarketEvent::Bar(bar)` in the workspace — 25 sites
+  — to be revisited so each could go on doing precisely what it already did,
+  which is churn shaped like review. The offset is `Price::ZERO` for every
+  outright contract and every synthetic series, so the two views coincide
+  numerically everywhere they did before and **no golden value and no
+  determinism hash moves**.
+  **Why `AdjustedPrice` moved into the core.** The type was defined in
+  `crucible-data::continuous::adjust` while nothing replayed a continuous
+  series. Its first real consumer is the indicator set, which lives in
+  `crucible-strategies` — a crate that depends on `crucible-core` only (§3).
+  Leaving it in `data` meant either a dependency edge §3 forbids or a second
+  "this number is not tradeable" type in the core, and a second spelling of an
+  invariant is how the first one stops being enforced. The barrier is
+  bit-for-bit the same: no `From`, no `Into`, no `Deref`, no `as_price()`, and
+  the only exit is `as_points_f64`. `crucible_data::continuous::AdjustedPrice`
+  is now a re-export, so D-0042's `compile_fail` doctest still compile-fails
+  through the old path, and an identical pair sits on the definition itself.
+  **Back-adjusted levels reaching a strategy is not §2.1 lookahead, and the
+  reason is worth writing down.** Segment *j*'s offset is the sum of every roll
+  gap *after* it, so an adjusted level does embed the future. But for a
+  decision made at time *T*, every bar the strategy can see carries
+  `offset_j = (gaps strictly between segment j and segment(T)) + C(T)`, where
+  `C(T) = offset_{segment(T)}` is the **same constant for every visible bar**.
+  Any shift-invariant function of the visible prices — a moving-average
+  crossover, a return, a difference — is therefore identical to what a
+  causally-adjusted series would have produced; only the additive constant
+  differs, and it cancels. What does **not** cancel is a comparison against an
+  absolute constant: `close > 4500` reads a level that back-adjustment took
+  from rolls which had not happened. That is the reason for the scope split
+  below, and it is stated on `PriceField` where a rule author will meet it.
+  **Alias resolution.** `ContinuousAlias` parses the one spelling §4 pins,
+  `{root}.{v|c}.0`, and refuses three things by name rather than by omission:
+  `.n` (open interest is not a `RollRule` variant at all — D-0044), any depth
+  but `0` (a deferred chain is built from contracts the table does not record),
+  and anything that is not three dot-separated parts.
+  `ContinuousAlias::looks_like` decides *by shape* which store a name points
+  at, before either is opened, so `ES.n.0` gets an alias-shaped refusal instead
+  of "no curated data for ES.n.0". An alias names the **rule** and never its
+  parameters, so `roll_table_for_alias` searches `curated/rolls/{root}/{tf}/`
+  for tables whose slug starts with the letter: none refuses and names the
+  `crucible rolls` invocation that would build one, **two refuses and lists
+  them** (D-0029's shape — a second candidate stops the run rather than losing
+  to sort order), one is read and validated like any table off disk.
+  **The window, and why narrowing is not a weakening of D-0045.**
+  `ContinuousFeed::open` still refuses a replay window reaching outside the
+  table's span, and a test drives it from both ends. What `backtest` does
+  *first* is intersect a **date** request with the covered span and print that
+  it did. `--start 2010-06-06` asks for a calendar day; the archive's first ES
+  bar opens at 22:00 that day, so the request reaches 22 hours before the span
+  through nothing but the difference between a date and an instant, and no
+  rebuild can fix it — the table already spans the entire curated ES store. A
+  request with **no** overlap still refuses, and the printed line names the
+  table file, both windows, and the `crucible rolls --write` that would fix a
+  table the archive has outgrown. Silence there would be the failure mode
+  D-0045 exists to prevent; a printed narrowing is not.
+  **`combo` and `walk-forward` stay outright-only, and the old reason is
+  gone.** They refused a continuous alias because "nothing can say which of the
+  two price series it wants (D-0042)". That is no longer true. The refusal
+  stands on a different footing: `backtest` runs one strategy an operator
+  named, while a grid expands rules it has not seen, and the rule grammar can
+  write a comparison against an absolute constant, which the paragraph above
+  shows is not safe on a back-adjusted series. The grammar cannot tell a
+  shift-invariant rule from a level-sensitive one, so a grid would rank a sound
+  combo against a leaking one. The refusal's *test* was updated to assert the
+  new reason — a test asserting only "it refused" would have kept passing over
+  a stale justification for as long as anyone cared to look.
+  **What this does NOT fix, measured rather than described.** A roll is a
+  position event, not a price event. The feed hands the engine the then-front
+  contract's tradeable prices under one alias, so a position carried through a
+  roll sees the price step by the gap and **books it**, where a real roll would
+  have closed the old contract and opened the new one at the two prices that
+  made that gap — no PnL, and two more spreads and fees to pay. This is bounded
+  and now printed: `Σ |gap| × point_value × qty` over the rolls a run spans, on
+  the 16-year ES run **$56,950** against a $3.44 M loss (1.7 %). A fixture
+  plants it deliberately (`a_position_carried_across_a_roll_books_the_raw_gap`:
+  every ESH2024 bar is 100 and every ESM2024 bar is 120, so a round trip
+  straddling the roll is worth exactly the gap and one inside a contract is
+  worth nothing). Fixing it is M2's, with the fills a roll should generate.
+  **The result, which is the point.** `backtest --instrument ES.v.0 --timeframe
+  1m --start 2010-06-06 --end 2026-07-28 --fast 20 --slow 50`: **5,640,031
+  bars** over 66 contracts and 65 rolls, 2010-06-06T22:00Z .. 2026-07-27T23:59Z,
+  back-adjusted (the oldest segment carries **+602.5 points**), under
+  `spread_cross`. **129,536 round trips, 25.6 % win rate, final equity
+  −$3,343,328.75 (−3,443.33 %), fees $323,841.25.** The loss is the fill model:
+  259,073 contract-sides at one tick of half-spread is ≈ $3.24 M, plus $0.32 M
+  of commission, against a gross of roughly +$0.12 M. SmaCross is the reference
+  fixture and is not supposed to be profitable (§9); this is the cost-of-costs
+  lesson at sixteen-year scale.
+  **A new print, because that run found something.** The account reached zero
+  at bar 157,805 — **3 % of the way in**, 2010-11-15 — and there is no margin
+  model in this build, so the replay went on trading a position no broker would
+  have carried. Every dollar figure stays exact, but `Summary::compute` skips a
+  return step whose starting equity is not positive, so the naive Sharpe
+  describes the *solvent prefix* and nothing after it: it reads **+0.23** beside
+  a −3,443 % return. Max drawdown passes 100 % for the same reason. `backtest`
+  now prints an `INSOLVENT` block naming the bar, the fraction of the run, and
+  which figures to stop reading. The metrics themselves are untouched —
+  changing them is its own decision, and suppressing the number would have been
+  worse than explaining it.
+  **Each control was watched firing** (§7, no quality exemption). Ten
+  mutations, ten catches, each restored byte-exactly and re-verified:
+  `Sma`/`Ema` reading `bar.close` → the indicator controls; the feed dropping
+  `signal_offset` → the routing control; the feed adding the offset into the
+  tradeable fields (the D-0042 corruption itself) → three controls at once; the
+  roll boundary losing its strictness (`avail == roll_ts` joining the new
+  contract) → the no-lookahead control **and** the PnL control; `open`'s span
+  check weakened `||` → `&&` → the D-0045 control; `narrow` inventing coverage
+  → the narrowing control; a rule operand read in tradeable space → the
+  `PriceField` control; the insolvency note missing an account at exactly zero
+  → its own control; `combo` no longer recognising an alias → the refusal
+  control. One near-miss is part of the record: `cargo test -p crucible-cli
+  --lib` exits non-zero because that package has no lib target, which looked
+  like a caught mutation and was not — re-run against `--bins`, it was seen to
+  fail on the assertion it was meant to fail on.
+  **Archive action.** `curated/rolls/ES/1m/c-minus8d.json` was built so
+  `ES.c.0` resolves to something, with `--calendar-days 8` chosen by this
+  session and recorded in the filename rather than defaulted anywhere in code:
+  eight days before expiry is an operator's parameter, not a sourced CME
+  convention, and a `.c` alias with two stored tables refuses rather than picks.
+  `raw/` untouched; roll tables are curated and disposable (D-0045).

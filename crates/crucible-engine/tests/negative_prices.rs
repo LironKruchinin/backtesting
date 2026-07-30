@@ -60,6 +60,7 @@ fn bar(i: i64, o: &str, h: &str, l: &str, c: &str) -> MarketEvent {
         low: p(l),
         close: p(c),
         volume: 100,
+        signal_offset: Price::ZERO,
     })
 }
 

@@ -185,6 +185,119 @@ impl fmt::Display for Price {
     }
 }
 
+/// A price level in **signal space**: a [`Price`] shifted by an additive
+/// offset that no market ever quoted.
+///
+/// A back-adjusted continuous futures series is the reason this type exists
+/// (D-0042). Stitching `ESH2024` onto `ESM2024` leaves a step where one
+/// contract handed over to the next, and shifting the older segment by the
+/// roll gap removes it — but nobody ever traded at the shifted number. PnL
+/// computed against it is wrong by the cumulative roll gap, which for ES over
+/// a decade is hundreds of points, and it *looks fine* because the equity
+/// curve stays smooth. That is the silent corruption this type makes
+/// unrepresentable.
+///
+/// So `AdjustedPrice` is deliberately a dead end:
+///
+/// - no `From<AdjustedPrice> for Price`, no `Into<Price>`, no
+///   `Deref<Target = Price>`, no `as_price()`, and none may ever be added;
+/// - the only exit is [`as_points_f64`](AdjustedPrice::as_points_f64), which
+///   lands in indicator space where §2.3 already says `f64` belongs and where
+///   money cannot be computed;
+/// - [`ContractSpec::pnl_nano_usd`] — the one sanctioned price→money
+///   conversion in the workspace — takes `Price`, so an adjusted level cannot
+///   reach it.
+///
+/// A caller reaching for a conversion wants the tradeable price, and every
+/// [`Bar`](crate::events::Bar) carries it in `open`/`high`/`low`/`close`, next
+/// to the offset that produces this.
+///
+/// The rejection is a property of the type, not of a typo, and both halves are
+/// proven. This does not compile:
+///
+/// ```compile_fail
+/// # use crucible_core::types::{AdjustedPrice, ContractSpec, InstrumentId, Price};
+/// let spec = ContractSpec {
+///     instrument: InstrumentId::new("ES.v.0"),
+///     tick: Price::from_nanos(250_000_000),
+///     point_value_usd: 50,
+/// };
+/// let _ = spec.pnl_nano_usd(AdjustedPrice::from_nanos(1_000_000_000), 1);
+/// ```
+///
+/// and the same call with a tradeable [`Price`] does:
+///
+/// ```
+/// # use crucible_core::types::{ContractSpec, InstrumentId, Price};
+/// let spec = ContractSpec {
+///     instrument: InstrumentId::new("ES.v.0"),
+///     tick: Price::from_nanos(250_000_000),
+///     point_value_usd: 50,
+/// };
+/// assert_eq!(spec.pnl_nano_usd(Price::from_nanos(1_000_000_000), 1), 50_000_000_000);
+/// ```
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
+pub struct AdjustedPrice(i64);
+
+impl AdjustedPrice {
+    /// Zero, for completeness with [`Price::ZERO`].
+    pub const ZERO: AdjustedPrice = AdjustedPrice(0);
+
+    /// Applies an additive offset to a tradeable price.
+    ///
+    /// The **only** constructor that takes a [`Price`], and the one-way door:
+    /// what comes out cannot go back.
+    #[must_use]
+    pub const fn from_tradeable(price: Price, offset: Price) -> AdjustedPrice {
+        AdjustedPrice(price.as_nanos() + offset.as_nanos())
+    }
+
+    /// Construct from raw nanopoints. For tests and for reading an
+    /// already-adjusted level; not a conversion from a tradeable price.
+    #[must_use]
+    pub const fn from_nanos(nanos: i64) -> AdjustedPrice {
+        AdjustedPrice(nanos)
+    }
+
+    /// Raw nanopoints. Deliberately an `i64` and not a [`Price`]: an integer
+    /// carries no unit claim, so nothing downstream can mistake it for
+    /// something tradeable.
+    #[must_use]
+    pub const fn as_nanos(self) -> i64 {
+        self.0
+    }
+
+    /// Points as `f64` — the sanctioned exit into indicator space, matching
+    /// [`Price::as_points_f64`] (§2.3: indicators consume points, never raw
+    /// nanos).
+    #[must_use]
+    pub fn as_points_f64(self) -> f64 {
+        Price::from_nanos(self.0).as_points_f64()
+    }
+}
+
+impl std::ops::Add for AdjustedPrice {
+    type Output = AdjustedPrice;
+    fn add(self, rhs: AdjustedPrice) -> AdjustedPrice {
+        AdjustedPrice(self.0 + rhs.0)
+    }
+}
+
+impl std::ops::Sub for AdjustedPrice {
+    type Output = AdjustedPrice;
+    fn sub(self, rhs: AdjustedPrice) -> AdjustedPrice {
+        AdjustedPrice(self.0 - rhs.0)
+    }
+}
+
+impl fmt::Display for AdjustedPrice {
+    /// Trailing `~` so an adjusted level is never mistaken for a quote in a
+    /// log line.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}~", Price::from_nanos(self.0))
+    }
+}
+
 /// Position/order size in whole contracts. Sign convention: **orders carry a
 /// positive `Qty` plus a [`crate::events::Side`]; positions are signed**
 /// (long > 0, short < 0).

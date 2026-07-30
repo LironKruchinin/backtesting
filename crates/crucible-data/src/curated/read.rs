@@ -487,6 +487,7 @@ impl Feed for ParquetBarFeed {
             low: Price::from_nanos(self.bars.low[i]),
             close: Price::from_nanos(self.bars.close[i]),
             volume: self.bars.volume[i],
+            signal_offset: Price::ZERO,
         }))
     }
 }

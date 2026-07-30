@@ -62,15 +62,18 @@
 //!   arithmetic reason spelled out in [`adjust`]: it cannot be made exact in
 //!   integer nanopoints without a scheme that is its own design, and an `f64`
 //!   in the price path is not on offer (§2.3).
-//! - **The engine still sees one price series.** [`MarketEvent`] has one
-//!   `Bar` variant, so [`ContinuousFeed`]'s [`Feed`] impl hands over the
-//!   *tradeable* bar and the adjusted series is reachable only through
-//!   [`ContinuousFeed::next_continuous_bar`]. Adding a variant is a
-//!   deliberate breaking change requiring an engine review and a decision-log
-//!   entry (`crucible-core::events` says so), and it belongs with the other
-//!   half of the roll story: **a roll is a position event, not a price
-//!   event** — rolling a position pays spread and fees twice, and the engine
-//!   has to see close-old/open-new fills. Both are M2.
+//! - **The roll's cost.** A roll is a position event, not a price event:
+//!   rolling an open position pays the spread and the fee twice, and the
+//!   engine sees none of it, because [`MarketEvent`] carries prices and not
+//!   position changes. A position held across a roll is carried for free in
+//!   this build. `crucible backtest` prints the roll count beside the result
+//!   so the omission has a size. M2.
+//!
+//! Both price views *do* reach the engine (D-0073): [`ContinuousFeed`]'s
+//! [`Feed`] impl stamps the segment's offset onto
+//! [`Bar::signal_offset`](crucible_core::events::Bar::signal_offset), so
+//! indicators read `bar.signal_*()` while fills and marks read the tradeable
+//! prices beside it.
 //!
 //! [`Feed`]: crucible_core::traits::Feed
 //! [`MarketEvent`]: crucible_core::events::MarketEvent
@@ -97,11 +100,13 @@ pub use feed::{ContinuousFeed, ContinuousSegment};
 pub use gather::{GatheredSeries, gather_series};
 pub use roll::{
     CURATED_ROLLS_DIR, ROLL_TABLE_SCHEMA_VERSION, RollRow, RollRule, RollSource, RollTable,
-    RollTableInput, build_roll_table, read_roll_table, roll_table_path, write_roll_table,
+    RollTableInput, build_roll_table, read_roll_table, roll_table_for_alias, roll_table_path,
+    roll_tables_for, write_roll_table,
 };
 pub use session::{ContractSeries, SessionAccumulator, SessionBar, series_of};
 pub use symbol::{
-    ContractSymbol, DEFAULT_ANCHOR_YEAR, DecadeAnchor, MonthCode, SymbolParts, parse_parts,
+    ContinuousAlias, ContractSymbol, DEFAULT_ANCHOR_YEAR, DecadeAnchor, MonthCode, SymbolParts,
+    parse_parts,
 };
 
 #[cfg(feature = "databento")]

@@ -11,20 +11,24 @@
 //! this module exists to make unrepresentable.
 //!
 //! So [`AdjustedPrice`] is a separate type from
-//! [`Price`](crucible_core::types::Price), and:
+//! [`Price`](crucible_core::types::Price), with no `From`, no `Into`, no
+//! `Deref` and no `as_price()`, and its only exit is
+//! [`as_points_f64`](AdjustedPrice::as_points_f64) — indicator space, where
+//! §2.3 already says `f64` belongs and where money cannot be computed. The
+//! type itself lives in [`crucible_core::types`] and is re-exported here.
 //!
-//! - it does **not** implement `From<AdjustedPrice> for Price`, `Into<Price>`,
-//!   `Deref<Target = Price>`, or any `as_price()` method;
-//! - the only way out of it is
-//!   [`as_points_f64`](AdjustedPrice::as_points_f64), which lands in indicator
-//!   space, where §2.3 already says `f64` belongs and where money cannot be
-//!   computed;
-//! - [`ContractSpec::pnl_nano_usd`](crucible_core::types::ContractSpec::pnl_nano_usd)
-//!   — the one sanctioned price→money conversion in the workspace — takes
-//!   `Price`, so an adjusted price cannot reach it. There is no escape hatch,
-//!   because the thing a caller reaching for one actually wants is the
-//!   tradeable price, and every [`ContinuousBar`] carries it right beside the
-//!   adjusted one.
+//! **Why it moved into the core (D-0073).** It was defined in this module
+//! while nothing replayed a continuous series. Wiring [`ContinuousFeed`] into
+//! `crucible backtest` gave it a consumer that cannot see this crate:
+//! `crucible-strategies` depends on `crucible-core` only, and it holds the
+//! indicators — the one place an adjusted level is *supposed* to arrive.
+//! Leaving the type here would have meant either a dependency edge §3 forbids
+//! or a second adjusted-price type in the core, and a second spelling of "this
+//! number is not tradeable" is how the first one stops being enforced. The
+//! barrier is unchanged and is still proven by a `compile_fail` doctest paired
+//! with a compiling one, now on the definition itself.
+//!
+//! [`ContinuousFeed`]: super::ContinuousFeed
 //!
 //! ## The arithmetic
 //!
@@ -65,6 +69,8 @@
 use crucible_core::events::Bar;
 use crucible_core::types::{InstrumentId, Price};
 
+pub use crucible_core::types::AdjustedPrice;
+
 /// How a continuous series is adjusted **at load**.
 ///
 /// Never baked into storage: a [`RollTable`](super::RollTable) records the
@@ -91,70 +97,6 @@ impl core::fmt::Display for AdjustmentKind {
     }
 }
 
-/// A back-adjusted price level, in nanopoints.
-///
-/// **Signals only.** Read the module docs before adding any method that
-/// returns a [`Price`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub struct AdjustedPrice(i64);
-
-impl AdjustedPrice {
-    /// Zero, for completeness with [`Price::ZERO`].
-    pub const ZERO: AdjustedPrice = AdjustedPrice(0);
-
-    /// Applies an additive offset to a tradeable price.
-    ///
-    /// This is the **only** constructor that takes a [`Price`], and it is the
-    /// one-way door: what comes out cannot go back.
-    #[must_use]
-    pub fn from_tradeable(price: Price, offset: Price) -> AdjustedPrice {
-        AdjustedPrice(price.as_nanos() + offset.as_nanos())
-    }
-
-    /// Construct from raw nanopoints. For tests and for deserializing an
-    /// already-adjusted level; not a conversion from a tradeable price.
-    #[must_use]
-    pub const fn from_nanos(nanos: i64) -> AdjustedPrice {
-        AdjustedPrice(nanos)
-    }
-
-    /// Raw nanopoints. Deliberately an `i64` and not a `Price`: an integer
-    /// has no unit claim attached, so nothing downstream can mistake it for
-    /// something tradeable.
-    #[must_use]
-    pub const fn as_nanos(self) -> i64 {
-        self.0
-    }
-
-    /// Points as `f64` — the sanctioned exit into indicator space, matching
-    /// [`Price::as_points_f64`] (CLAUDE.md §2.3: indicators consume points,
-    /// never raw nanos).
-    #[must_use]
-    pub fn as_points_f64(self) -> f64 {
-        Price::from_nanos(self.0).as_points_f64()
-    }
-}
-
-impl core::ops::Add for AdjustedPrice {
-    type Output = AdjustedPrice;
-    fn add(self, rhs: AdjustedPrice) -> AdjustedPrice {
-        AdjustedPrice(self.0 + rhs.0)
-    }
-}
-
-impl core::ops::Sub for AdjustedPrice {
-    type Output = AdjustedPrice;
-    fn sub(self, rhs: AdjustedPrice) -> AdjustedPrice {
-        AdjustedPrice(self.0 - rhs.0)
-    }
-}
-
-impl core::fmt::Display for AdjustedPrice {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}~", Price::from_nanos(self.0))
-    }
-}
-
 /// One bar's OHLC in adjusted space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdjustedOhlc {
@@ -169,14 +111,20 @@ pub struct AdjustedOhlc {
 }
 
 impl AdjustedOhlc {
-    /// Shifts a bar's four prices by `offset`.
+    /// Shifts a bar's four prices by the bar's **own**
+    /// [`signal_offset`](Bar::signal_offset).
+    ///
+    /// Deliberately not "by an offset you pass in": the bar carries the offset
+    /// the engine's indicators will apply, and taking a second one here would
+    /// let `ContinuousBar::adjusted` and `bar.signal_close()` disagree about
+    /// the same bar. One source, one answer.
     #[must_use]
-    pub fn of(bar: &Bar, offset: Price) -> AdjustedOhlc {
+    pub const fn of(bar: &Bar) -> AdjustedOhlc {
         AdjustedOhlc {
-            open: AdjustedPrice::from_tradeable(bar.open, offset),
-            high: AdjustedPrice::from_tradeable(bar.high, offset),
-            low: AdjustedPrice::from_tradeable(bar.low, offset),
-            close: AdjustedPrice::from_tradeable(bar.close, offset),
+            open: bar.signal_open(),
+            high: bar.signal_high(),
+            low: bar.signal_low(),
+            close: bar.signal_close(),
         }
     }
 }
@@ -221,10 +169,12 @@ pub struct ContinuousBar {
     pub tradeable: Bar,
     /// The same bar shifted into adjusted space. Signals only.
     pub adjusted: AdjustedOhlc,
-    /// The contract those tradeable prices actually belong to (`ESH4`).
+    /// The contract those tradeable prices actually belong to (`ESH2024`).
     pub contract: InstrumentId,
     /// The additive offset applied to reach `adjusted`, in nanopoints. Zero
-    /// on the last segment by construction.
+    /// on the last segment by construction, and always equal to
+    /// `tradeable.signal_offset` — the engine and this struct read the same
+    /// number.
     pub offset: Price,
 }
 

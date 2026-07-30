@@ -1493,6 +1493,7 @@ mod imp {
                         low: Price::from_nanos(row.4),
                         close: Price::from_nanos(row.5),
                         volume: row.6,
+                        signal_offset: Price::ZERO,
                     })
                 })
                 .collect();
@@ -1626,6 +1627,7 @@ mod imp {
                         low: Price::from_nanos(row.4),
                         close: Price::from_nanos(row.5),
                         volume: row.6,
+                        signal_offset: Price::ZERO,
                     })
                 })
                 .collect();

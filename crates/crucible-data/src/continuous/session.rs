@@ -239,6 +239,7 @@ mod tests {
             low: Price::from_nanos(close),
             close: Price::from_nanos(close),
             volume,
+            signal_offset: Price::ZERO,
         }
     }
 
@@ -332,6 +333,7 @@ mod calendar_bucket_tests {
             low: Price::from_points(close),
             close: Price::from_points(close),
             volume,
+            signal_offset: Price::ZERO,
         }
     }
 

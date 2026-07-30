@@ -279,6 +279,7 @@ mod tests {
             low: Price::from_points_f64_lossy(l),
             close: Price::from_points_f64_lossy(c),
             volume: 10,
+            signal_offset: Price::ZERO,
         }
     }
 

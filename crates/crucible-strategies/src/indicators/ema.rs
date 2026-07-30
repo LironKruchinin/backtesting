@@ -42,7 +42,7 @@ impl Indicator for Ema {
     }
 
     fn update(&mut self, bar: &Bar) -> Option<f64> {
-        let x = bar.close.as_points_f64();
+        let x = bar.signal_close().as_points_f64();
         match self.value {
             Some(prev) => {
                 let next = self.alpha * x + (1.0 - self.alpha) * prev;
@@ -81,6 +81,7 @@ mod tests {
             low: p,
             close: p,
             volume: 1,
+            signal_offset: Price::ZERO,
         }
     }
 

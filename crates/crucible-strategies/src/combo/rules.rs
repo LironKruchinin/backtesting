@@ -30,8 +30,21 @@ use crate::indicators::BollingerBands;
 
 use super::spec::IndicatorKind;
 
-/// A field of the current bar. Prices reach indicator space as points
-/// (`Price::as_points_f64`), never as raw nanos (CLAUDE.md §2.3).
+/// A field of the current bar, in **signal space**.
+///
+/// Prices reach indicator space as points (`AdjustedPrice::as_points_f64`),
+/// never as raw nanos (CLAUDE.md §2.3), and always through
+/// `Bar::signal_*()` so that a rule comparing a price to an indicator compares
+/// two numbers on the same scale. On an outright contract the two spaces
+/// coincide; on a stitched continuous series they do not, and reading
+/// `bar.close` here would compare a raw front-month price against an SMA of
+/// back-adjusted ones — a difference the size of the cumulative roll gap,
+/// silently.
+///
+/// **A rule comparing a price field to an absolute constant is level-sensitive
+/// and is therefore not safe on a back-adjusted series** (D-0073): the level a
+/// bar sits at depends on roll gaps that had not happened yet. That is why
+/// `combo` and `walk-forward` refuse a continuous alias in this build.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PriceField {
     /// Interval open.
@@ -56,10 +69,10 @@ impl PriceField {
 
     fn of(self, bar: &Bar) -> f64 {
         match self {
-            PriceField::Open => bar.open.as_points_f64(),
-            PriceField::High => bar.high.as_points_f64(),
-            PriceField::Low => bar.low.as_points_f64(),
-            PriceField::Close => bar.close.as_points_f64(),
+            PriceField::Open => bar.signal_open().as_points_f64(),
+            PriceField::High => bar.signal_high().as_points_f64(),
+            PriceField::Low => bar.signal_low().as_points_f64(),
+            PriceField::Close => bar.signal_close().as_points_f64(),
         }
     }
 }
@@ -901,7 +914,31 @@ mod tests {
             low: Price::from_points_f64_lossy(close),
             close: Price::from_points_f64_lossy(close),
             volume: 1,
+            signal_offset: Price::ZERO,
         }
+    }
+
+    /// A price operand is read in **signal space**, like every indicator it
+    /// gets compared against (D-0073).
+    ///
+    /// Mixing the two is the failure this guards: `close crosses_above sma_20`
+    /// on a stitched series would compare a raw front-month price with a
+    /// moving average of back-adjusted ones, and the two disagree by the
+    /// cumulative roll gap — hundreds of ES points, which is a rule that fires
+    /// on the roll table rather than on the market.
+    #[test]
+    fn a_price_operand_is_read_in_signal_space() {
+        let mut b = bar(100.0, 101.0);
+        b.signal_offset = Price::from_points(20);
+        // Traded at 100/101, sits at 120/121 in signal space.
+        assert!((PriceField::Close.of(&b) - 120.0).abs() < 1e-9);
+        assert!((PriceField::High.of(&b) - 121.0).abs() < 1e-9);
+        assert!((PriceField::Open.of(&b) - 120.0).abs() < 1e-9);
+        assert!((PriceField::Low.of(&b) - 120.0).abs() < 1e-9);
+        // And with no offset the two spaces coincide, so the numbers above are
+        // the offset arriving rather than the fixture.
+        let plain = bar(100.0, 101.0);
+        assert!((PriceField::Close.of(&plain) - 100.0).abs() < 1e-9);
     }
 
     /// `and` binds tighter than `or`: `a or b and c` is `a or (b and c)`.

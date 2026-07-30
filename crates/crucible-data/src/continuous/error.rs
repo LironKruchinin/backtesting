@@ -185,6 +185,34 @@ pub enum ContinuousError {
         /// definition file named none at all.
         candidates: Vec<(String, Ts)>,
     },
+    /// A string is not a continuous alias in the form §4 pins.
+    NotAnAlias {
+        /// The offending text.
+        text: String,
+        /// Which part of the form it broke.
+        reason: String,
+    },
+    /// No roll table exists for a root, interval and rule letter.
+    NoRollTable {
+        /// The alias that was asked for.
+        alias: String,
+        /// Directory searched.
+        dir: PathBuf,
+        /// Rule letter that found nothing.
+        rule_letter: char,
+    },
+    /// More than one stored rule answers to one alias letter.
+    ///
+    /// `ES.v.0` names "the volume rule", not its `confirm_days`, so an archive
+    /// holding `v-confirm1.json` *and* `v-confirm3.json` has two answers to one
+    /// question. Same refusal D-0029 and D-0072 make: two candidates stop the
+    /// run rather than one being adopted by sort order.
+    AmbiguousRollTable {
+        /// The alias that was asked for.
+        alias: String,
+        /// Every stored table that matches, by file stem, sorted.
+        candidates: Vec<String>,
+    },
 }
 
 impl core::fmt::Display for ContinuousError {
@@ -355,6 +383,39 @@ impl core::fmt::Display for ContinuousError {
                     )
                 }
             }
+            ContinuousError::NotAnAlias { text, reason } => write!(
+                f,
+                "{text:?} is not a continuous alias: {reason}. CLAUDE.md §4 pins the \
+                 spelling to {{root}}.{{v|c}}.0 — `ES.v.0` for the volume roll, \
+                 `ES.c.0` for the calendar roll"
+            ),
+            ContinuousError::NoRollTable {
+                alias,
+                dir,
+                rule_letter,
+            } => write!(
+                f,
+                "no `{rule_letter}` roll table for {alias} in {}. A roll table is \
+                 curated data — derived, disposable, and not built until asked \
+                 for. Build it:\n\x20      crucible rolls --root <ROOT> --timeframe \
+                 <TF>{} --write",
+                dir.display(),
+                if *rule_letter == 'c' {
+                    " --calendar-days <N>"
+                } else {
+                    ""
+                }
+            ),
+            ContinuousError::AmbiguousRollTable { alias, candidates } => write!(
+                f,
+                "{alias} names {} stored roll tables: {}. The alias says which *rule*, \
+                 never its parameters, so two stored tables are two answers to one \
+                 question and picking by sort order would put an unstated assumption \
+                 under a research number. Delete the one you do not want, or name the \
+                 contract chain directly",
+                candidates.len(),
+                candidates.join(", ")
+            ),
         }
     }
 }
