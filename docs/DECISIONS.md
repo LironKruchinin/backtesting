@@ -2670,3 +2670,64 @@ propose a superseding entry — don't silently diverge.
   extremeness. It truncates the **end** (the future), because that is the
   direction lookahead flows from; truncating the start would test warmup
   sensitivity, which is a different and lesser question. It is not built.
+- **D-0088** (2026-07-31) — **Truncation invariance: decisions on a prefix must
+  equal the decisions the full series made over that prefix, compared
+  bit-for-bit.** The second half of block A (D-0087), and a different *kind* of
+  question from the permutation null.
+  **Permutation asks whether a result is extreme; truncation asks whether two
+  decision streams are equal.** One answers with a p-value and a threshold, the
+  other with yes/no and the bar where it stopped being yes. Permutation is
+  statistical and can be fooled by a strategy that reproduces its edge on every
+  draw; truncation is not statistical at all — it is a determinism property.
+  **Which end, and why.** The **end**. Lookahead flows from the future into the
+  past — a full-sample statistic, a peek at tomorrow's close, an indicator
+  fitted on everything — so deleting the future is exactly the perturbation
+  that exposes it, and a strategy that used no future information cannot notice
+  the deletion. Truncating the **start** would measure warmup sensitivity: a
+  real property, a lesser one, and a strategy failing it is usually just
+  under-warmed rather than leaking.
+  **Bit-identity, with no tolerance knob.** Decisions compare as **bytes**
+  through `Decision::encode`. A strategy whose orders differ by one tick after
+  the future is deleted has read the future, and a tolerance that forgives one
+  tick forgives exactly the defect the harness exists to find. Any tolerance
+  would be a §9 decision with an entry behind it, never a default. Floats never
+  reach the comparison: an `OrderIntent` is a side, an integer quantity, a kind
+  and an optional integer bracket, so byte equality is exact and
+  platform-stable (§2.3).
+  **Faithful by decoration, not reconstruction.** `Recording<S>` wraps the real
+  strategy and records what the real engine acted on, against the real
+  `PortfolioView`. Reconstructing the decisions would have measured the
+  reconstruction — the same argument D-0071 makes about rebuilding equity from
+  OHLC.
+  **The converse control ran first**, and it is what makes the rest mean
+  anything: `SmaCross` — trailing windows only — compared **189 decisions across
+  four cuts with 0 divergences**. The detector then fired: `LeakyZScore`, refit
+  per prefix, produced **4 divergences**, one at every cut. And the third case
+  names the cause: holding the fit **fixed** while still deleting the future
+  gives 8 comparisons and **0 divergences**, so what the detector caught is the
+  full-sample fit and not the strategy's shape (§7's "add the third case").
+  **A mutation found a real hole, and the hole is the interesting part.**
+  Mutating the equality to compare **timestamps only** — dropping `bytes` — left
+  **every test green**. The detector had been firing on *when* the leaky
+  strategy decided and never on *what* it decided; a leak that changed size or
+  side without changing timing would have walked straight through. That is a
+  missing control, not a passing test, so
+  `a_content_only_leak_is_caught_because_decisions_are_compared_byte_for_byte`
+  now plants exactly that defect: a strategy trading on a fixed schedule whose
+  **quantity** depends on the length of the series it was built for. It diverges
+  at timestamps both runs decided on. With it in place the mutation is caught.
+  **Mutations, each watched failing and restored byte-exactly.** (1) equality
+  inverted (`!=` → `==`): caught by three controls. (2) `bytes` dropped from the
+  comparison: **initially survived** — see above — and is caught after the
+  content-only control was added.
+  **Pinned determinism hash `91b9ff5b9bbcdb25`**: blake3 over the comparison
+  count, the divergence count, the cut points, and the full decision stream
+  itself, for `SyntheticFeed::random_walk(seed 29, 3,000 bars, 1m, start
+  5000.00 pt, tick 0.25, vol 4)` replaying `SmaCross(20, 50, qty 1)` under
+  `FreeFills`, cuts `[1200, 1800, 2400, 2800]`. The stream is hashed and not
+  only the counts, so a change in *what the strategy did* fails here even when
+  the number of comparisons happens to match. The six existing hashes are
+  unmoved — this harness observes runs and does not change them.
+  **Number assigned directly rather than as a `D-TBD(...)` placeholder**,
+  because this landed on `main` through the primary session, which is what §8.2
+  allows; the placeholder protocol binds branches.

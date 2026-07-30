@@ -356,12 +356,20 @@ The quant-research payload. Specs live in `crucible-funnel` module docs.
       2026-07-31** when the permutation null landed — the detector watched
       firing on a defect planted before it existed, which is what this line's
       acceptance test asked for
-- [ ] Truncation-invariance harness in CI (sampled cut points). The other half
-      of block A; deliberately **not** started so the permutation harness could
-      ship complete rather than both half done (D-0087). It asks a different
-      question — decisions on `data[0..t]` must be BIT-IDENTICAL to decisions
-      `<= t` on the full series, an equality rather than an extremeness — and it
-      truncates the END, because that is the direction lookahead flows from
+- [x] **Truncation-invariance harness** (2026-07-31, D-0088):
+      `crucible-funnel::stats::truncation`. Decisions on `data[0..t]` compared
+      **bit-for-bit** against the decisions `<= t` the full series made,
+      truncating the END because that is the direction lookahead flows from. No
+      tolerance knob — a one-tick difference after deleting the future IS the
+      defect. Converse control first (`SmaCross`: 189 decisions, 0 divergences),
+      then the detector (`LeakyZScore` refit per prefix: 4 divergences), then
+      the third case (fit held fixed: 0 divergences, so the finding was the fit
+      and not the shape). A mutation dropping the byte comparison **initially
+      survived** — the detector was reading timestamps only — which is a missing
+      control, now closed by a content-only leak fixture. Pinned hash
+      `91b9ff5b9bbcdb25`; the six existing hashes unmoved
+      - [ ] Wire both harnesses into CI as merge-blocking (§7 makes them so the
+            day they land; they are green locally and not yet gated)
 - [ ] Cross-instrument rhyme check (needs NQ/RTY archives from M1 tooling)
 - [ ] Multi-instance pass + dataset semaphore, with criterion evidence
 

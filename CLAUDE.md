@@ -1173,10 +1173,13 @@ planted leak. The **S0 predictor seam landed 2026-07-31** — D-0082 the
 measurement (`crucible-funnel::s0`: the forward-return join, the information
 coefficient, quantile buckets, session block bootstrap) and D-0085 the caller
 (`ComboScorer`, the `[s0]` config block, the registry row, and the gate ahead of
-S1). What M3 still owes is `crucible-funnel::stats` — deflated Sharpe, PBO/CSCV,
-the permutation and truncation harnesses — still a **spec in module docs**, and
-whose absence `crucible-funnel/tests/planted_leak.rs` measures. The plan for
-finishing it is `docs/plans/m3-full.md`.
+S1). **Block A of `docs/plans/m3-full.md` landed 2026-07-31**: the
+block-permutation null (D-0087) and the truncation-invariance harness (D-0088),
+both with converse controls and pinned hashes, and `planted_leak.rs` flipped
+from `Iterate` to `Kill` on the first of them. What M3 still owes is the rest of
+`crucible-funnel::stats` — **deflated Sharpe and PBO/CSCV** — plus registry
+pooling and the account evaluator. The plan is `docs/plans/m3-full.md`, blocks
+B through E.
 
 Known open questions (decide when reached, log when decided): margin
 modeling (M2); multi-instrument portfolio accounting (post-M4); Welford vs

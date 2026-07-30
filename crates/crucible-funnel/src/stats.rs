@@ -29,6 +29,7 @@
 //! every p-value is reproducible bit-for-bit.
 
 pub mod permutation;
+pub mod truncation;
 
 /// Placeholder for the M3 statistics implementation.
 #[derive(Debug, Clone, Copy)]
