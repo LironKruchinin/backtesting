@@ -4,9 +4,26 @@ slug: short-horizon-overreaction
 topic: momentum-horizon
 grade: A
 hypothesis_family: es-short-horizon-reversal
-status: backlog
+status: blocked
+blocked_on: s0-predictor-seam
 created: 2026-07-30
 ---
+
+> **BLOCKED — do not run.** Gate 0 and Gate 0b below are no-trading
+> measurements of forward returns conditional on the signal. That is the
+> funnel's **S0**, which is **refused at load** in this build: the combo
+> grammar's rules produce *positions*, not a continuous score to bucket
+> forward returns by (`crucible-funnel::stages`). Closing it means **the S0
+> predictor seam** — named, and scheduled as M3's first block (D-0077,
+> `docs/MILESTONES.md`) — and **this file is its first consumer and half its
+> specification.**
+>
+> The gates are pre-registered **in order**, and the order is binding
+> (README §2.4). Running Gate 1 first because Gate 0 is inconvenient would mean
+> reading the predictor result with the equity curve already known — which is
+> the specific failure pre-registration exists to prevent. The grade stays
+> **A** because the strategy is expressible today; the grade never overrides a
+> registered order.
 
 # H-008 — Short-horizon overreaction and reversal
 
@@ -79,13 +96,14 @@ hypothesis_family = "es-short-horizon-reversal"
 economic_rationale = "Impatient liquidity takers push price beyond fair value; inventory-bearing liquidity providers push it back as they unwind, so extreme short-horizon deviations partially revert."
 
 [universe]
-instruments = ["ESH4"]
+# FOUR-digit year (D-0072); the grid commands do not resolve `ESH4`.
+instruments = ["ESH2024"]
 timeframes = ["1m"]
 
 [data]
 source = "curated"
-start = "2024-01-01"
-end = "2024-02-01"
+start = "2023-12-15"
+end = "2024-03-15"
 
 [contract]
 tick_points = "0.25"
@@ -107,13 +125,24 @@ fill_model = "spread_cross"
 half_spread_ticks = 1
 fee_per_contract_usd = "1.25"
 
+# ---------------------------------------------------------------------------
+# COPY. Canonical source: `configs/example-combo.toml` (README §2.3).
+# NOTE the omission that matters: this file's Gate 0 is S0, and `s0` CANNOT be
+# declared here — it is refused at load. The config below therefore describes
+# only the gates this build can run, which is exactly why the file is blocked:
+# the config is legal and the hypothesis still is not runnable in order.
+# ---------------------------------------------------------------------------
 [funnel]
-stages = ["s0", "s1", "s2", "s3"]
+stages = ["s1", "s2"]
 cost_sensitivity_ticks = [0.0, 0.5, 1.0, 2.0]
+min_oos_trades = 200
+min_oos_sessions = 250
+min_oos_return_pct_free_fills = 0.0
 min_oos_sharpe_after_costs = 0.5
-max_pbo = 0.5
-require_plateau = true
 kill_if_dead_at_ticks = 1.0
+require_controls_beaten = true
+max_pbo = 0.5                         # declared; NOT evaluated (S3)
+require_plateau = true                # declared; NOT evaluated (S3)
 
 [run]
 seed = 42
@@ -161,8 +190,13 @@ a system. Below one tick → **Kill**, recorded as "real but inside the spread".
 **Gate 2 — S2, walk-forward, `spread_cross`:**
 - `min_oos_sharpe_after_costs = 0.5`; `kill_if_dead_at_ticks = 1.0`.
 - Sample minimum: **200 round trips** and **250 sessions pooled across
-  contracts** before any verdict. One month of ESH4 does not reach this, so a
-  single-contract run is a **triage run with no verdict**.
+  contracts** before any verdict, encoded as `min_oos_trades` /
+  `min_oos_sessions`. One ES contract (~60 sessions) does not reach this and
+  will be killed for sample adequacy — a **triage run with no profitability
+  verdict**. The floors come down only when registry pooling supplies the
+  sessions honestly (README §6.1, unlock 5), never to make a short run pass.
+- **Ceiling is `Iterate`** (D-0075): S3's battery is unbuilt, so `Graduate` is
+  not awardable by this build.
 
 **Gate 3 — S3:** `max_pbo = 0.5`; `require_plateau = true` over both `period`
 and `k`. A result at `k = 2.5` with nothing at 2.0 or 3.0 is a spike, and the
@@ -205,9 +239,21 @@ contract's tick size than of the mechanism.
 
 ## Triage grade
 
-**A.** Runnable today with no new Rust, and — unusually for this directory —
-the grain we can replay is the grain the effect is claimed at. Its most valuable
-property is Gate 0b: it is designed to produce the answer "the effect is real
-and smaller than our costs", which is the most common true answer in
-short-horizon research and the one a backtest-first approach is worst at
-reaching.
+**A, but `blocked`.** The strategy is expressible today with no new Rust, and —
+unusually for this directory — the grain we can replay is the grain the effect
+is claimed at. What blocks it is not expressibility but **order**: its first two
+gates are predictor measurements, and the S0 seam that performs them does not
+exist (see the banner at the top of this file).
+
+That is a good problem rather than a bad one. Its most valuable property is
+Gate 0b, which is designed to produce the answer *"the effect is real and
+smaller than our costs"* — the most common true answer in short-horizon research
+and the one a backtest-first approach is worst at reaching. Reaching it requires
+measuring forward returns **without** trading, so building the seam is not
+overhead for this hypothesis; it is the hypothesis. As the S0 predictor seam's
+first consumer (D-0077), this file specifies half of what that seam has to do:
+bucket forward returns at 1/5/10/20 minutes conditional on a signal, with a
+block bootstrap over sessions, and report the result in ticks so it can be
+compared against the spread. The other half is the quantile/IC contract in
+`crucible-funnel::stages`' module doc, and shipping only that half would answer
+the general question while leaving these gates unrunnable.

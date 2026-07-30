@@ -49,7 +49,7 @@ An EMA crossover grid — which is `SmaCross` generalized, i.e. the layer Crucib
 already has — evaluated not on "did it make money" but on **three structural
 predictions**.
 
-- **Basket:** ES first (`ESH4` for the proven-transcoded window), then GC and
+- **Basket:** ES first (`ESH2024` for the proven-transcoded window), then GC and
   RTY, which have the full 2010→2026 transcode and are genuinely different
   regimes.
 - **Timeframe:** `1m` (the only grain we can replay; see Honesty note).
@@ -66,13 +66,18 @@ hypothesis_family = "es-trend-span-cost-optimal"
 economic_rationale = "Trend-following pays when low-frequency autocorrelation is positive; net Sharpe is hump-shaped in filter span and the optimum lengthens as costs rise (Sepp & Lucic 2026)."
 
 [universe]
-instruments = ["ESH4"]
+# FOUR-digit year (D-0072). The vendor spelling `ESH4` has a one-digit year that
+# repeats every ten years, and our windows are sixteen years long; the grid
+# commands do not resolve the shorthand — only `backtest` does.
+instruments = ["ESH2024"]
 timeframes = ["1m"]
 
 [data]
 source = "curated"
-start = "2024-01-01"
-end = "2024-02-01"
+# ESH2024's front-month life: it takes over when ESZ2023 expires and runs to its
+# own March expiry. ~60 sessions — a triage sample, not a verdict sample.
+start = "2023-12-15"
+end = "2024-03-15"
 
 [contract]
 tick_points = "0.25"
@@ -97,13 +102,24 @@ fill_model = "spread_cross"
 half_spread_ticks = 1
 fee_per_contract_usd = "1.25"
 
+# ---------------------------------------------------------------------------
+# COPY. Canonical source: `configs/example-combo.toml`, owned by the funnel
+# workstream (README §2.3). `deny_unknown_fields` makes a stale block a hard
+# load error — diff against the shipped config before running.
+# `s0` and `s3` are REFUSED at load, not skipped: S3's battery is still owed and
+# S0 needs a signal-extraction seam the combo grammar does not have.
+# ---------------------------------------------------------------------------
 [funnel]
-stages = ["s0", "s1", "s2", "s3"]
+stages = ["s1", "s2"]
 cost_sensitivity_ticks = [0.0, 0.5, 1.0, 2.0]
+min_oos_trades = 200                  # this file's pre-registered sample floor
+min_oos_sessions = 250                # ...which one contract CANNOT satisfy
+min_oos_return_pct_free_fills = 0.0   # S1: dead cheaply if it loses cost-free
 min_oos_sharpe_after_costs = 0.5
-max_pbo = 0.5
-require_plateau = true
 kill_if_dead_at_ticks = 1.0
+require_controls_beaten = true        # vs random-entry AND buy-and-hold
+max_pbo = 0.5                         # declared; NOT evaluated (S3)
+require_plateau = true                # declared; NOT evaluated (S3)
 
 [run]
 seed = 42
@@ -115,9 +131,20 @@ Every construct above exists today: `ema` with an integer `{start, end, step}`
 axis, `crosses_above`/`crosses_below`, `spread_cross`, and the mandatory cost
 sweep. Nothing here needs new Rust.
 
+**The sample floors are deliberately unsatisfiable by this config, and that is
+the design.** `min_oos_sessions = 250` against a ~60-session contract means the
+funnel will **kill this run for sample adequacy** before reporting a
+performance number. That is the pre-registration being enforced by a machine
+rather than by my restraint, and it is the correct outcome: it makes the run a
+*triage* run whose structural output (Tests 1 and 2 below) is readable while its
+profitability verdict is explicitly withheld. Lowering these floors to make a
+single contract "pass" would be exactly the post-hoc adjustment CLAUDE.md
+forbids. They come down only when **registry pooling** (README §6.1, unlock 5)
+supplies the sessions honestly.
+
 ## Data
 
-**Owned and sufficient for the structural test:** curated `1m` bars. ESH4's
+**Owned and sufficient for the structural test:** curated `1m` bars. ESH2024's
 January-2024 window is the one proven by the existing `backtest` example; GC and
 RTY carry the full 2010→2026 transcode today.
 
@@ -153,11 +180,17 @@ failure.
 
 **Test 3 — profitability (tertiary, and expected to fail).**
 - `min_oos_sharpe_after_costs = 0.5`, `kill_if_dead_at_ticks = 1.0`,
-  `max_pbo = 0.5`, `require_plateau = true`.
+  `require_controls_beaten = true`. `max_pbo` and `require_plateau` are
+  declared and echoed but **not evaluated by this build** (S3 is owed), and the
+  scorecard renders both as named holes.
 - Sample minimum before *any* profitability verdict: **200 round trips** and
-  **at least 250 trading sessions pooled across contracts**. A single-contract
-  ES run reaches neither, so a single-contract run is explicitly a **triage
-  run with no verdict attached** — `Kill`/`Graduate` may not be issued from it.
+  **250 trading sessions pooled across contracts**, encoded as `min_oos_trades`
+  and `min_oos_sessions` above. A single-contract run reaches neither and will
+  be killed for sample adequacy — a **triage run with no profitability verdict
+  attached**, enforced by the funnel rather than by my discipline.
+- **The ceiling is `Iterate`, not `Graduate`** (D-0075): S3's battery is what
+  `Graduate` means, and it is not built. Nothing in this file can graduate, and
+  a criterion implying otherwise would be a criterion this build cannot honour.
 
 **Trial counting.** The grid above is 10 × 10 = 100 combos, times 4 cost points,
 times each contract. Every one charges `es-trend-span-cost-optimal`. That count
@@ -184,7 +217,7 @@ cost model, not a property of the price process, and Test 1 is void.
   confirming or refuting their empirical findings.
 - **Expect it to lose money.** ES at 1-minute with a one-tick half-spread is a
   hostile cost environment for a crossover, and the project's own reference run
-  (SMA 20/50 on ESH4, January 2024) lost 23.51 % under exactly this fill model.
+  (SMA 20/50 on ESH2024, January 2024) lost 23.51 % under exactly this fill model.
   `SmaCross` is not supposed to be profitable (CLAUDE.md §9) and neither is
   this. The value is Test 1 and Test 2.
 - **Sample overlap: none.** The paper was submitted nine days before this file

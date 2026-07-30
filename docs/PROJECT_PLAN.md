@@ -216,6 +216,14 @@ Point-in-time rule extended: all feature standardization uses rolling
 statistics only.
 **Exit:** one signal family (Volume Profile open-location) evaluated
 predictor-first, with a report worth sending to an external reviewer.
+**Where this actually lands (D-0077):** not as a workbench beside the funnel.
+The benchmark module and the sample-size gates already shipped inside M3 (the
+two mandatory controls; `min_oos_trades` / `min_oos_sessions`), and the
+remaining piece — the score-emitting seam and the forward-return join —
+arrives **as the funnel's S0**, so its report carries a trial count, a
+hypothesis family and a registry row instead of standing outside the thing
+that counts. It is M3's first block; the exit criterion above is unchanged and
+is met by an S0 report.
 
 ### M3 — Funnel + statistics *(≈ 3–4 weeks)*
 Grid expansion + blake3 config identity; DuckDB registry (runs, hypotheses,

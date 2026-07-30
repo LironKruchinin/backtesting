@@ -263,12 +263,35 @@ The quant-research payload. Specs live in `crucible-funnel` module docs.
       attribution and day slicing cannot disagree (D-0071). Per-combo
       out-of-sample worst-day close/trough pairs join the scorecard. **The
       bootstrap evaluator — breach probability, P(pass), payout cadence — is
-      `ACCOUNT_EVAL_SPEC.md` §4 and is the next block**
+      `ACCOUNT_EVAL_SPEC.md` §4 and is the next block *of that spec***; M3's
+      first block is the S0 predictor seam below (D-0077), and the two share a
+      block bootstrap rather than competing for the slot
 - [x] HTML scorecards with the mandatory honesty box (2026-07-30):
       self-contained, no JavaScript and no network, and `render` **refuses to
       produce a file at all** when any honesty-box field is empty. The three
       sections this build cannot compute are rendered as named holes rather
       than omitted
+- [ ] **The S0 predictor seam — M3's first block** (D-0077). A score-emitting
+      evaluation path with forward-return joins: a signal emits a continuous
+      score per bar, the seam joins it to the return over configured horizons
+      ahead, buckets, and reports — no orders, no fills, no equity curve. This
+      is `docs/PROJECT_PLAN.md` §6's **M2.5 predictor workbench arriving as the
+      funnel's S0** rather than beside it, because a report produced outside the
+      funnel charges no trial and reaches no registry. Two halves, both owed:
+      `stages`' module doc already specifies quantile buckets, monotonicity and
+      a nonzero IC; `research/backlog/H-008-short-horizon-overreaction.md`
+      specifies horizons at 1/5/10/20 minutes, a block bootstrap over sessions,
+      and the effect size **in ticks** so it can be compared against the spread
+      — which is the half that answers "real, and smaller than our costs". It
+      is first because **S0-refused stops the front of the funnel** for the six
+      backlog files carrying a predictor-first Gate 0 (H-001, H-008, H-011,
+      H-012, H-013, H-014): the registered gate order is binding, so none of
+      them can advance by running an equity-curve gate first. The `s0` load
+      refusal lifts in the commit where S0 runs, never earlier (D-0075). The
+      negative control is a "signal" that IS the forward return, watched firing
+      on a deliberately reversed join — a forward return is §2.1 lookahead the
+      instant it can reach a decision, and this build's whole job is to keep it
+      in measurement space
 - [ ] Stats: deflated Sharpe, PBO/CSCV, block-permutation nulls, empirical
       p-values — cited implementations with property tests. **The planted
       defect they will be measured against already exists**:
