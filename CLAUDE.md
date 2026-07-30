@@ -331,11 +331,51 @@ While working:
 - Definition of done: fmt + clippy + tests green locally, docs updated,
   decision log updated if applicable, `demo` still behaves (run it).
 
+### 8.1 One merger, and it is the primary session
+
+Concurrent agents are normal here — several worktrees under
+`.claude/worktrees/` at once is the usual shape. What is **not** normal is more
+than one of them writing to `main`. Three rules, and they are not negotiable:
+
+1. **A subagent delivers a branch. It never merges.** Finish, commit, leave the
+   branch name in the report, exit. The branch is the deliverable.
+2. **Only the primary session merges into `main`**, one merge at a time, and it
+   reads the diff it is merging.
+3. **No process ever merges into a working tree another process is using.** A
+   merge that stops on a conflict leaves the tree unbuildable and the index
+   half-staged; if the merging process then exits, whoever is left inherits a
+   repository that does not compile and a conflict they did not create and
+   cannot adjudicate.
+
+**The motivating case, 2026-07-31.** The `feat/calendar-eras` subagent finished
+and merged itself into the *primary session's* checkout of `main` while that
+session was mid-task. It left three unresolved conflicts (`CLAUDE.md`,
+`crucible-data/src/calendar/mod.rs`, `docs/DECISIONS.md`), an unclosed delimiter
+that broke `cargo build`, a half-staged index — and then its process exited. The
+primary session's own uncommitted work was sitting in the same tree. Recovery
+was: back up the in-flight files, `git merge --abort`, restore, and re-do the
+merge deliberately later. Nothing was lost, but only because the branch itself
+was intact; the cost was a full stop in the middle of unrelated work.
+
+Two smaller rules fall out of the same incident:
+
+- **`cd` does not persist across a merge you did not start.** Prefer
+  `git -C <path>` over `cd` in every multi-worktree session: a working directory
+  that outlives the command that set it will eventually run a checkout in the
+  wrong tree. That happened too, the same day.
+- **A scripted edit to a contract file (`CLAUDE.md`, `docs/DECISIONS.md`,
+  `docs/MILESTONES.md`) must assert its match or be made by hand.** A
+  string-replace that silently matches nothing leaves the file saying the
+  opposite of what the commit claims, and these three files are the ones a
+  future session trusts without re-deriving. Commit 4297fbb is that failure.
+
 Hard NEVERs (in addition to §2):
 - Never commit market data, `results/`, or anything matching `.gitignore`'s
   data patterns — including `.env`, which is where the API key now lives
   locally (D-0022). Never hardcode or log `DATABENTO_API_KEY`: it is read
   from the process environment, at the last moment, by bin targets only.
+- Never merge into a working tree another process is using, and never merge
+  into `main` from a subagent (§8.1).
 - Never mutate or delete files under the raw archive (`raw/`) from code.
 - Never add a dependency outside §6 without asking.
 - Never weaken a lint, delete a failing test, or loosen a golden value to
