@@ -1889,3 +1889,112 @@ propose a superseding entry — don't silently diverge.
   eight days before expiry is an operator's parameter, not a sourced CME
   convention, and a `.c` alias with two stored tables refuses rather than picks.
   `raw/` untouched; roll tables are curated and disposable (D-0045).
+- **D-0077** (2026-07-30) — **Coarser grains are RESAMPLED ON READ, never
+  stored, and the bucket grid is anchored on the exchange's session open rather
+  than on the UTC clock.** `crucible-data::curated::resample` turns curated
+  1-minute bars into `5m` / `15m` / `1h` / `1d`, and `crucible-cli::grain`
+  decides once — for `backtest`, `combo`, `walk-forward` and `funnel` alike —
+  whether a request is answered from stored partitions or from aggregation.
+  `TimeFrame::M5` and `TimeFrame::M15` have been deliberately unmapped in
+  `transcode::timeframe_for_schema` since M1; this is the one path that produces
+  them, and that mapping is unchanged.
+  **Why nothing is written.** A curated partition is named after the raw window
+  it came from and records exactly one `source_file_blake3`, so one raw file
+  fans out to one curated file and nothing is ever merged (D-0036). Raw windows
+  are monthly, and a month boundary lands *inside* a CME session:
+  2024-02-01T00:00Z is 18:00 CT on 31 January, an hour into the trading day that
+  opened at 17:00. A daily bar for that day therefore has constituents in two
+  raw windows, so writing it needs exactly the read-modify-write merge D-0036
+  exists to prevent — and merging is where silent duplication lives. Read-time
+  aggregation has no such seam, because `ParquetBarFeed` already concatenates
+  every window file in order and the resampler aggregates the concatenation. It
+  is also cheap: one integer pass over sixteen years of ES 1-minute bars,
+  against a second copy of the archive that can go stale against the first.
+  **The bucket rule, and why the anchor is the session open.**
+  `day = trading_day(avail_ts)` (D-0062's expression, spelled the way D-0071
+  requires so no two consumers can disagree about a date), `anchor =
+  session_open(day)`, `k = (ts_open − anchor) / target`, `ts_open = anchor +
+  k·target`. Two bars in different trading days have different anchors, so the
+  last minute before the maintenance break and the first minute after it can
+  never land in one bar. On a UTC grid they would: a UTC-day daily bar for
+  2024-01-03 holds that day's 00:00–22:00Z bars **and** the 23:00Z bars that
+  opened the fourth's session — two trading days in one "daily" bar, which is
+  the shape of a signal that fires on the calendar rather than on the market.
+  With a 24-hour target the whole session is one bucket, so a daily bar is a
+  trading-day bar by construction rather than by convention.
+  **An early close needs no special case,** which is the test that the anchor is
+  the right one: the buckets after the close simply have no bars in them, and
+  the bucket the close lands inside is built from the minutes that traded. A
+  12:15 CT close 19¼ hours after a 17:00 CT open makes bucket 19 of an hourly
+  resample fifteen minutes long, and its volume says 15 where its neighbours say
+  60.
+  **Why this is not lookahead, and the one precondition.** `avail_ts` is still
+  `ts_open + tf` computed by `Bar::avail_ts` and nowhere else (§2.1), so the
+  resampled bar is knowable at `anchor + (k+1)·target`. That is at or after every
+  constituent's availability **iff** the target is a whole multiple of the source
+  *and* the anchor is a whole number of source intervals from the epoch — then
+  the largest constituent `ts_open` in a bucket is `start + target − source` and
+  its availability is exactly `start + target`. Both are checked. CME opens on
+  the hour so a 1-minute source satisfies the second everywhere; a calendar
+  opening at 09:30:30 does not and is refused per trading day rather than
+  quietly making bars visible a minute early. Every coarser pair of the current
+  `TimeFrame` variants divides, so the first check cannot fire today — and a
+  test asserts exactly that, so the day a `4m` variant is added the test fails
+  and the refusal starts working instead of a lookahead starting.
+  **Bucketing keys on `ts_open` while the day keys on `avail_ts`, deliberately.**
+  Which interval a bar's *content* describes is a question about the bar's own
+  interval; which window a bar is *ordered into* is a question about when it
+  could be known, and D-0062 settled that one. Bucketing on `avail_ts` would
+  file a 10:04 bar's content under the bucket beginning 10:05 — the right answer
+  to the ordering question and the wrong answer about what happened.
+  **Four refusals, each with a control that has been watched firing:** a target
+  that is not coarser or not a whole multiple; a calendar declaring an intraday
+  halt (a halt is a session boundary and this grid is anchored per *day*;
+  neither bundled table declares one since D-0040, so it costs nothing today and
+  stops the promise above from silently becoming false); a session open off the
+  source grid; and a source bar whose own interval starts before its trading
+  day's session open, which straddles the boundary and belongs to neither side.
+  Two of them carry a positive control beside the negative one — the same bars
+  on an on-the-hour calendar resample, and a bar one minute later resamples —
+  so the refusal is the fixture's defect and not the fixture.
+  **Calendar gains four total accessors** — `session_open`, `session_close`,
+  `regular_hours`, `declares_halts` — and `open_intervals` is rewritten in terms
+  of the first two, so a bucket grid and a coverage check cannot come to
+  disagree about when a session ran. `session_open` is deliberately independent
+  of `day_effect`: an early close moves the close, never the open, and a closed
+  day still has a template open. Answering for a non-trading day is not a bug
+  for the reason `trading_day` answers for a Saturday — the functions are total
+  because there is nowhere to put a `Result` inside replay.
+  **Two edge facts are reported rather than hidden.** A sample's *first* bucket
+  can be cut by the request, and its *last* can be cut by the request or by the
+  session — so `last_bar_may_be_partial` is computed against the session close
+  and is **false** for an early close, which ended the bars for a reason that is
+  not truncation. "May", not "did": `ohlcv` has no bar for an interval that did
+  not trade, so a thin first minute looks exactly like a truncated one, and both
+  are worth knowing about the first bar of a sample.
+  **Provenance is unchanged.** A resampled bar's `source_file_blake3` set is its
+  constituents', so D-0013 holds transitively and `crucible verify` re-hashes
+  exactly what fed the run. The grain itself joins the `data_source` string the
+  registry and the scorecard store, because "5m as delivered" and "5m aggregated
+  here on `cme_globex_equity_index` sessions" are different bars (§2.5), and it
+  is printed on every curated run **including the ones that resampled nothing**
+  — the §2.4 argument, applied to data.
+  **Each control was watched firing** (§7, no quality exemption). Eight
+  mutations, eight catches, each restored byte-exactly and re-verified: the
+  anchor moved from the session open to UTC midnight → **12 of 16 tests**, which
+  is what "the anchor is the whole design" looks like; bucketing moved from
+  `ts_open` to `avail_ts` → 5; the `last_bar_may_be_partial` comparison stripped
+  of its session-close term → the early-close test, which is the one that
+  distinguishes a truncated window from a closed exchange; each of the three
+  refusals disabled in turn → its own test and only its own; `close` left on the
+  first constituent → the hand-derived OHLCV test; `high` taken from the last
+  constituent instead of the maximum → the same. The two positive controls in
+  that file (an on-the-hour calendar accepting the bars an off-grid one refuses,
+  a bar one minute later resampling where a straddling one does not) are what
+  make the refusals statements about the input rather than about the fixture.
+  **Not in scope: a stitched series.** A bucket spanning a roll would mix two
+  `signal_offset`s (D-0076), so `ES.v.0` at `5m` is not reachable and needs its
+  own decision. Instrument shorthand resolution now tries the requested grain
+  and falls back to 1-minute, because `curated/bars/ESH2024/5m` never exists and
+  resolving `ESH4` at `5m` would refuse a contract that is right there; D-0072's
+  ambiguity refusal is untouched at whichever grain answers.

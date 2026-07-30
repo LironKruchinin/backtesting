@@ -60,7 +60,9 @@ combo config can express **only** this:
 - **Rules:** `enter_long`, `exit_long`, `enter_short`, `exit_short`. All four
   are evaluated on every bar and never short-circuit (CLAUDE.md §9).
 - **Universe:** exactly one instrument and exactly one timeframe per config.
-  `combo` refuses a config declaring two of either.
+  `combo` refuses a config declaring two of either. The timeframe may be any of
+  `1s 1m 5m 15m 1h 1d` — the last four are resampled from 1-minute bars on read
+  (D-0077, §2.2).
 - **Execution:** `free_fills` (S0–S1 only) or `spread_cross` with integer
   `half_spread_ticks` and a decimal-string fee.
 
@@ -78,15 +80,28 @@ most common reason a paper's signal is grade B rather than A:
 
 ### 2.2 The two structural blockers behind most grade B/C calls
 
-**There is no bar resampler.** `crucible-data::transcode` maps vendor schemas to
-timeframes one-to-one: `ohlcv-1s → 1s`, `ohlcv-1m → 1m`, `ohlcv-1h → 1h`,
-`ohlcv-1d → 1d`. We bought **only `ohlcv-1m` and `ohlcv-1s`** (`docs/DATA_PLAN.md`
-— the hourly and daily aggregates are $190/GB and were deliberately not bought).
-The `M5`/`M15` `TimeFrame` variants exist but are *deliberately unmapped* rather
-than silently aliased. So **the only replayable grains today are 1s and 1m**,
-and every idea stated on 5-minute, hourly, or daily bars needs a resampler that
-has not been written. That is a small, well-defined piece of work — but it is
-work, and it is why several otherwise-trivial ideas below are grade B.
+**~~There is no bar resampler.~~ Resolved 2026-07-30 (D-0077).**
+`crucible-data::transcode` still maps vendor schemas to timeframes one-to-one,
+and we still bought **only `ohlcv-1m` and `ohlcv-1s`** (`docs/DATA_PLAN.md` —
+the hourly and daily aggregates are $190/GB and were deliberately not bought).
+What changed is that `crucible-data::curated::resample` now aggregates curated
+1-minute bars into `5m` / `15m` / `1h` / `1d` **when they are read**, on the
+exchange's own sessions, so `--timeframe 5m` and `timeframes = ["1d"]` work
+everywhere without a second copy of the archive. The `M5`/`M15` `TimeFrame`
+variants remain *deliberately unmapped* in `transcode` — this is the only path
+that produces them.
+
+Three properties are worth knowing before stating an idea on coarse bars:
+
+- **A daily bar is a TRADING-day bar**, opening when the session opened. It is
+  not a UTC day: a UTC-day bar for 2024-01-03 would hold that day's 00:00–22:00Z
+  bars *and* the 23:00Z bars that opened the fourth's session.
+- **No resampled bar spans a session boundary**, and an early close simply makes
+  the last bucket short — a 12:15 CT close makes bucket 19 of an hourly resample
+  fifteen minutes long, and says so in its volume.
+- **A stitched series is still out of reach at coarse grains.** A bucket
+  spanning a roll would mix two `signal_offset`s (D-0076), so `ES.v.0` at `5m`
+  is refused. The single-contract ceiling in this section still applies.
 
 **`combo` and `walk-forward` replay raw contracts only — this is the hard
 ceiling on grade A.** A continuous alias (`ES.v.0`) is *refused*, not
@@ -223,6 +238,17 @@ someone found in a finite sample and the file should say so.
 | [H-013](H-013-volume-profile-value-area.md) | Volume profile / value-area open location | `volume-structure` | C | `es-value-area-open-location` |
 | [H-014](H-014-turn-of-month.md) | Turn-of-the-month in stock index futures | `calendar` | B | `equity-index-turn-of-month` |
 | [H-015](H-015-options-expected-move.md) | Options-implied expected move as a feature | `options-context` | C | `es-implied-move-context` |
+
+### 6.1 What the four unlocks removed
+
+The grades in the table above are **as triaged**, and they are Liron's to
+change — this section states only what the code can now do, so a re-grade does
+not have to re-derive it. Each entry names the §2.1 row or §2.2 blocker it
+retired and the decision that did it.
+
+| unlock | retired | decision |
+|---|---|---|
+| bar resampler | §2.2's first structural blocker; `5m`/`15m`/`1h`/`1d` are replayable | D-0077 |
 
 Grade tally: **2 A · 8 B · 5 C**. That distribution is the honest one, and the
 shape of it is the sweep's main structural finding: the combo grammar is three

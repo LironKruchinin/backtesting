@@ -268,6 +268,8 @@ pub fn run_cmd(args: &FunnelArgs) -> i32 {
     }
 
     print_header(&loaded, "funnel");
+    println!("  bars           {}", series.description);
+    crate::grain::print_caveats(&series.caveats);
     print_report(&loaded, &report, &criteria, &days, series.events.len());
     println!("  registry       {}", registry.path().display());
     println!("  scorecard      {}", card.display());

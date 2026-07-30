@@ -59,9 +59,9 @@ use crucible_data::continuous::{
     AdjustmentKind, ContinuousAlias, ContinuousError, ContinuousFeed, ContinuousSegment, RollTable,
     roll_table_for_alias,
 };
+use crucible_data::curated::resample::ResampleError;
 use crucible_data::curated::{
-    CURATED_SCHEMA_VERSION, CuratedError, CuratedSource, ParquetBarFeed, Resolution,
-    TRANSCODER_VERSION,
+    CURATED_SCHEMA_VERSION, CuratedError, CuratedSource, Resolution, TRANSCODER_VERSION,
 };
 use crucible_data::ingest::money::parse_usd_to_nano;
 use crucible_data::ingest::range_from_dates;
@@ -71,6 +71,7 @@ use crucible_engine::{
 };
 use crucible_strategies::{Bracketed, SmaCross};
 
+use crate::grain::{CuratedGrain, grain_caveats, grain_line};
 use crate::pull::{EXIT_FAILED, EXIT_USAGE, data_dir};
 
 /// Nanoseconds in a mean Gregorian year (365.2425 days).
@@ -218,9 +219,13 @@ struct Settings {
 /// feed how many bars it holds. This is CLI wiring, which is what §3 says the
 /// CLI is for.
 enum Replay {
-    /// One curated contract.
-    Outright(ParquetBarFeed),
+    /// One curated contract, at the stored grain or aggregated to a coarser
+    /// one (D-0077).
+    Outright(CuratedGrain),
     /// A stitched chain of them. Boxed because it is much the larger variant.
+    ///
+    /// Resampling does not reach this arm: a bucket spanning a roll would mix
+    /// two `signal_offset`s, which needs its own decision (D-0077).
     Continuous(Box<ContinuousFeed>),
 }
 
@@ -441,15 +446,20 @@ fn open_outright(
     settings: &Settings,
 ) -> Result<(Replay, InstrumentId), i32> {
     let instrument = resolve_instrument(dir, settings.tf, requested)?;
-    match ParquetBarFeed::open(dir, &instrument, settings.tf, settings.range) {
+    // The archive holds 1s and 1m; anything coarser is aggregated on the
+    // exchange's sessions when it is read (D-0077).
+    match CuratedGrain::open(dir, &instrument, settings.tf, settings.range) {
         Ok(feed) => Ok((Replay::Outright(feed), instrument)),
         Err(e) => {
             eprintln!("error: {e}");
-            if let CuratedError::NoCuratedData { .. } = &e {
-                suggest_instruments(dir, settings.tf);
+            if let ResampleError::Curated(CuratedError::NoCuratedData { tf, .. }) = &e {
+                suggest_instruments(dir, *tf);
             }
             Err(match e {
-                CuratedError::NoCuratedData { .. } | CuratedError::EmptyRange { .. } => EXIT_USAGE,
+                ResampleError::Curated(
+                    CuratedError::NoCuratedData { .. } | CuratedError::EmptyRange { .. },
+                )
+                | ResampleError::NoCalendar { .. } => EXIT_USAGE,
                 _ => EXIT_FAILED,
             })
         }
@@ -786,6 +796,15 @@ fn print_header(
         _ => "(empty)".to_owned(),
     };
     println!("  data           {} bars   {span}", feed.len());
+    if let Replay::Outright(grain) = feed {
+        // Printed on every curated run, resampled or not: "the vendor sent
+        // these" and "these were aggregated here" are different claims, and
+        // only one of them depends on a session calendar being right.
+        println!("  grain          {}", grain_line(grain, settings.tf));
+        for caveat in grain_caveats(grain) {
+            println!("  NOTE           {caveat}");
+        }
+    }
     if let Some(c) = continuous {
         print_continuous_header(c, settings);
     }
@@ -1116,7 +1135,7 @@ fn path_sensitivity_note(path_sensitive_bars: usize, n_protective_exits: usize) 
 /// 2014 gold and December 2024 gold; picking one would be the very bug the
 /// four-digit key exists to prevent, moved from the archive into the CLI.
 fn resolve_instrument(dir: &Path, tf: TimeFrame, requested: &str) -> Result<InstrumentId, i32> {
-    match crucible_data::curated::resolve_instrument(dir, tf, requested) {
+    match crate::grain::resolve_at_any_grain(dir, tf, requested) {
         Ok(Resolution::Exact(name)) => {
             if name != requested {
                 println!("  instrument      {requested} -> {name}");

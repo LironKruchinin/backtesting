@@ -88,6 +88,8 @@ pub fn run_cmd(args: &WalkForwardArgs) -> i32 {
             return code;
         }
     };
+    let caveats = series.caveats;
+    let description = series.description;
     let events = series.events;
     if events.is_empty() {
         eprintln!("error: the data source produced no bars; there is nothing to replay");
@@ -152,6 +154,8 @@ pub fn run_cmd(args: &WalkForwardArgs) -> i32 {
     }
 
     print_header(&loaded, "walk-forward");
+    println!("  bars           {description}");
+    crate::grain::print_caveats(&caveats);
     print_plan(&plan, &days, events.len(), bars_per_year);
     print_oos_table(&report);
     print_fold_detail(&report, &plan);

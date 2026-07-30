@@ -495,20 +495,12 @@ impl Calendar {
         if !self.is_trading_day(date) {
             return Vec::new();
         }
-        let close = match self.day_effect(date) {
-            DayEffect::EarlyClose { close_local, .. } => {
-                // Validated at load, so this cannot fail; parsing again is
-                // cheaper than carrying a second representation around.
-                LocalTime::parse(&close_local, &self.id, "close_local").unwrap_or(self.close_local)
-            }
-            _ => self.close_local,
-        };
-        let open_date = match self.shape {
-            SessionShape::Overnight => add_days(date, -1),
-            SessionShape::SameDay => date,
-        };
-        let start = self.instant(open_date, self.open_local);
-        let end = self.instant(date, close);
+        // The same two instants [`Calendar::session_open`] and
+        // [`Calendar::session_close`] answer with, so a bucket grid anchored on
+        // the open can never disagree with the intervals a coverage check walks
+        // (D-0077 — one definition, per D-0071's argument).
+        let start = self.session_open(date);
+        let end = self.session_close(date);
         if end <= start {
             return Vec::new();
         }
@@ -530,6 +522,79 @@ impl Calendar {
             intervals.push((cursor, end));
         }
         intervals
+    }
+
+    /// The instant trading day `date`'s session **opens**, per the session
+    /// template.
+    ///
+    /// Total, and deliberately independent of [`Calendar::day_effect`]: an
+    /// early close moves the close, never the open, and a *closed* day still
+    /// has a well-defined template open even though nothing trades in it.
+    /// [`Calendar::open_intervals`] is the question "when was this exchange
+    /// actually trading"; this is the question "where does this trading day's
+    /// clock start", which is what a session-anchored bucket grid needs
+    /// (D-0077) and what a "minutes since the open" reading is measured from.
+    ///
+    /// Answering for a non-trading day is not a bug for the same reason
+    /// [`Calendar::trading_day`] answers for a Saturday: the function is total
+    /// because there is nowhere sensible to put a `Result` inside replay. Ask
+    /// [`Calendar::is_trading_day`] if the distinction matters.
+    #[must_use]
+    pub fn session_open(&self, date: CivilDate) -> Ts {
+        let open_date = match self.shape {
+            SessionShape::Overnight => add_days(date, -1),
+            SessionShape::SameDay => date,
+        };
+        self.instant(open_date, self.open_local)
+    }
+
+    /// The instant trading day `date`'s session **closes**, honouring an early
+    /// close.
+    ///
+    /// Total, like [`Calendar::session_open`], and the counterpart to it: the
+    /// pair bracket one trading day's clock. A closed day still answers, with
+    /// the template's close.
+    #[must_use]
+    pub fn session_close(&self, date: CivilDate) -> Ts {
+        let close = match self.day_effect(date) {
+            // Validated at load, so this cannot fail; parsing again is cheaper
+            // than carrying a second representation around.
+            DayEffect::EarlyClose { close_local, .. } => {
+                LocalTime::parse(&close_local, &self.id, "close_local").unwrap_or(self.close_local)
+            }
+            _ => self.close_local,
+        };
+        self.instant(date, close)
+    }
+
+    /// The regular-hours window of trading day `date`, as `[open, close)`.
+    ///
+    /// Both instants come from the session template, so they are the *scheduled*
+    /// regular hours. On an early-close day the real close can land inside this
+    /// window — CME's 12:00 CT holiday close is before the 15:00 CT regular
+    /// close — and that is exactly why the two are separate questions:
+    /// "how far into the regular session are we" is a clock reading, and
+    /// "was the exchange still open" is [`Calendar::session_close`].
+    #[must_use]
+    pub fn regular_hours(&self, date: CivilDate) -> (Ts, Ts) {
+        (
+            self.instant(date, self.rth_open_local),
+            self.instant(date, self.rth_close_local),
+        )
+    }
+
+    /// True when this calendar declares an intraday halt.
+    ///
+    /// Neither bundled table does (D-0040 removed the 15:15–15:30 CT one the
+    /// CME contract-spec page claims, because our own archive falsifies it for
+    /// the current era). Exposed because a halt is a session boundary, and code
+    /// that anchors a bucket grid on the session open would silently let a
+    /// bucket span one — so [`resample`](crate::curated::resample) refuses a
+    /// calendar that declares halts rather than producing a bar whose
+    /// constituents sit either side of a break (D-0077).
+    #[must_use]
+    pub fn declares_halts(&self) -> bool {
+        !self.halts_local.is_empty()
     }
 
     /// Which session `ts` falls in.

@@ -28,7 +28,8 @@ use crucible_core::prelude::*;
 use crucible_data::SyntheticFeed;
 use crucible_data::calendar::Calendar;
 use crucible_data::continuous::ContinuousAlias;
-use crucible_data::curated::{CuratedError, ParquetBarFeed};
+use crucible_data::curated::CuratedError;
+use crucible_data::curated::resample::ResampleError;
 use crucible_data::ingest::range_from_dates;
 use crucible_data::ingest::window::parse_civil_date;
 use crucible_engine::{BacktestParams, BacktestResult, FreeFills, INTRABAR_CONVENTION, run};
@@ -36,6 +37,7 @@ use crucible_strategies::Aligned;
 use crucible_strategies::combo::ComboStrategy;
 
 use crate::config::{self, ConfigError, DataSource, LoadedConfig};
+use crate::grain::{CuratedGrain, grain_caveats, grain_line};
 use crate::pull::{EXIT_FAILED, EXIT_USAGE, data_dir};
 
 /// Nanoseconds in a mean Gregorian year (365.2425 days).
@@ -100,15 +102,15 @@ pub fn run_cmd(args: &ComboArgs) -> i32 {
             return code;
         }
     };
-    let events = series.events;
+    let events = &series.events;
     if events.is_empty() {
         eprintln!("error: the data source produced no bars; there is nothing to replay");
         return EXIT_USAGE;
     }
 
-    let bars_per_year = annualization(&loaded, &events);
+    let bars_per_year = annualization(&loaded, events);
     let results: Vec<Replay> = (0..loaded.grid.len())
-        .map(|index| replay(&loaded, &events, bars_per_year, index))
+        .map(|index| replay(&loaded, events, bars_per_year, index))
         .collect();
 
     if hash_only {
@@ -116,7 +118,7 @@ pub fn run_cmd(args: &ComboArgs) -> i32 {
         return 0;
     }
 
-    print_run_context(&loaded, &events, bars_per_year);
+    print_run_context(&loaded, &series, bars_per_year);
     print_results(&loaded, &results);
     println!("  determinism hash {:016x}", grid_hash(&results));
     print_path_sensitivity(
@@ -209,6 +211,11 @@ pub(crate) struct Series {
     pub data_manifest_ids: Vec<String>,
     /// What the bars were, in one line, for a report header.
     pub description: String,
+    /// Anything about the series a reader has to know and would not guess —
+    /// today, the two edge facts a resampled series carries (D-0077). Empty is
+    /// the normal case and means there is nothing to say, not that nobody
+    /// looked.
+    pub caveats: Vec<String>,
 }
 
 /// Materializes the config's data source into one bar series.
@@ -259,6 +266,9 @@ pub(crate) fn collect_events(loaded: &LoadedConfig) -> Result<Series, (i32, Stri
                     "synthetic random walk — seed {seed}, {bars} bars, from \
                      {start_price_points} pt, ±{vol_ticks} ticks"
                 ),
+                // A generated feed emits the requested grain directly, so
+                // there is no aggregation to caveat.
+                caveats: Vec::new(),
             })
         }
         DataSource::Curated { start, end } => {
@@ -308,12 +318,17 @@ pub(crate) fn collect_events(loaded: &LoadedConfig) -> Result<Series, (i32, Stri
                 .map_err(|err| (EXIT_USAGE, err.to_string()))?;
             let dir = data_dir().map_err(|msg| (EXIT_USAGE, msg))?;
             let id = InstrumentId::new(instrument);
+            // The archive holds 1s and 1m; anything coarser is aggregated on
+            // the exchange's sessions when it is read (D-0077). Which of the
+            // two happened is decided in one place and printed, never assumed.
             let mut feed =
-                ParquetBarFeed::open(&dir, &id, loaded.timeframe, Some(range)).map_err(|e| {
-                    let code = match e {
-                        CuratedError::NoCuratedData { .. } | CuratedError::EmptyRange { .. } => {
-                            EXIT_USAGE
-                        }
+                CuratedGrain::open(&dir, &id, loaded.timeframe, Some(range)).map_err(|e| {
+                    let code = match &e {
+                        ResampleError::Curated(
+                            CuratedError::NoCuratedData { .. } | CuratedError::EmptyRange { .. },
+                        )
+                        | ResampleError::NoCalendar { .. }
+                        | ResampleError::NotCoarser { .. } => EXIT_USAGE,
                         _ => EXIT_FAILED,
                     };
                     (code, e.to_string())
@@ -330,13 +345,19 @@ pub(crate) fn collect_events(loaded: &LoadedConfig) -> Result<Series, (i32, Stri
                 .collect();
             data_manifest_ids.sort_unstable();
             data_manifest_ids.dedup();
+            // The grain belongs in the description rather than beside it: this
+            // string is what the registry and the scorecard store as
+            // `data_source`, and "5m as delivered" and "5m aggregated here from
+            // 1m on cme_globex_equity_index sessions" are different bars (§2.5).
+            let grain = grain_line(&feed, loaded.timeframe);
+            let caveats = grain_caveats(&feed);
             Ok(Series {
                 description: format!(
-                    "curated {instrument} {} {start}..{end} — {} source file(s)",
-                    loaded.timeframe,
+                    "curated {instrument} {start}..{end} — {grain}, {} source file(s)",
                     data_manifest_ids.len()
                 ),
                 data_manifest_ids,
+                caveats,
                 events: std::iter::from_fn(|| feed.next_event()).collect(),
             })
         }
@@ -522,8 +543,10 @@ fn print_grid_listing(loaded: &LoadedConfig) {
     println!();
 }
 
-fn print_run_context(loaded: &LoadedConfig, events: &[MarketEvent], bars_per_year: f64) {
+fn print_run_context(loaded: &LoadedConfig, series: &Series, bars_per_year: f64) {
+    let events = &series.events;
     let eval_bars = events.len().saturating_sub(loaded.grid.max_warmup_bars());
+    println!("  bars           {}", series.description);
     println!(
         "  replay         {} bars, one series shared by every combo; {eval_bars} of them\n\
          \x20                inside the evaluation window",
@@ -531,6 +554,7 @@ fn print_run_context(loaded: &LoadedConfig, events: &[MarketEvent], bars_per_yea
     );
     println!("  annualization  {bars_per_year:.0} bars/yr");
     println!();
+    crate::grain::print_caveats(&series.caveats);
 }
 
 fn print_results(loaded: &LoadedConfig, results: &[Replay]) {

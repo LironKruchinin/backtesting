@@ -483,6 +483,29 @@ reference; supersede the decision if you disagree — don't hotfix.
   2015-09-21**: the functions are total by design — there is nowhere to put a
   `Result` inside replay. `qa` and `backtest` warn when a span starts earlier;
   the two older session eras are documented in the table, not modelled.
+- **`curated/bars/ESH2024/5m` never exists, and that is not an unfinished
+  transcode** (D-0077). The archive stores the grain the vendor sent — `1s` and
+  `1m` — and `5m`/`15m`/`1h`/`1d` are aggregated on read, on the exchange's own
+  sessions. Writing them would need the read-modify-write merge D-0036 exists to
+  prevent: raw windows are monthly and a month boundary lands *inside* a CME
+  session, so a daily bar's constituents live in two raw files. Every report says
+  which of the two produced its bars, including when nothing was resampled.
+- **A resampled daily bar opens at 17:00 CT the previous evening, not at
+  midnight** (D-0077). It is a trading-day bar; the bucket grid is anchored on
+  `Calendar::session_open`, so no resampled bar can span a session boundary. A
+  UTC-day grid would put the last minutes of 3 January and the first minutes of
+  the fourth's session in one "daily" bar — they are 61 minutes and one trading
+  day apart.
+- **An early close makes the last bucket short and is NOT reported as a
+  truncated window** (D-0077). `last_bar_may_be_partial` is computed against the
+  session close, so it says "the request cut this bar" and never "the exchange
+  did". A 12:15 CT close makes bucket 19 of an hourly resample fifteen minutes
+  long, which its volume states.
+- **`resample` refuses a calendar declaring an intraday halt**, though neither
+  bundled table declares one (D-0040, D-0077). The bucket grid is anchored once
+  per trading day, so a halt — which is a session boundary — could sit inside a
+  bucket. The refusal costs nothing today and is what stops "no bar spans a
+  session boundary" from silently becoming false the day a table grows a halt.
 - **`crucible qa` exits 4 when it finds something**, like `verify`. A
   scheduled job that reads "coverage 61 %" as success is worse than no job.
 - **`AdjustedPrice` cannot be converted to `Price`, and that is the feature**
@@ -762,6 +785,14 @@ cargo run -p crucible-cli -- layout-check      # is the tree the shape DATA_LAYO
 cargo run -p crucible-cli --features databento -- transcode
 cargo run -p crucible-cli --features databento -- transcode --include-spreads
 cargo run -p crucible-cli -- backtest --instrument ESH2024 --timeframe 1m \
+  --start 2024-01-01 --end 2024-02-01 --fast 20 --slow 50
+
+# The same run on a COARSER grain (D-0077). The archive stores 1s and 1m; 5m,
+# 15m, 1h and 1d are aggregated on read, on the exchange's own sessions, so
+# there is nothing to build first and `curated/bars/ESH2024/5m` never exists.
+# A daily bar is a TRADING-day bar, opening at 17:00 CT the evening before.
+# Every report names the grain and says whether it was stored or resampled.
+cargo run -p crucible-cli -- backtest --instrument ESH2024 --timeframe 15m \
   --start 2024-01-01 --end 2024-02-01 --fast 20 --slow 50
 
 # The same command over a CONTINUOUS series (D-0076). `--instrument` takes the

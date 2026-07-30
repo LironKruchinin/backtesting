@@ -46,6 +46,7 @@ mod backtest;
 mod combo;
 mod config;
 mod funnel;
+mod grain;
 mod layout_check;
 mod pull;
 mod qa;
