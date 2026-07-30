@@ -386,6 +386,23 @@ reference; supersede the decision if you disagree — don't hotfix.
   it. Curated data is derived and rebuildable, so a refusal costs one re-run —
   the calculus that made D-0033 *drop* a symbol does not apply here, because
   nothing has been paid for.
+- **A zero or negative price is not a bad record**, and the validity test is
+  `!= UNDEF_PRICE`, never `> 0` (D-0070). CL settled at −$37.63 on 2020-04-20 as
+  an *outright*, and a calendar spread's differential is negative whenever the
+  market is in contango — together, 8.9 % of every bar record in the archive.
+  `UNDEF_PRICE` is the vendor's way of saying "no price"; below zero is a price.
+  Re-adding the positivity check refuses `GC.FUT ohlcv-1m` at record #0 and
+  makes the archive untranscodable, which is how it was found.
+- **`transcode` excludes spread instruments by a declared filter with a count,
+  not by a refusal, and the count prints even when it is zero** (D-0070). A
+  spread is not a record this build cannot read, it is a record nothing replays
+  yet, so refuse-the-whole-file does not apply; `--include-spreads` writes them
+  and `raw/` keeps them forever. The predicate is *contains `-`, `:`, or a
+  space* — a marker test rather than an outright-shape test, deliberately,
+  because the default excludes: mistaking an outright for a spread silently
+  omits real bars, while mistaking a spread for an outright only writes a
+  partition nobody reads. Naming a spread in `--symbols` without the flag is
+  refused rather than answered with an empty report.
 - **`transcode` re-decodes a file to discover it has nothing to write**: which
   contracts a window actually produced is only knowable after decoding it. A
   parent key's symbology maps every contract it resolves to and most never
@@ -527,7 +544,10 @@ cargo run -p crucible-cli -- layout-check      # is the tree the shape DATA_LAYO
 
 # The replay path. `transcode` needs the feature (it decodes DBN); `backtest`
 # does not. Curated data is disposable: `--force` rebuilds, deleting is safe.
+# Spreads are excluded by default and the excluded records are counted in the
+# report (D-0070); `--include-spreads` writes them.
 cargo run -p crucible-cli --features databento -- transcode
+cargo run -p crucible-cli --features databento -- transcode --include-spreads
 cargo run -p crucible-cli -- backtest --instrument ESH4 --timeframe 1m \
   --start 2024-01-01 --end 2024-02-01 --fast 20 --slow 50
 

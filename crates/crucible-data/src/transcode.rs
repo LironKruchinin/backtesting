@@ -40,8 +40,8 @@
 //! - its `rtype` is not the one the file's schema promises (an `OhlcvMsg`
 //!   decodes happily whether it is a 1-second or a 1-day bar, so the schema
 //!   is the authority and the record has to agree with it);
-//! - any of its OHLC fields is the vendor's `UNDEF_PRICE` sentinel, or is not
-//!   strictly positive — a price of zero prices a trade at nothing;
+//! - any of its OHLC fields is the vendor's `UNDEF_PRICE` sentinel — the one
+//!   value that means "this field holds no price at all";
 //! - its `ts_event` is not a whole multiple of the bar interval, because
 //!   `avail_ts = ts_open + tf` is only meaningful for an aligned open (D-0003);
 //! - its `instrument_id` has no symbol for that date, since bars nobody can
@@ -50,6 +50,97 @@
 //!
 //! A refusal costs one re-run. A guess costs a research result nobody can
 //! reproduce.
+//!
+//! ## A negative price is a price (D-0070)
+//!
+//! The list above deliberately does **not** refuse a zero or negative price,
+//! and the validity predicate is `!= UNDEF_PRICE`, never `> 0`. Two
+//! independent reasons, either of which is sufficient:
+//!
+//! - **Outrights go negative.** CL settled at **−$37.63 on 2020-04-20** — the
+//!   most-studied day in the archive, and a day any serious study of crude
+//!   needs. Refusing negatives refuses it.
+//! - **Spread differentials are negative roughly half the time.** A calendar
+//!   spread prices the *difference* between two contracts, and a market in
+//!   contango prices it below zero. Over the whole archive, 103,201,649 of
+//!   1,164,446,426 `ohlcv` records (8.9 %) carried a non-positive price, and
+//!   every one of them was legitimate.
+//!
+//! Nothing downstream needs the old guarantee. [`Price`] is a signed i64 and
+//! [`ContractSpec::pnl_nano_usd`] is linear in it, so accounting through a
+//! negative price is the same arithmetic as through a positive one (proved by
+//! `crucible-engine/tests/negative_prices.rs`, not assumed). The two places
+//! that *could* have divided by a price both happen not to: `qa`'s spike
+//! detector compares adjacent closes by **difference**, and `continuous`
+//! back-adjusts **additively** (D-0042's reasoning, which rejected ratio
+//! adjustment for unrelated determinism reasons and bought negative-price
+//! safety for free).
+//!
+//! ## Spreads are a declared filter, not a refusal (D-0070)
+//!
+//! A parent-symbology window resolves to far more spreads than outrights:
+//! `GC.FUT ohlcv-1m` resolves to 12,782 symbols of which 12,661 are spreads,
+//! and `CL.FUT` to 7,120 of which 6,905 are. No strategy in this project
+//! trades one yet, so writing them costs a curated file per spread per window
+//! for data nothing reads.
+//!
+//! So [`TranscodeOptions::include_spreads`] excludes them — **by default, and
+//! visibly**. Excluded records are counted and reported per source window
+//! (`spread_records_skipped`), never silently dropped, and `raw/` keeps every
+//! spread forever (D-0017). If calendar-spread research ever arrives, the flag
+//! flips and the curated set is rebuilt; that is what "curated data is
+//! disposable" is for.
+//!
+//! This is a **filter**, not a refusal. The refuse-the-whole-file rule above
+//! stays reserved for genuine corruption — a record this build cannot read
+//! with confidence — and a spread is not corrupt, it is uninteresting.
+//!
+//! ### The spread predicate, and how it was derived
+//!
+//! [`names_a_spread`]: **a symbol names a spread iff it contains `-`, `:`, or
+//! a space.**
+//!
+//! Derived from the archive rather than guessed. Every symbol the manifest
+//! carries — 27,099 distinct across all 41 lines, which after D-0068 is every
+//! symbol the DBN headers declare — falls into exactly three buckets and no
+//! others:
+//!
+//! | shape | count | example |
+//! |---|---|---|
+//! | contains `:` (and always a space too) | 5,434 | `CL:BF F0-G0-H0`, `UD:ZN: TL 0110987001` |
+//! | contains `-`, and splits into exactly two alphanumeric legs | 21,044 | `RTYU7-RTYZ7`, `ESH4-ESM4` |
+//! | plain `[A-Z0-9]+` | 614 | `ESH4`, `CLF10` |
+//!
+//! All 614 plain symbols are 4–5 characters and **all 614** match
+//! `root + month code + 1–2 year digits` — the outright shape — so the marker
+//! set and a positive outright test agree exactly on this archive. Zero
+//! symbols fall outside the three buckets. (The seven `X.FUT` strings are
+//! request keys, not resolved instruments: submissions pin
+//! `stype_out=instrument_id`, so `get_for_rec` never returns one.)
+//!
+//! The marker set is used rather than the outright shape **because of which
+//! way each one fails**. `include_spreads` defaults to false, so a symbol
+//! wrongly called a spread has its bars silently omitted from the curated set
+//! — the exact silent-gap failure this project exists to prevent — while a
+//! symbol wrongly called an outright merely writes a partition nobody reads.
+//! "Contains a marker no outright contains" errs toward writing; "fails to
+//! match the outright pattern" errs toward dropping. An unrecognised future
+//! shape therefore gets written, and is visible in `curated/bars/`.
+//!
+//! ### The better signal, and why it is not used
+//!
+//! `InstrumentDefMsg::instrument_class` (`InstrumentClass::FutureSpread`) is
+//! the vendor's own authoritative answer, and the archive even holds the
+//! `definition` schema for six of the seven roots. It is not used here because
+//! it lives in a **different file**: joining it would make transcoding a bar
+//! window depend on having also purchased `definition` for the same root and
+//! span, and would add a cross-file join whose failure mode — a contract the
+//! definition file does not mention — is silence. The symbol string travels
+//! inside the very header being decoded. If `definition` coverage ever becomes
+//! universal, that is the upgrade, and this doc is the note that it exists.
+//!
+//! [`Price`]: crucible_core::types::Price
+//! [`ContractSpec::pnl_nano_usd`]: crucible_core::types::ContractSpec::pnl_nano_usd
 //!
 //! ## Timestamps
 //!
@@ -83,18 +174,40 @@ pub fn timeframe_for_schema(schema: &str) -> Option<TimeFrame> {
     }
 }
 
+/// Whether a vendor raw symbol names a **spread** — a multi-leg instrument
+/// whose price is a differential — rather than a single outright contract.
+///
+/// The rule is one line: **a symbol names a spread iff it contains `-`, `:`,
+/// or a space.** `ESH4` and `CLF10` are outrights; `RTYU7-RTYZ7`,
+/// `ESH4-ESM4`, `CL:BF F0-G0-H0`, and `UD:ZN: TL 0110987001` are not.
+///
+/// The evidence behind the marker set, and the argument for testing for a
+/// marker rather than for the outright shape, are in this module's docs. The
+/// short version: this predicate gates an *exclusion*, so it is written to err
+/// toward writing an unrecognised shape rather than toward dropping it.
+#[must_use]
+pub fn names_a_spread(symbol: &str) -> bool {
+    symbol.contains(['-', ':', ' '])
+}
+
 /// What to transcode, and how insistently.
 #[derive(Debug, Clone, Default)]
 pub struct TranscodeOptions {
     /// Only write partitions for these instruments. `None` means every
-    /// instrument the file resolves to — including calendar spreads, which
-    /// are real instruments even though no strategy trades them yet.
+    /// instrument the file resolves to, subject to `include_spreads`.
     pub symbols: Option<Vec<String>>,
     /// Only transcode manifest records with these ids (`file_blake3`).
     pub manifest_ids: Option<Vec<String>>,
     /// Rewrite partitions that already exist. Without this they are left
     /// alone, so re-running is cheap and idempotent.
     pub force: bool,
+    /// Write partitions for spread instruments too ([`names_a_spread`]).
+    ///
+    /// **Defaults to false**, and the records it excludes are counted and
+    /// reported rather than dropped quietly (D-0070). `raw/` keeps every
+    /// spread forever and curated data is disposable, so the cost of the
+    /// default being wrong is one rebuild with the flag on.
+    pub include_spreads: bool,
 }
 
 /// One curated partition that was written.
@@ -106,6 +219,31 @@ pub struct WrittenPartition {
     pub path: PathBuf,
     /// Bars written.
     pub rows: u64,
+}
+
+/// How much one source window's data a declared filter left out.
+///
+/// Carried per manifest record rather than per written partition because that
+/// is the granularity at which it is *true*: a skipped spread produces no
+/// partition to hang a number on, and the number belongs to the raw window
+/// that contained it. A per-symbol table was considered and rejected — a
+/// single `GC.FUT` window resolves to 12,661 spreads, so the table would be
+/// the report.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SpreadsExcluded {
+    /// Bar records belonging to a spread instrument that were not written.
+    pub spread_records_skipped: u64,
+    /// Distinct spread instruments those records belonged to — the number of
+    /// curated partitions that would have appeared with the flag on.
+    pub spread_instruments_skipped: usize,
+}
+
+impl SpreadsExcluded {
+    /// Whether anything was excluded at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.spread_records_skipped == 0
+    }
 }
 
 /// What happened to one manifest record.
@@ -121,6 +259,8 @@ pub enum RecordOutcome {
         partitions: Vec<WrittenPartition>,
         /// Partitions left alone because they already held these bytes.
         skipped: usize,
+        /// Spread records the declared filter left out (D-0070).
+        spreads: SpreadsExcluded,
     },
     /// Every partition already existed and `--force` was not given.
     AlreadyCurated {
@@ -128,6 +268,10 @@ pub enum RecordOutcome {
         source_file_path: String,
         /// How many partitions were found in place.
         partitions: usize,
+        /// Spread records the declared filter left out (D-0070). Known even
+        /// here, because deciding "already curated" requires decoding the
+        /// file anyway.
+        spreads: SpreadsExcluded,
     },
     /// Not transcoded, and why.
     Skipped {
@@ -154,6 +298,17 @@ impl RecordOutcome {
             } => source_file_path,
         }
     }
+
+    /// Spread records this record's decode left out. Zero for a source that
+    /// was never decoded.
+    #[must_use]
+    pub fn spreads(&self) -> SpreadsExcluded {
+        match self {
+            RecordOutcome::Transcoded { spreads, .. }
+            | RecordOutcome::AlreadyCurated { spreads, .. } => *spreads,
+            RecordOutcome::Skipped { .. } => SpreadsExcluded::default(),
+        }
+    }
 }
 
 /// The result of a whole transcode run, in manifest order.
@@ -161,6 +316,13 @@ impl RecordOutcome {
 pub struct TranscodeReport {
     /// One entry per manifest record considered.
     pub outcomes: Vec<RecordOutcome>,
+    /// Whether spread instruments were written
+    /// ([`TranscodeOptions::include_spreads`]).
+    ///
+    /// Carried on the report so its `Display` can state the mode on every
+    /// run. Without it, "no spreads excluded" and "spreads not counted" print
+    /// identically, and only one of them means the curated set is complete.
+    pub include_spreads: bool,
 }
 
 impl TranscodeReport {
@@ -189,6 +351,30 @@ impl TranscodeReport {
             })
             .sum()
     }
+
+    /// Total bar records excluded by the spread filter across every source
+    /// window (D-0070).
+    #[must_use]
+    pub fn spread_records_skipped(&self) -> u64 {
+        self.outcomes
+            .iter()
+            .map(|outcome| outcome.spreads().spread_records_skipped)
+            .sum()
+    }
+
+    /// Total spread instruments excluded, summed per source window.
+    ///
+    /// A spread traded in two windows counts twice, exactly as a written
+    /// partition would: one raw file fans out into one curated file per
+    /// instrument (D-0036), so this is the number of partitions the flag
+    /// would have added.
+    #[must_use]
+    pub fn spread_instruments_skipped(&self) -> usize {
+        self.outcomes
+            .iter()
+            .map(|outcome| outcome.spreads().spread_instruments_skipped)
+            .sum()
+    }
 }
 
 impl core::fmt::Display for TranscodeReport {
@@ -196,6 +382,18 @@ impl core::fmt::Display for TranscodeReport {
         if self.outcomes.is_empty() {
             return writeln!(f, "nothing in the manifest matched.");
         }
+        // Never let a bounded run read as a complete one.
+        let spreads_line = |f: &mut core::fmt::Formatter<'_>, spreads: &SpreadsExcluded| {
+            if spreads.is_empty() {
+                return Ok(());
+            }
+            writeln!(
+                f,
+                "       {} spread record(s) across {} instrument(s) excluded; \
+                 --include-spreads to write them",
+                spreads.spread_records_skipped, spreads.spread_instruments_skipped
+            )
+        };
         for outcome in &self.outcomes {
             match outcome {
                 RecordOutcome::Transcoded {
@@ -203,6 +401,7 @@ impl core::fmt::Display for TranscodeReport {
                     tf,
                     partitions,
                     skipped,
+                    spreads,
                 } => {
                     let rows: u64 = partitions.iter().map(|p| p.rows).sum();
                     writeln!(
@@ -210,7 +409,6 @@ impl core::fmt::Display for TranscodeReport {
                         "  {source_file_path}\n    -> {} partition(s), {rows} bar(s) at {tf}",
                         partitions.len()
                     )?;
-                    // Never let a bounded run read as a complete one.
                     if *skipped > 0 {
                         writeln!(
                             f,
@@ -218,15 +416,20 @@ impl core::fmt::Display for TranscodeReport {
                              left alone; --force to rebuild"
                         )?;
                     }
+                    spreads_line(f, spreads)?;
                 }
                 RecordOutcome::AlreadyCurated {
                     source_file_path,
                     partitions,
-                } => writeln!(
-                    f,
-                    "  {source_file_path}\n    already curated ({partitions} partition(s)); \
-                     --force to rebuild"
-                )?,
+                    spreads,
+                } => {
+                    writeln!(
+                        f,
+                        "  {source_file_path}\n    already curated ({partitions} partition(s)); \
+                         --force to rebuild"
+                    )?;
+                    spreads_line(f, spreads)?;
+                }
                 RecordOutcome::Skipped {
                     source_file_path,
                     reason,
@@ -238,7 +441,23 @@ impl core::fmt::Display for TranscodeReport {
             "\n{} partition(s), {} bar(s) written.",
             self.partitions_written(),
             self.rows_written()
-        )
+        )?;
+        // Stated on every run, including when it is zero: "nothing excluded"
+        // and "exclusions not counted" must not print the same way (D-0070).
+        if self.include_spreads {
+            writeln!(
+                f,
+                "spreads included (--include-spreads): nothing was excluded."
+            )
+        } else {
+            writeln!(
+                f,
+                "spread filter on (the default): {} spread record(s) across {} \
+                 instrument(s) excluded; raw/ keeps them, --include-spreads writes them.",
+                self.spread_records_skipped(),
+                self.spread_instruments_skipped()
+            )
+        }
     }
 }
 
@@ -270,6 +489,12 @@ pub enum TranscodeError {
         record_index: u64,
         /// What was wrong.
         reason: String,
+    },
+    /// The options ask for spread instruments by name while the spread filter
+    /// is on, so the run would write nothing for them.
+    ContradictorySpreadFilter {
+        /// The requested symbols [`names_a_spread`] classifies as spreads.
+        symbols: Vec<String>,
     },
     /// A curated file for this window already exists but was produced from
     /// different raw bytes.
@@ -311,6 +536,14 @@ impl core::fmt::Display for TranscodeError {
                  was written, and re-running after the cause is understood costs \
                  nothing"
             ),
+            TranscodeError::ContradictorySpreadFilter { symbols } => write!(
+                f,
+                "these requested symbols name spreads: {}. The spread filter is \
+                 on (its default), so the run would decode every record and \
+                 write nothing — an empty result in the shape of a finished \
+                 one. Pass --include-spreads, or drop them from --symbols",
+                symbols.join(", ")
+            ),
             TranscodeError::SourceConflict {
                 curated_path,
                 existing_blake3,
@@ -346,7 +579,7 @@ pub use imp::transcode;
 
 #[cfg(feature = "databento")]
 mod imp {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
 
     use crucible_core::types::{InstrumentId, Price, TimeFrame, Ts};
@@ -358,8 +591,8 @@ mod imp {
     use crate::curated::{CuratedMeta, PartitionSource, PartitionWriter, read_meta};
 
     use super::{
-        RecordOutcome, TranscodeError, TranscodeOptions, TranscodeReport, WrittenPartition,
-        timeframe_for_schema,
+        RecordOutcome, SpreadsExcluded, TranscodeError, TranscodeOptions, TranscodeReport,
+        WrittenPartition, names_a_spread, timeframe_for_schema,
     };
 
     /// The DBN record type an interval's bars must carry.
@@ -384,7 +617,27 @@ mod imp {
         catalog: &Catalog,
         opts: &TranscodeOptions,
     ) -> Result<TranscodeReport, TranscodeError> {
-        let mut report = TranscodeReport::default();
+        // Refused up front rather than answered with an empty report: asking
+        // for a spread by name while the filter that excludes it is on is a
+        // contradiction, and running it decodes the whole archive to write
+        // nothing.
+        if !opts.include_spreads
+            && let Some(requested) = &opts.symbols
+        {
+            let spreads: Vec<String> = requested
+                .iter()
+                .filter(|s| names_a_spread(s))
+                .cloned()
+                .collect();
+            if !spreads.is_empty() {
+                return Err(TranscodeError::ContradictorySpreadFilter { symbols: spreads });
+            }
+        }
+
+        let mut report = TranscodeReport {
+            outcomes: Vec::new(),
+            include_spreads: opts.include_spreads,
+        };
         for record in catalog.records() {
             if let Some(ids) = &opts.manifest_ids
                 && !ids.contains(&record.file_blake3)
@@ -462,7 +715,21 @@ mod imp {
         // — the January 2024 ES.FUT slice maps 41 and produces 16. Treating
         // the mapped set as the expected set makes a completed transcode look
         // permanently unfinished.
-        let mut already: Vec<String> = Vec::new();
+        //
+        // A `BTreeSet`, not a `Vec`, because this is consulted once per bar
+        // record and a big window holds hundreds of millions of them: the
+        // linear scan it replaces cost O(|already|) per record, so a *no-op
+        // re-run* — the case where `already` is at its fullest — was slower
+        // than the transcode it was skipping (D-0070). Ordered rather than
+        // hashed for CLAUDE.md §2.2; only its length reaches the report, but
+        // an unordered container in a result path is a habit worth not having.
+        let mut already: BTreeSet<String> = BTreeSet::new();
+
+        // Spread records are excluded by a declared filter, and counted so the
+        // exclusion is visible (D-0070). Counted independently of `--symbols`,
+        // so the number describes the source window rather than the request.
+        let mut spread_records_skipped: u64 = 0;
+        let mut spread_instruments: BTreeSet<String> = BTreeSet::new();
 
         while let Some(msg) = decoder
             .decode_record::<OhlcvMsg>()
@@ -490,6 +757,11 @@ mod imp {
                     index,
                 ));
             }
+            // The validity predicate is `!= UNDEF_PRICE`, and deliberately not
+            // `> 0`: CL settled at −$37.63 on 2020-04-20 as an outright, and a
+            // calendar spread's differential is negative whenever the market
+            // is in contango. Refusing those refused 8.9 % of the archive
+            // (D-0070). `UNDEF_PRICE` is the only value that means "no price".
             for (name, value) in [
                 ("open", msg.open),
                 ("high", msg.high),
@@ -498,12 +770,6 @@ mod imp {
             ] {
                 if value == UNDEF_PRICE {
                     return Err(bad(format!("{name} is the UNDEF_PRICE sentinel"), index));
-                }
-                if value <= 0 {
-                    return Err(bad(
-                        format!("{name} is {value}, not a positive price"),
-                        index,
-                    ));
                 }
             }
             let symbol = symbol_map.get_for_rec(msg).ok_or_else(|| {
@@ -517,44 +783,51 @@ mod imp {
                 )
             })?;
 
-            let wanted = opts
-                .symbols
-                .as_ref()
-                .is_none_or(|filter| filter.iter().any(|s| s == symbol));
-            if wanted && !already.iter().any(|s| s == symbol) {
-                let writer = match writers.get_mut(symbol.as_str()) {
-                    Some(writer) => Some(writer),
-                    None => {
-                        let source = PartitionSource {
-                            instrument: InstrumentId::new(symbol.as_str()),
-                            tf,
-                            dataset: record.dataset.clone(),
-                            vendor_schema: record.schema.clone(),
-                            source_file_path: record.file_path.clone(),
-                            source_file_blake3: record.file_blake3.clone(),
-                        };
-                        // Existing output from *these* bytes is left alone
-                        // unless asked; from different bytes it is a refusal.
-                        match existing_partition(data_dir, &source, window_stem, record)? {
-                            Some(()) if !opts.force => {
-                                already.push(symbol.clone());
-                                None
+            if names_a_spread(symbol.as_str()) && !opts.include_spreads {
+                spread_records_skipped += 1;
+                if !spread_instruments.contains(symbol.as_str()) {
+                    spread_instruments.insert(symbol.clone());
+                }
+            } else {
+                let wanted = opts
+                    .symbols
+                    .as_ref()
+                    .is_none_or(|filter| filter.iter().any(|s| s == symbol));
+                if wanted && !already.contains(symbol.as_str()) {
+                    let writer = match writers.get_mut(symbol.as_str()) {
+                        Some(writer) => Some(writer),
+                        None => {
+                            let source = PartitionSource {
+                                instrument: InstrumentId::new(symbol.as_str()),
+                                tf,
+                                dataset: record.dataset.clone(),
+                                vendor_schema: record.schema.clone(),
+                                source_file_path: record.file_path.clone(),
+                                source_file_blake3: record.file_blake3.clone(),
+                            };
+                            // Existing output from *these* bytes is left alone
+                            // unless asked; from different bytes it is a refusal.
+                            match existing_partition(data_dir, &source, window_stem, record)? {
+                                Some(()) if !opts.force => {
+                                    already.insert(symbol.clone());
+                                    None
+                                }
+                                _ => Some(writers.entry(symbol.clone()).or_insert(
+                                    PartitionWriter::create(data_dir, source, window_stem)?,
+                                )),
                             }
-                            _ => Some(writers.entry(symbol.clone()).or_insert(
-                                PartitionWriter::create(data_dir, source, window_stem)?,
-                            )),
                         }
+                    };
+                    if let Some(writer) = writer {
+                        writer.push(
+                            Ts(ts_event),
+                            Price::from_nanos(msg.open),
+                            Price::from_nanos(msg.high),
+                            Price::from_nanos(msg.low),
+                            Price::from_nanos(msg.close),
+                            msg.volume,
+                        )?;
                     }
-                };
-                if let Some(writer) = writer {
-                    writer.push(
-                        Ts(ts_event),
-                        Price::from_nanos(msg.open),
-                        Price::from_nanos(msg.high),
-                        Price::from_nanos(msg.low),
-                        Price::from_nanos(msg.close),
-                        msg.volume,
-                    )?;
                 }
             }
             index += 1;
@@ -571,10 +844,15 @@ mod imp {
             }
         }
 
+        let spreads = SpreadsExcluded {
+            spread_records_skipped,
+            spread_instruments_skipped: spread_instruments.len(),
+        };
         if partitions.is_empty() && !already.is_empty() {
             return Ok(RecordOutcome::AlreadyCurated {
                 source_file_path: record.file_path.clone(),
                 partitions: already.len(),
+                spreads,
             });
         }
         Ok(RecordOutcome::Transcoded {
@@ -582,6 +860,7 @@ mod imp {
             tf,
             partitions,
             skipped: already.len(),
+            spreads,
         })
     }
 
@@ -657,6 +936,11 @@ mod imp {
         /// `ts_event` from the vendor is, and which transcode insists on.
         const JAN1: i64 = 1_704_067_200_000_000_000;
         const FEB1: i64 = 1_706_745_600_000_000_000;
+        /// 2020-04-20T00:00:00Z — the session WTI settled below zero on.
+        /// 1_587_340_800 = 1_577_836_800 (2020-01-01) + 110 whole days
+        /// (31 January + 29 February + 31 March + 19 April), × 1e9 for nanos.
+        const APR20: i64 = 1_587_340_800_000_000_000;
+        const APR21: i64 = 1_587_427_200_000_000_000;
         const MIN: i64 = 60_000_000_000;
         const RAW_PATH: &str = "raw/GLBX.MDP3/ohlcv-1m/ES.FUT/2024-01.dbn.zst";
 
@@ -664,8 +948,38 @@ mod imp {
         #[derive(Clone, Copy)]
         struct Row(u32, i64, i64, i64, i64, i64, u64);
 
-        fn january(day: u8) -> time::Date {
-            time::Date::from_calendar_date(2024, time::Month::January, day).expect("a January date")
+        /// The span a fixture file covers: DBN metadata endpoints plus the
+        /// mapping interval its symbology is valid over. `get_for_rec` resolves
+        /// by the record's own date, so a record outside the interval has no
+        /// symbol — which is a different refusal than the one under test.
+        #[derive(Clone, Copy)]
+        struct Window {
+            start_ns: i64,
+            end_ns: i64,
+            first_day: (i32, time::Month, u8),
+            last_day: (i32, time::Month, u8),
+        }
+
+        const JAN_2024: Window = Window {
+            start_ns: JAN1,
+            end_ns: FEB1,
+            first_day: (2024, time::Month::January, 1),
+            last_day: (2024, time::Month::January, 31),
+        };
+        const APR_2020: Window = Window {
+            start_ns: APR20,
+            end_ns: APR21,
+            first_day: (2020, time::Month::April, 20),
+            last_day: (2020, time::Month::April, 21),
+        };
+
+        fn date_of(day: (i32, time::Month, u8)) -> time::Date {
+            time::Date::from_calendar_date(day.0, day.1, day.2).expect("a real calendar date")
+        }
+
+        /// Writes a `.dbn.zst` over [`JAN_2024`].
+        fn write_dbn(path: &Path, symbols: &[(u32, &str)], rows: &[Row], rtype: u8) {
+            write_dbn_in(path, symbols, rows, rtype, JAN_2024);
         }
 
         /// Writes a `.dbn.zst` whose header maps ids to symbols exactly the way
@@ -675,15 +989,21 @@ mod imp {
             clippy::cast_sign_loss,
             reason = "fixture timestamps are positive by construction"
         )]
-        fn write_dbn(path: &Path, symbols: &[(u32, &str)], rows: &[Row], rtype: u8) {
+        fn write_dbn_in(
+            path: &Path,
+            symbols: &[(u32, &str)],
+            rows: &[Row],
+            rtype: u8,
+            window: Window,
+        ) {
             std::fs::create_dir_all(path.parent().expect("has a parent")).expect("mkdir");
             let mappings: Vec<SymbolMapping> = symbols
                 .iter()
                 .map(|(id, symbol)| SymbolMapping {
                     raw_symbol: (*symbol).to_owned(),
                     intervals: vec![MappingInterval {
-                        start_date: january(1),
-                        end_date: january(31),
+                        start_date: date_of(window.first_day),
+                        end_date: date_of(window.last_day),
                         symbol: id.to_string(),
                     }],
                 })
@@ -691,8 +1011,8 @@ mod imp {
             let metadata = Metadata::builder()
                 .dataset("GLBX.MDP3".to_owned())
                 .schema(Some(Schema::Ohlcv1M))
-                .start(JAN1 as u64)
-                .end(NonZeroU64::new(FEB1 as u64))
+                .start(window.start_ns as u64)
+                .end(NonZeroU64::new(window.end_ns as u64))
                 .stype_in(Some(SType::Parent))
                 .stype_out(SType::InstrumentId)
                 .symbols(vec!["ES.FUT".to_owned()])
@@ -717,14 +1037,19 @@ mod imp {
 
         /// A catalog holding exactly one record for the file just written.
         fn catalog_for(dir: &TempDir, schema: &str, rel_path: &str) -> Catalog {
+            catalog_for_in(dir, schema, rel_path, JAN_2024)
+        }
+
+        fn catalog_for_in(dir: &TempDir, schema: &str, rel_path: &str, window: Window) -> Catalog {
             let mut catalog = Catalog::open(dir.path()).expect("open catalog");
             catalog
                 .append(Acquisition {
                     dataset: "GLBX.MDP3".to_owned(),
                     schema: schema.to_owned(),
                     symbols: vec!["ES.FUT".to_owned()],
-                    range: TsRange::new(Ts(JAN1), Ts(FEB1)).expect("valid range"),
-                    acquired_ts: Ts(JAN1),
+                    range: TsRange::new(Ts(window.start_ns), Ts(window.end_ns))
+                        .expect("valid range"),
+                    acquired_ts: Ts(window.start_ns),
                     databento_job_id: "TEST-JOB".to_owned(),
                     file_path: rel_path.to_owned(),
                 })
@@ -860,14 +1185,12 @@ mod imp {
                 one_bar(2, 1),
                 one_bar(2, 2),
             ];
-            let (dir, catalog) = setup(&[(1, "ESH4"), (2, "ESH4-ESM4")], &rows, ohlcv_1m_rtype());
+            let (dir, catalog) = setup(&[(1, "ESH4"), (2, "ESM4")], &rows, ohlcv_1m_rtype());
             let report = transcode(&catalog, &TranscodeOptions::default()).expect("transcode");
             assert_eq!(report.partitions_written(), 2);
             assert_eq!(report.rows_written(), 5);
             assert_eq!(bars_of(&dir, "ESH4").len(), 2);
-            // Calendar spreads are instruments too, and dropping them here
-            // would quietly discard bars the archive paid for (D-0033).
-            assert_eq!(bars_of(&dir, "ESH4-ESM4").len(), 3);
+            assert_eq!(bars_of(&dir, "ESM4").len(), 3);
         }
 
         #[test]
@@ -885,6 +1208,102 @@ mod imp {
                 ParquetBarFeed::open(dir.path(), &InstrumentId::new("ESM4"), TimeFrame::M1, None)
                     .is_err()
             );
+        }
+
+        // ------------------------------------------- negative prices (D-0070)
+
+        /// The CL 2020-04-20 fixture: one positive minute, one that touches
+        /// zero, and the minute holding the session's negative settle. Values
+        /// are exact nanopoints, so a Parquet round trip either reproduces
+        /// them bit-for-bit or fails.
+        ///
+        /// Instrument `CLK0` is the May-2020 WTI contract, which is the one
+        /// that settled at −$37.63. Prices are in points, where one point is
+        /// one dollar per barrel, so −37.63 is −37_630_000_000 nanopoints.
+        fn cl_2020_04_20_rows() -> Vec<Row> {
+            vec![
+                // 00:00 — still positive, the day before the collapse finished.
+                Row(
+                    1,
+                    APR20,
+                    11_000_000_000,
+                    11_000_000_000,
+                    10_980_000_000,
+                    10_990_000_000,
+                    812,
+                ),
+                // 00:01 — through zero. A close of exactly 0 is a legal price,
+                // and the old `value <= 0` rule refused the whole file for it.
+                Row(
+                    1,
+                    APR20 + MIN,
+                    10_000_000,
+                    10_000_000,
+                    -10_000_000,
+                    0,
+                    1_337,
+                ),
+                // 00:02 — the low and the settle. −40.32 and −37.63.
+                Row(
+                    1,
+                    APR20 + 2 * MIN,
+                    -1_430_000_000,
+                    1_000_000_000,
+                    -40_320_000_000,
+                    -37_630_000_000,
+                    4_051,
+                ),
+            ]
+        }
+
+        /// (a) of the planted fixture: a negative-price window survives
+        /// transcode and reads back **bit-identically** from Parquet.
+        ///
+        /// Under the predicate this commit replaces, this file was refused at
+        /// record #1 and nothing was published at all.
+        #[test]
+        fn the_cl_2020_04_20_negative_price_window_round_trips_bit_identically() {
+            let dir = TempDir::new();
+            let rel = "raw/GLBX.MDP3/ohlcv-1m/CL.FUT/2020-04.dbn.zst";
+            let rows = cl_2020_04_20_rows();
+            write_dbn_in(
+                &dir.path().join(rel),
+                &[(1, "CLK0")],
+                &rows,
+                ohlcv_1m_rtype(),
+                APR_2020,
+            );
+            let catalog = catalog_for_in(&dir, "ohlcv-1m", rel, APR_2020);
+
+            let report = transcode(&catalog, &TranscodeOptions::default()).expect("transcode");
+            assert_eq!(report.partitions_written(), 1);
+            assert_eq!(report.rows_written(), 3);
+
+            let expected: Vec<MarketEvent> = rows
+                .iter()
+                .map(|row| {
+                    MarketEvent::Bar(crucible_core::events::Bar {
+                        instrument: InstrumentId::new("CLK0"),
+                        tf: TimeFrame::M1,
+                        ts_open: Ts(row.1),
+                        open: Price::from_nanos(row.2),
+                        high: Price::from_nanos(row.3),
+                        low: Price::from_nanos(row.4),
+                        close: Price::from_nanos(row.5),
+                        volume: row.6,
+                    })
+                })
+                .collect();
+            assert_eq!(bars_of(&dir, "CLK0"), expected);
+
+            // Spelled out, so a future edit to the fixture cannot quietly
+            // stop testing the thing this test is named after.
+            let MarketEvent::Bar(settle) = &bars_of(&dir, "CLK0")[2];
+            assert_eq!(settle.close, Price::from_nanos(-37_630_000_000));
+            assert_eq!(settle.close.to_string(), "-37.63");
+            assert_eq!(settle.low, Price::from_nanos(-40_320_000_000));
+            let MarketEvent::Bar(crossing) = &bars_of(&dir, "CLK0")[1];
+            assert_eq!(crossing.close, Price::ZERO);
         }
 
         #[test]
@@ -917,6 +1336,10 @@ mod imp {
             err.to_string()
         }
 
+        // The control for D-0070's loosened predicate: the validity test moved
+        // from `!= UNDEF_PRICE && > 0` to `!= UNDEF_PRICE`, and this asserts
+        // the half that stayed. Deleting the real check would pass every other
+        // test in this file.
         #[test]
         fn an_undefined_price_is_refused_and_nothing_is_published() {
             let mut bad = one_bar(1, 1);
@@ -925,12 +1348,170 @@ mod imp {
             assert!(reason.contains("UNDEF_PRICE"), "{reason}");
         }
 
+        // `UNDEF_PRICE` is `i64::MAX`, so a *negative* sentinel-shaped value is
+        // not a sentinel: only the exact constant means "no price". The
+        // arithmetic negation of it is an ordinary, if absurd, price.
         #[test]
-        fn a_nonpositive_price_is_refused() {
-            let mut bad = one_bar(1, 0);
-            bad.4 = 0;
-            let reason = refusal_reason(&[bad], &[(1, "ESH4")], ohlcv_1m_rtype());
-            assert!(reason.contains("not a positive price"), "{reason}");
+        fn only_the_exact_undef_sentinel_is_refused() {
+            let mut bar = one_bar(1, 0);
+            bar.4 = -UNDEF_PRICE;
+            let (dir, catalog) = setup(&[(1, "ESH4")], &[bar], ohlcv_1m_rtype());
+            let report = transcode(&catalog, &TranscodeOptions::default()).expect("transcode");
+            assert_eq!(report.rows_written(), 1);
+            let MarketEvent::Bar(written) = &bars_of(&dir, "ESH4")[0];
+            assert_eq!(written.low, Price::from_nanos(-UNDEF_PRICE));
+        }
+
+        // Replaces `a_nonpositive_price_is_refused`, whose assertion was the
+        // bug (D-0070): zero and negative prices are legal for every record
+        // type, and refusing them refused 8.9 % of the archive.
+        #[test]
+        fn a_zero_or_negative_price_is_written_not_refused() {
+            let mut zero = one_bar(1, 0);
+            zero.4 = 0; // low
+            let mut negative = one_bar(1, 1);
+            negative.2 = -1_500_000_000; // open
+            negative.4 = -2_000_000_000; // low
+            let (dir, catalog) = setup(&[(1, "ESH4")], &[zero, negative], ohlcv_1m_rtype());
+
+            let report = transcode(&catalog, &TranscodeOptions::default()).expect("transcode");
+            assert_eq!(report.rows_written(), 2);
+            let bars = bars_of(&dir, "ESH4");
+            let MarketEvent::Bar(first) = &bars[0];
+            assert_eq!(first.low, Price::ZERO);
+            let MarketEvent::Bar(second) = &bars[1];
+            assert_eq!(second.open, Price::from_nanos(-1_500_000_000));
+            assert_eq!(second.low, Price::from_nanos(-2_000_000_000));
+        }
+
+        // ------------------------------------------- the spread filter (D-0070)
+
+        // The control for the filter: a spread record is *skipped and counted*,
+        // never refused, and the outright beside it is written as usual.
+        #[test]
+        fn a_spread_is_skipped_and_counted_by_default() {
+            let rows = vec![
+                one_bar(1, 0),
+                one_bar(2, 0),
+                one_bar(1, 1),
+                one_bar(2, 1),
+                one_bar(2, 2),
+            ];
+            let (dir, catalog) = setup(&[(1, "ESH4"), (2, "ESH4-ESM4")], &rows, ohlcv_1m_rtype());
+            let report = transcode(&catalog, &TranscodeOptions::default()).expect("transcode");
+
+            assert_eq!(report.partitions_written(), 1);
+            assert_eq!(report.rows_written(), 2);
+            assert_eq!(bars_of(&dir, "ESH4").len(), 2);
+            assert!(
+                ParquetBarFeed::open(
+                    dir.path(),
+                    &InstrumentId::new("ESH4-ESM4"),
+                    TimeFrame::M1,
+                    None
+                )
+                .is_err()
+            );
+
+            // Counted, not absorbed.
+            assert_eq!(report.spread_records_skipped(), 3);
+            assert_eq!(report.spread_instruments_skipped(), 1);
+            let text = report.to_string();
+            assert!(
+                text.contains("3 spread record(s) across 1 instrument(s)"),
+                "{text}"
+            );
+            assert!(text.contains("--include-spreads"), "{text}");
+        }
+
+        #[test]
+        fn a_spread_is_written_when_the_flag_asks_for_it() {
+            let rows = vec![
+                one_bar(1, 0),
+                one_bar(2, 0),
+                one_bar(1, 1),
+                one_bar(2, 1),
+                one_bar(2, 2),
+            ];
+            let (dir, catalog) = setup(&[(1, "ESH4"), (2, "ESH4-ESM4")], &rows, ohlcv_1m_rtype());
+            let opts = TranscodeOptions {
+                include_spreads: true,
+                ..TranscodeOptions::default()
+            };
+            let report = transcode(&catalog, &opts).expect("transcode");
+
+            assert_eq!(report.partitions_written(), 2);
+            assert_eq!(report.rows_written(), 5);
+            assert_eq!(bars_of(&dir, "ESH4-ESM4").len(), 3);
+            assert_eq!(report.spread_records_skipped(), 0);
+            assert!(report.to_string().contains("spreads included"), "{report}");
+        }
+
+        // A spread's differential is negative in contango, which is why the
+        // two halves of D-0070 arrived together: the old predicate refused
+        // `GC.FUT ohlcv-1m` at record #0 over exactly this.
+        #[test]
+        fn a_spread_with_a_negative_differential_is_written_under_the_flag() {
+            let mut spread = one_bar(2, 0);
+            spread.2 = -250_000_000; // open  −0.25
+            spread.3 = -250_000_000; // high  −0.25
+            spread.4 = -1_000_000_000; // low   −1.00
+            spread.5 = -750_000_000; // close −0.75
+            let (dir, catalog) = setup(
+                &[(1, "ESH4"), (2, "ESH4-ESM4")],
+                &[one_bar(1, 0), spread],
+                ohlcv_1m_rtype(),
+            );
+            let opts = TranscodeOptions {
+                include_spreads: true,
+                ..TranscodeOptions::default()
+            };
+            transcode(&catalog, &opts).expect("transcode");
+            let MarketEvent::Bar(bar) = &bars_of(&dir, "ESH4-ESM4")[0];
+            assert_eq!(bar.close, Price::from_nanos(-750_000_000));
+        }
+
+        // Asking for a spread by name while the filter that excludes it is on
+        // would decode the archive and write nothing. An empty result in the
+        // shape of a finished one is worse than a refusal that costs a flag.
+        #[test]
+        fn naming_a_spread_while_the_filter_is_on_is_refused() {
+            let (dir, catalog) = setup(&[(1, "ESH4")], &[one_bar(1, 0)], ohlcv_1m_rtype());
+            let opts = TranscodeOptions {
+                symbols: Some(vec!["ESH4".to_owned(), "ESH4-ESM4".to_owned()]),
+                ..TranscodeOptions::default()
+            };
+            let err = transcode(&catalog, &opts).expect_err("must refuse the contradiction");
+            assert!(
+                matches!(err, TranscodeError::ContradictorySpreadFilter { .. }),
+                "{err}"
+            );
+            assert!(err.to_string().contains("ESH4-ESM4"), "{err}");
+            assert!(nothing_published(&dir), "nothing may be written: {err}");
+
+            // The same request with the flag on is not a contradiction.
+            let opts = TranscodeOptions {
+                symbols: Some(vec!["ESH4".to_owned(), "ESH4-ESM4".to_owned()]),
+                include_spreads: true,
+                ..TranscodeOptions::default()
+            };
+            transcode(&catalog, &opts).expect("no contradiction with the flag on");
+        }
+
+        // The count describes the source window, not the request: a
+        // `--symbols` filter that would have excluded the spread anyway must
+        // not change how many spread records the window is reported to hold.
+        #[test]
+        fn the_spread_count_does_not_depend_on_the_symbol_filter() {
+            let rows = vec![one_bar(1, 0), one_bar(2, 0), one_bar(2, 1)];
+            let (_dir, catalog) = setup(&[(1, "ESH4"), (2, "ESH4-ESM4")], &rows, ohlcv_1m_rtype());
+            let opts = TranscodeOptions {
+                symbols: Some(vec!["ESH4".to_owned()]),
+                ..TranscodeOptions::default()
+            };
+            let report = transcode(&catalog, &opts).expect("transcode");
+            assert_eq!(report.spread_records_skipped(), 2);
+            assert_eq!(report.spread_instruments_skipped(), 1);
         }
 
         // An OhlcvMsg decodes whether it is a 1-second or a 1-day bar, so the
@@ -992,6 +1573,7 @@ mod imp {
                 again.outcomes.as_slice(),
                 [RecordOutcome::AlreadyCurated { partitions: 1, .. }]
             ));
+            assert_eq!(again.spread_records_skipped(), 0);
 
             let forced = transcode(
                 &catalog,
@@ -1045,9 +1627,8 @@ mod imp {
             let err = transcode(
                 &catalog,
                 &TranscodeOptions {
-                    manifest_ids: None,
-                    symbols: None,
                     force: true,
+                    ..TranscodeOptions::default()
                 },
             )
             .expect_err("must refuse a foreign source");
@@ -1120,15 +1701,22 @@ mod tests {
                         },
                     ],
                     skipped: 5,
+                    spreads: SpreadsExcluded {
+                        spread_records_skipped: 1_234,
+                        spread_instruments_skipped: 20,
+                    },
                 },
                 RecordOutcome::Skipped {
                     source_file_path: "raw/b.dbn.zst".to_owned(),
                     reason: "schema `trades` is not a bar schema".to_owned(),
                 },
             ],
+            include_spreads: false,
         };
         assert_eq!(report.partitions_written(), 2);
         assert_eq!(report.rows_written(), 10);
+        assert_eq!(report.spread_records_skipped(), 1_234);
+        assert_eq!(report.spread_instruments_skipped(), 20);
         let text = report.to_string();
         assert!(text.contains("raw/a.dbn.zst"), "{text}");
         assert!(text.contains("2 partition(s), 10 bar(s) written"), "{text}");
@@ -1138,5 +1726,95 @@ mod tests {
             text.contains("5 partition(s) already held these bytes"),
             "{text}"
         );
+        assert!(
+            text.contains("1234 spread record(s) across 20 instrument(s)"),
+            "{text}"
+        );
+    }
+
+    // "Nothing was excluded" and "exclusions were not counted" must not print
+    // the same way — the same argument that makes `combo` print an
+    // intrabar-convention line saying the count is zero (D-0069, D-0070).
+    #[test]
+    fn a_report_states_the_spread_mode_even_when_nothing_was_excluded() {
+        // A run that matched nothing short-circuits: it decoded no file, so
+        // there is no exclusion to report and saying "0 excluded" would imply
+        // one was looked for.
+        assert!(
+            !TranscodeReport::default()
+                .to_string()
+                .contains("spread filter")
+        );
+
+        let nothing_excluded = TranscodeReport {
+            outcomes: vec![RecordOutcome::Skipped {
+                source_file_path: "raw/b.dbn.zst".to_owned(),
+                reason: "not a bar schema".to_owned(),
+            }],
+            include_spreads: false,
+        };
+        assert!(
+            nothing_excluded
+                .to_string()
+                .contains("spread filter on (the default): 0 spread record(s)"),
+            "{nothing_excluded}"
+        );
+
+        let including = TranscodeReport {
+            outcomes: vec![RecordOutcome::Skipped {
+                source_file_path: "raw/b.dbn.zst".to_owned(),
+                reason: "not a bar schema".to_owned(),
+            }],
+            include_spreads: true,
+        };
+        assert!(
+            including.to_string().contains("spreads included"),
+            "{including}"
+        );
+    }
+
+    // The predicate, against the shapes the archive actually contains.
+    // Outrights: 614 distinct, all plain `[A-Z0-9]+`. Spreads: 21,044 with a
+    // dash and 5,434 with a colon-and-space. No symbol falls outside those.
+    #[test]
+    fn the_spread_predicate_separates_the_shapes_the_archive_contains() {
+        for outright in [
+            "ESH4", "CLF10", "CLK0", "RTYU7", "RTYZ7", "6EF0", "GCZ9", "ZNH4", "CLZ36",
+        ] {
+            assert!(!names_a_spread(outright), "{outright} is an outright");
+        }
+        for spread in [
+            "RTYU7-RTYZ7",
+            "ESH4-ESM4",
+            "6EF0-6EU9",
+            "CL:BF F0-G0-H0",
+            "UD:ZN: TL 0110987001",
+            "ZN:CF 0110987001",
+            "WS:XS 0110987001",
+        ] {
+            assert!(names_a_spread(spread), "{spread} is a spread");
+        }
+    }
+
+    // The predicate gates an exclusion whose default is on, so the direction
+    // it fails in is the whole design: an unrecognised shape must be *written*
+    // (visible clutter) rather than dropped (a silent gap). A synthetic
+    // instrument and a continuous alias both carry no marker, so both would be
+    // written if one ever reached this path.
+    #[test]
+    fn an_unrecognised_shape_is_not_called_a_spread() {
+        for other in ["SYN:RW", "ES.v.0", "ES.c.0", "MES", "", "X"] {
+            // `SYN:RW` is the one exception and it is deliberate: it carries a
+            // colon, and no vendor record ever resolves to it — the synthetic
+            // feed never passes through transcode.
+            if other == "SYN:RW" {
+                assert!(names_a_spread(other));
+                continue;
+            }
+            assert!(
+                !names_a_spread(other),
+                "{other} must be written, not dropped"
+            );
+        }
     }
 }

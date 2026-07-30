@@ -1280,3 +1280,120 @@ propose a superseding entry — don't silently diverge.
   evidence with the absence of evidence, and quietly: the region would not look
   bad, it would look like nobody tried it. An axis is allowed to contain points
   that lose.
+- **D-0070** (2026-07-30) — **A price is valid iff it is not `UNDEF_PRICE`; the
+  `> 0` half of the test is deleted. Spread instruments are excluded from the
+  curated set by a DECLARED FILTER that counts what it excludes, not by a
+  refusal. `transcode`'s "already curated" lookup becomes set-shaped.**
+  *Narrows what §9's "`transcode` refuses a whole file over one bad record"
+  counts as bad; the refusal itself is untouched.*
+  **The measurement.** A recon pass decoded every `ohlcv` record in the archive:
+  **103,201,649 of 1,164,446,426 bar records (8.9 %) were being refused**, every
+  one of them legitimate. `GC.FUT ohlcv-1m` refused at record **#0**, `ES.FUT
+  ohlcv-1m 2010-06-06--2024-01-01` at record #14. One line did it —
+  `if value <= 0 { return Err(...) }` — and because validation runs *before* the
+  `--symbols` filter, no invocation could work around it. The full archive was
+  therefore untranscodable, which is the whole M1 exit path.
+  **Why the predicate was always wrong, not merely strict.** Two independent
+  reasons, either sufficient. (1) *Outrights go negative.* CL settled at
+  **−$37.63 on 2020-04-20**; the rule refused the single most-studied session in
+  the archive, and would have gone on refusing every future one. (2) *A spread
+  prices a difference*, and a market in contango prices it below zero — that is
+  what most of the 8.9 % is. Zero is likewise a price, not an absence: the
+  vendor already has a way to say "no price here", and it is `UNDEF_PRICE`.
+  Nothing downstream ever needed positivity: `curated::read` has no such check,
+  `qa`'s spike detector compares adjacent closes by **difference**, and
+  `continuous` back-adjusts **additively** (D-0042 chose that for determinism
+  and bought negative-price safety for free). `Price` is a signed i64 and
+  `ContractSpec::pnl_nano_usd` is linear in it, so nothing in accounting cares
+  either — proved rather than assumed, in
+  `crucible-engine/tests/negative_prices.rs`: a hand-derived short from 9.99
+  through the −37.63 settle to a −36.99 cover, its exact mirror on the losing
+  side, and the tick-rounding control (`round_to_tick` rounds half *away from
+  zero*, symmetrically; half-up would have quietly moved every negative fill).
+  **Why the spread exclusion is a filter and not a refusal.** A parent window
+  resolves to far more spreads than outrights — `GC.FUT` to 12,782 symbols of
+  which 12,661 are spreads, `CL.FUT` to 7,120 of which 6,905 — and nothing in
+  this project replays one. Refusing them would be a category error: a spread is
+  not a record this build cannot read, it is a record nothing reads yet, and
+  refuse-the-whole-file stays reserved for genuine corruption. So
+  `TranscodeOptions::include_spreads` (default **false**, `--include-spreads` on
+  the CLI) excludes them, and every excluded record is **counted** —
+  `spread_records_skipped` and `spread_instruments_skipped`, per manifest record
+  and as a run total, printed per source window and in the summary. The summary
+  line prints on every run *including when the count is zero*, for D-0069's
+  reason: "nothing was excluded" and "exclusions were not counted" must not read
+  identically. Cost of the default being wrong: one rebuild. `raw/` keeps every
+  spread forever (D-0017) and curated data is disposable (D-0036), so if
+  calendar-spread research ever arrives the flag flips and the tree is rebuilt.
+  **The predicate: a symbol names a spread iff it contains `-`, `:`, or a
+  space.** Derived from the archive, not guessed. All 27,099 distinct symbols
+  the manifest carries — which after D-0068 is every symbol the DBN headers
+  declare — fall into exactly three buckets: 5,434 contain `:` (and every one of
+  those also contains a space) such as `CL:BF F0-G0-H0` and
+  `UD:ZN: TL 0110987001`; 21,044 contain `-` and every one splits into exactly
+  two alphanumeric legs (`RTYU7-RTYZ7`); and 614 are plain `[A-Z0-9]+`, of
+  length 4–5, **all 614** matching root + month code + 1–2 year digits. Nothing
+  falls outside. A marker test and a positive outright test therefore agree
+  exactly on this archive, and the marker test is the one used **because of
+  which way each fails**: the default excludes, so calling an outright a spread
+  silently omits real bars, while calling a spread an outright writes a
+  partition nobody reads. "Contains a marker no outright contains" errs toward
+  writing; "fails to match the outright pattern" errs toward dropping.
+  Rejected alternative: `InstrumentDefMsg::instrument_class`, the vendor's own
+  authoritative answer. It lives in the `definition` schema — a different file —
+  so using it would make transcoding a bar window depend on having also bought
+  `definition` for that root and span, and would add a cross-file join whose
+  failure mode is silence. Recorded in the module docs as the upgrade if
+  `definition` coverage ever becomes universal.
+  **Two refusals kept, one added.** `UNDEF_PRICE` and the alignment rule stand,
+  with controls asserting each still fires (the mutation that deletes the
+  `UNDEF_PRICE` check must fail a test, and does). Added: naming a spread in
+  `--symbols` while the filter is on is refused up front rather than answered
+  with an empty report — it would decode the whole archive to write nothing, and
+  an empty result in the shape of a finished one is worse than a refusal that
+  costs a flag. It exits 2 (usage), not 4.
+  **`TRANSCODER_VERSION` deliberately NOT bumped**, though this changes DBN→bar
+  semantics. Every bar this makes writable is a bar the old build refused the
+  *whole file* over, so no existing curated file contains one; and every bar the
+  old build did write is byte-identical under the new predicate. A bump would
+  warn on every already-correct partition (71 of them at the time of writing)
+  while distinguishing nothing — exactly the cosmetic bump D-0036 says must not
+  invalidate an archive.
+  **The scan, measured.** `already` (which instruments this window has already
+  curated) was a `Vec` scanned linearly once per bar record. On a first run it is
+  empty and free; on a **no-op re-run** it is at its fullest, so the cheap
+  idempotent re-run was the expensive case. Measured on `GC.FUT ohlcv-1m`
+  (15,531,201 records) with `--include-spreads`, so `already` holds 1,428
+  entries: linear scan **17.30 / 17.38 / 18.89 s**, `BTreeSet` **4.17 / 4.18 /
+  4.31 s** — **4.1×**, and the scan was ~74 % of wall time. The re-run had been
+  **1.6× slower than the original transcode that produced it** (11.47 s), which
+  is the property that makes any resume loop or retry look hung; it is now
+  0.37×. Honest qualification, because the measurement outranks the reasoning
+  that predicted it: on the **default** path the spread filter removes the
+  records before the lookup, so `already` holds 120 rather than 1,428 and the
+  two are indistinguishable (4.71 / 4.95 s vs 4.81 / 5.03 s). The set matters
+  under `--include-spreads` and on the wide `ohlcv-1s` windows; the filter is
+  what fixes the common case. `BTreeSet` rather than `HashSet` for §2.2.
+  **Executed on the live archive.** The two records that previously refused at
+  the very start now transcode: `RTY.FUT ohlcv-1m` exit 0, 1.48 s, 76.6 MB peak
+  working set, 38 partitions, 3,334,405 bars, 209,753 spread records across 61
+  spread instruments excluded; `GC.FUT ohlcv-1m` (which refused at record #0)
+  exit 0, 7.19 s, 278.2 MB peak, 120 partitions, 10,275,830 bars, 5,255,371
+  spread records across 1,308 spread instruments excluded. Note 1,308 spreads
+  *traded* against 12,661 *mapped* — D-0036's point restated. Determinism
+  unchanged: demo `b55747513df596ed`, combo `0e1ab52d474b862b`, walk-forward
+  `711e1cb34a2ee2b4`. One test's semantics changed on purpose:
+  `a_nonpositive_price_is_refused` is replaced by
+  `a_zero_or_negative_price_is_written_not_refused` — that assertion was the
+  bug, written down.
+  **Deliberately not done, and left to arbitration.** The ruling asked for the
+  count "in the inventory of the curated set" as well as in the report. There is
+  no such artifact: the curated set's only self-description is each partition's
+  Parquet footer, and a spread count belongs to the *source window*, not to a
+  file whose rows are one outright's. D-0036 defines that footer as "everything
+  about a partition that is fixed before the first row is written", and this
+  number is only known after the last. Putting it there would also mean either a
+  schema bump (hard-refusing every partition already on disk) or an
+  absent-key-tolerated read. So the count lives in the transcode report, and the
+  durable record of the choice is the flag's default plus this entry. One
+  optional metadata key away if that is judged wrong.
