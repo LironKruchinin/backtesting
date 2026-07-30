@@ -2083,31 +2083,30 @@ mod blind_detector_controls {
 
     // BLIND DETECTOR 2 — gaps inside sessions.
     //
-    // Two independent reasons it was silent, and the first is the one that
-    // applied to the live archive:
+    // Two independent reasons it was silent, and D-0077 removed the first:
     //
-    // 1. **No bundled calendar claims GC.** `Calendar::for_instrument` answers
-    //    only for the equity-index roots, so `qa` has no definition of
-    //    "expected" for gold at all: coverage, gaps and out-of-session bars are
-    //    every one of them skipped, and the report says `calendar none`. That is
+    // 1. **No bundled calendar claimed GC.** `Calendar::for_instrument` answered
+    //    only for the equity-index roots, so `qa` had no definition of
+    //    "expected" for gold at all: coverage, gaps and out-of-session bars were
+    //    every one of them skipped, and the report said `calendar none`. That is
     //    the run in the bug report, and it printed "gaps inside sessions none"
-    //    because it never looked.
-    // 2. **The hole falls between sessions.** Even given a calendar, the check
-    //    is defined as missing bars *inside* a session; a ten-year absence is
-    //    almost entirely made of sessions that are wholly absent, which is a
-    //    coverage number, not a gap.
+    //    because it never looked. `cme_globex_metals` now governs GC, so this
+    //    reason is gone.
+    // 2. **The hole falls between sessions.** The check is defined as missing
+    //    bars *inside* a session; a ten-year absence is almost entirely made of
+    //    sessions that are wholly absent, which is a coverage number.
+    //
+    // So the test has two halves. Called the way the bug report called it — no
+    // calendar — the detector still reports nothing, which is the historical
+    // fact and the reason the partition key had to be the fix. Called with the
+    // calendar gold now has, coverage collapses and the missing-bar count runs
+    // to millions. That is a **side effect of building a metals session table**,
+    // not the "strengthening" CLAUDE.md §9 refuses: the check was not touched,
+    // and a `qa` run nobody schedules still catches nothing.
     #[test]
     fn the_gap_inside_sessions_check_passes_on_the_merged_partition() {
         let dir = TempDir::new();
         plant_merged(&dir, "GCZ4", TimeFrame::M1);
-
-        assert!(
-            Calendar::for_instrument(&InstrumentId::new("GCZ4"))
-                .expect("lookup")
-                .is_none(),
-            "no bundled calendar claims gold — this is reason (1), and it is why \
-             the reported run could not have found anything"
-        );
 
         let report = qa::run(
             dir.path(),
@@ -2134,6 +2133,46 @@ mod blind_detector_controls {
             report.last_ts_open.expect("bars").0 - report.first_ts_open.expect("bars").0,
             (NOV_2024 - NOV_2014) * DAY_NS + 59 * MIN_NS
         );
+    }
+
+    // The half that D-0077 made possible: reason (1) is gone, and the same
+    // planted merge is now loud.
+    //
+    // Ten years of gold sessions against 120 bars. The floor asserted below is
+    // hand-derived and deliberately far under the true figure: 3,654 days is
+    // more than 2,600 weekdays, each a session of at least 12 hours after
+    // holidays and early closes, so at least 2,600 x 720 = 1,872,000 one-minute
+    // intervals are expected and all but 120 of them are missing.
+    #[test]
+    fn the_metals_calendar_makes_the_same_merged_partition_loud() {
+        let dir = TempDir::new();
+        plant_merged(&dir, "GCZ4", TimeFrame::M1);
+
+        let calendar = Calendar::for_instrument(&InstrumentId::new("GCZ4"))
+            .expect("lookup")
+            .expect("cme_globex_metals governs GC as of D-0077");
+        assert_eq!(calendar.id(), "cme_globex_metals");
+
+        let report = qa::run(
+            dir.path(),
+            &InstrumentId::new("GCZ4"),
+            TimeFrame::M1,
+            None,
+            Some(&calendar),
+            &qa::QaOptions::default(),
+        )
+        .expect("qa runs");
+
+        assert!(
+            report.missing_bars > 1_872_000,
+            "ten years of absent sessions, not a gap: {} missing",
+            report.missing_bars
+        );
+        assert!(
+            report.coverage_pct().expect("a calendar gives coverage") < 0.1,
+            "coverage should be a rounding error, not a percentage"
+        );
+        assert!(!report.is_clean(), "exit 4 is the right answer here");
     }
 
     // The positive half: the same two contracts under *resolved* keys are two

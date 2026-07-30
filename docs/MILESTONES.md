@@ -86,9 +86,21 @@ deadline-driven (see `crucible-data::ingest` module docs).
 - [x] Session calendar v1 (2026-07-28): Globex sessions, holiday/early-close
       rules with sources cited, `bars_per_year` — a compiled-in TOML table,
       `chrono`/`chrono-tz` confined here, and `backtest` annualizing from it
-      instead of from the sample (D-0039). Covers the current session era
-      only (`valid_from = 2015-09-21`); the two earlier eras are documented
-      and warned about, not modelled
+      instead of from the sample (D-0039)
+      - [x] Validated per era against 16 years of bars, and extended to the four
+            products that had none (2026-07-30, D-0077). A calendar now carries
+            session **eras**: equity index gains era 2 (close 16:15) and era 3a
+            (close 16:00 **with** the 15:15–15:30 CT halt, which D-0040 had
+            deleted from a January-2024 sample and which the archive shows real
+            on 2,018 dates and gone from 2021-06-28 exactly). `valid_from` moves
+            2015-09-21 → 2012-11-19, so unmodelled history drops 5.3 y → 2.4 y;
+            era 1 stays documented rather than modelled and `docs/SESSION_ERAS.md`
+            §1.1 says why. `cme_globex_energy`, `cme_globex_metals`,
+            `cme_globex_fx` and `cme_globex_rates` join the bundle, derived from
+            the archive and cross-checked against CME — MLK 2022 alone gives four
+            different closes across them. D-0059's deferred `weekday_before`
+            defect is closed. **Two genuine archive holes found and reported, not
+            re-pulled**: GC 2012-09-12 and ZN 2014-10-03, one session each
 - [x] Continuous contracts v1 (2026-07-28): versioned volume-crossover roll
       table under `curated/rolls/`, back-adjustment applied at load and never
       stored, and `AdjustedPrice` as a distinct type so a back-adjusted level
