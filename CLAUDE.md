@@ -545,6 +545,51 @@ reference; supersede the decision if you disagree — don't hotfix.
   count is zero and why.** No config can declare a bracket in this build, so
   "no number printed" and "no ambiguous bars" would look identical to a reader
   otherwise — and only one of them means the returns are safe to quote.
+- **The engine takes trading-day keys as an `&[i64]` argument rather than
+  asking a calendar**, and `DayRecord.trading_day_key` is a bare `i64` rather
+  than a date type (D-0071). `crucible-engine` may not depend on
+  `crucible-data`, and neither may `crucible-funnel`, so `crucible-cli`
+  computes `days_from_civil(Calendar::trading_day(avail_ts))` **once** and both
+  consumers read the same slice — the D-0015 / D-0060 / `FoldPlan` device again.
+  Two independent attributions of "which day" is how a daily-loss-limit breach
+  lands on a different date in two reports. Adding a `Calendar` argument, a
+  slicer trait, or a day derived from the timestamp inside the engine
+  reintroduces exactly that.
+- **A captured trading day opens at the PREVIOUS day's close, not at its own
+  first mark** (D-0071), so a day whose first print gaps down reports that gap
+  in `trough_from_open_nano_usd`. Anchoring on the first mark makes the
+  overnight move invisible and breaks the recursion that lets a whole-day
+  bootstrap answer an intraday question.
+- **MAE/MFE are sampled at bar closes and are therefore lower bounds** on what
+  a position actually endured, like every other number on a mark grid
+  (`ACCOUNT_EVAL_SPEC.md` §3.3.2). A round-trip can report `mae_nano_usd = 0`
+  while closing at a loss: no *mark* caught it down. They are also measured on
+  realized-plus-unrealized PnL of the episode, so a scale-out's banked profit
+  counts — measuring unrealized alone reports a trade that was $500 up as
+  never having been up at all.
+- **The intraday high-water is an O(1) reducer, not a retained series**, so
+  nothing downstream can ask what the account's equity was at bar 4,000,000
+  (D-0071). A 16-year 1-second replay is ~334 M marks: a second per-bar series
+  costs another 4.98 GiB beside the per-bar equity vector that already costs
+  that much. The breach question is a running maximum and a running
+  maximum-drop, and neither needs history — `ACCOUNT_EVAL_SPEC.md` §3.3.1
+  proves the retained per-day summary decides it exactly. That is why the
+  artifact is 56 bytes a *session* rather than 16 bytes a *bar*, and why
+  `the_high_water_reducer_is_sixteen_bytes` and `a_day_record_is_fifty_six_bytes`
+  are pinned: growing either should be a failing test, not a memory regression
+  nobody measures. Turning `HighWaterState` into a `Vec` "to keep the option
+  open" is the change those two tests exist to refuse.
+- **`approximate_day_count` is 0 or 1, never more, and the day it names is
+  flagged even when the crossing plausibly happened at that day's close**
+  (D-0071). A running peak is non-decreasing, so it crosses a ratchet lock's
+  level exactly once per path; and a day's `peak_from_open` is by definition at
+  least its `close_pnl`, so a summary can never certify that the peak first
+  reached the level *at* the final mark rather than earlier inside the day.
+  Certifying it anyway resolves an ambiguity in the flattering direction, which
+  is the one thing the whole spec is against. An account whose ratchet is
+  `highest_daily_closing_equity` advances only at a close, so it has no
+  approximate day at all — a zero there is the right answer, not a detector
+  that failed to fire.
 
 ---
 

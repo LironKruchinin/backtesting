@@ -39,6 +39,7 @@ use crucible_core::prelude::*;
 use crate::bracket::{ActiveBracket, Outcome, StopFirstIntrabar};
 use crate::metrics::Summary;
 use crate::portfolio::{ClosedTrade, FeeEvent, Portfolio};
+use crate::series::{AccountCapture, CaptureError};
 
 #[derive(Debug, Clone)]
 pub struct BacktestParams {
@@ -85,6 +86,10 @@ pub struct BacktestResult {
 pub enum EngineError {
     /// The feed emitted events with decreasing availability time.
     OutOfOrderFeed { prev: Ts, next: Ts },
+    /// The account-evaluation capture could not be fed. Only reachable from
+    /// [`run_capturing`], and always a caller wiring bug: the trading-day keys
+    /// did not describe the series being replayed.
+    Capture(CaptureError),
 }
 
 impl std::fmt::Display for EngineError {
@@ -94,20 +99,88 @@ impl std::fmt::Display for EngineError {
                 f,
                 "feed violated ordering contract: {next} after {prev} (events must be nondecreasing in avail_ts)"
             ),
+            EngineError::Capture(e) => write!(f, "{e}"),
         }
     }
 }
 
-impl std::error::Error for EngineError {}
+impl std::error::Error for EngineError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            EngineError::OutOfOrderFeed { .. } => None,
+            EngineError::Capture(e) => Some(e),
+        }
+    }
+}
+
+impl From<CaptureError> for EngineError {
+    fn from(e: CaptureError) -> EngineError {
+        EngineError::Capture(e)
+    }
+}
 
 /// Run one backtest to completion. Deterministic: identical inputs produce a
 /// bit-identical `BacktestResult`.
+///
+/// # Errors
+/// [`EngineError::OutOfOrderFeed`] if the feed violates its ordering contract.
 pub fn run<F, S, M>(
     feed: &mut F,
     strategy: &mut S,
     fill_model: &mut M,
     spec: &ContractSpec,
     params: &BacktestParams,
+) -> Result<BacktestResult, EngineError>
+where
+    F: Feed,
+    S: Strategy,
+    M: FillModel,
+{
+    run_inner(feed, strategy, fill_model, spec, params, None)
+}
+
+/// The same run, with the account-evaluation series captured as it happens
+/// (`docs/ACCOUNT_EVAL_SPEC.md` §3, D-0071).
+///
+/// Capture is **additive observation**: it reads the marks the loop already
+/// produces and changes no fill, no order and no equity point. A run through
+/// this function and a run through [`run`] produce identical
+/// [`BacktestResult`]s, which is asserted by
+/// `tests/account_series.rs::capturing_changes_no_number_in_the_result`.
+///
+/// It is a separate entry point rather than a flag because the capture needs
+/// something [`run`]'s arguments cannot supply: one trading-day key per bar,
+/// which only a caller holding `crucible-data::calendar` can compute. See the
+/// module docs of [`crate::series`] for why that is data rather than a
+/// dependency.
+///
+/// # Errors
+/// [`EngineError::OutOfOrderFeed`] if the feed violates its ordering contract,
+/// or [`EngineError::Capture`] if the day keys do not describe the series the
+/// feed emits.
+pub fn run_capturing<F, S, M>(
+    feed: &mut F,
+    strategy: &mut S,
+    fill_model: &mut M,
+    spec: &ContractSpec,
+    params: &BacktestParams,
+    capture: &mut AccountCapture<'_>,
+) -> Result<BacktestResult, EngineError>
+where
+    F: Feed,
+    S: Strategy,
+    M: FillModel,
+{
+    run_inner(feed, strategy, fill_model, spec, params, Some(capture))
+}
+
+fn run_inner<F, S, M>(
+    feed: &mut F,
+    strategy: &mut S,
+    fill_model: &mut M,
+    spec: &ContractSpec,
+    params: &BacktestParams,
+    mut capture: Option<&mut AccountCapture<'_>>,
 ) -> Result<BacktestResult, EngineError>
 where
     F: Feed,
@@ -195,9 +268,17 @@ where
             }
         }
 
-        // 2. Mark to this bar's close and record equity.
+        // 2. Mark to this bar's close and record equity. The account-eval
+        //    capture folds the SAME number the equity curve just took, at the
+        //    same instant — spec §3.2/§3.3 name this line as the sampling
+        //    point, and a second pass over the bars afterwards would be the
+        //    reconstruction the spec forbids.
         portfolio.mark(bar.close);
-        equity.push((ts, portfolio.equity_nano_usd()));
+        let equity_nano_usd = portfolio.equity_nano_usd();
+        if let Some(capture) = capture.as_deref_mut() {
+            capture.observe(equity.len(), equity_nano_usd)?;
+        }
+        equity.push((ts, equity_nano_usd));
 
         // 3. Strategy decides.
         let view = portfolio.view();
