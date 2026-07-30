@@ -2327,3 +2327,58 @@ propose a superseding entry — don't silently diverge.
   both say the refusal lifts in the commit where S0 can actually run and never
   earlier; lifting it beside a module with no caller would be exactly the
   "declared stage, silently skipped" failure D-0075 exists to refuse.
+- **D-0083** (2026-07-30) — **A hash gate is not a trial: `--hash-only` runs
+  against an ephemeral registry, and rows already written by one are withdrawn
+  by an appended `void` record rather than deleted.** Ruled a bug, not a §9
+  entry.
+  **What was wrong.** `crucible funnel --hash-only` opened the on-disk registry
+  before checking the flag, so every determinism gate appended 30 lines — 24
+  `run_finished` and 6 `verdict` — and the first one also claimed 24 `run` rows
+  and charged 24 trials. Measured, not inferred: `sha256` of
+  `results/registry.jsonl` before a gate and after it differ, and the store grew
+  174 → 204 lines on a single `--hash-only` invocation.
+  **Why it is a bug and not a decision.** A trial count is the denominator of
+  every multiple-testing correction this project exists to compute — deflated
+  Sharpe reads it, and §7.7 forbids reading it from anywhere else. A gate that
+  charges trials makes the honesty machinery *expensive to test*, which is
+  precisely the wrong incentive to build into it: the cheapest way to keep a
+  trial count low would become "run the gates less". §9's neighbouring entry
+  ("re-running a funnel appends a second `run_finished`") does **not** cover
+  this: that entry is about a run that genuinely ran again as research, and a
+  hash gate is a question about the *code*.
+  **The fix, and why the ephemeral registry reads nothing either.**
+  `Registry::ephemeral` honours all five contract rules in memory and never
+  opens the file. It deliberately does not *read* the existing store, which is
+  the less obvious half: a gate whose answer depended on how many times it had
+  been run before would not be a determinism gate. Both halves are pinned —
+  `a_hash_only_run_leaves_the_registry_byte_identical` runs a real funnel first
+  so there is a populated store to disturb, then asserts three consecutive gates
+  leave the bytes identical; and
+  `the_hash_gate_answers_the_same_with_and_without_a_populated_registry` asserts
+  the cold and warm answers match and that the gate does not even create the
+  file.
+  **The correction is appended, never erased.** The store is append-only
+  (D-0074), and a row written in error is a fact — it happened. So a new line
+  kind `void` names a prior row by its `run_id`, carries a mandatory reason, and
+  the reader excludes voided runs from `Registry::trials_for` **by
+  construction**: a trial counts while at least one run charged to it is still
+  standing, so withdrawing one fold of a combo does not withdraw the combo
+  (rule 3 preserved, and pinned by
+  `voiding_one_fold_does_not_withdraw_a_combo_another_fold_still_holds`).
+  Deleting the rows instead would make the file claim the mistake never
+  occurred, which is the same class of dishonesty as editing a golden value to
+  get green.
+  **A verdict inherits voidedness from its trial**, because a verdict has no
+  `run_id` — it is decided over a combo. `Registry::verdicts` still returns
+  everything (the log is the record of what happened) and
+  `Registry::verdicts_standing` is what statistics read. Two methods rather than
+  a filter inside one, so "what does the log say" and "what counts" stay
+  separately askable; collapsing them would make the correction invisible, which
+  is the failure voiding exists to avoid.
+  **Applied to this archive.** Every one of `results/registry.jsonl`'s 204 lines
+  was gate contamination — the directory was created by the first gate of the
+  session and no research run had ever written to it — so 24 void records were
+  appended, one per claimed run. Verified through the real reader: the store
+  parses, 24 runs read as voided, and `trials_for("null-harness-sma-cross")`
+  reads **0**. `results/` is gitignored, so this is an archive action and not a
+  commit.

@@ -389,3 +389,89 @@ fn a_run_with_no_resolvable_git_sha_is_refused() {
         assert!(!lines.contains(r#""git_sha":"unknown""#), "{lines}");
     }
 }
+
+/// A determinism gate is a question about the code, not a piece of research
+/// (D-0083). Running one must leave the research memory **byte-identical**.
+///
+/// This is a two-sided control: a real run is made first, so there is a
+/// non-empty registry for the gate to disturb. A test that asserted only
+/// "no file appeared" would pass against a registry that was never written
+/// at all, which is not the property being defended.
+#[test]
+fn a_hash_only_run_leaves_the_registry_byte_identical() {
+    let dir = TempDir::new();
+    let config = dir.config(&template(CRITERIA));
+    let out_dir = dir.out();
+    let args = [
+        "funnel",
+        "--config",
+        config.to_str().expect("utf-8 path"),
+        "--out",
+        out_dir.to_str().expect("utf-8 path"),
+    ];
+
+    // A real run first: the gate must be harmless against a POPULATED store.
+    let first = run(&args);
+    assert!(matches!(code(&first), 0 | 5), "{}", stderr(&first));
+    let registry = out_dir.join("registry.jsonl");
+    let before = std::fs::read(&registry).expect("a real run writes a registry");
+    assert!(!before.is_empty(), "the control needs something to disturb");
+
+    // Now three hash gates in a row.
+    let mut hash_args = args.to_vec();
+    hash_args.push("--hash-only");
+    let mut hashes = Vec::new();
+    for _ in 0..3 {
+        let out = run(&hash_args);
+        assert_eq!(code(&out), 0, "{}", stderr(&out));
+        hashes.push(stdout(&out).trim().to_owned());
+        let after = std::fs::read(&registry).expect("still there");
+        assert_eq!(
+            before, after,
+            "a --hash-only run wrote to the registry; a gate that costs trials \
+             makes the honesty machinery expensive to test (D-0083)"
+        );
+    }
+
+    // And the gate still answers, identically, every time.
+    assert_eq!(hashes[0].len(), 16, "{}", hashes[0]);
+    assert!(hashes.iter().all(|h| *h == hashes[0]), "{hashes:?}");
+}
+
+/// The gate's answer must not depend on how many times it has been run, which
+/// is why the ephemeral registry reads nothing rather than merely writing
+/// nothing (D-0083).
+#[test]
+fn the_hash_gate_answers_the_same_with_and_without_a_populated_registry() {
+    let dir = TempDir::new();
+    let config = dir.config(&template(CRITERIA));
+    let out_dir = dir.out();
+    let args = [
+        "funnel",
+        "--config",
+        config.to_str().expect("utf-8 path"),
+        "--out",
+        out_dir.to_str().expect("utf-8 path"),
+    ];
+    let mut hash_args = args.to_vec();
+    hash_args.push("--hash-only");
+
+    // Gate against an EMPTY out-dir...
+    let cold = run(&hash_args);
+    assert_eq!(code(&cold), 0, "{}", stderr(&cold));
+    assert!(
+        !out_dir.join("registry.jsonl").exists(),
+        "the gate must not even create the file"
+    );
+
+    // ...then populate the store with a real run, and gate again.
+    let real = run(&args);
+    assert!(matches!(code(&real), 0 | 5), "{}", stderr(&real));
+    let warm = run(&hash_args);
+
+    assert_eq!(
+        stdout(&cold).trim(),
+        stdout(&warm).trim(),
+        "the determinism hash moved because the registry had rows in it"
+    );
+}

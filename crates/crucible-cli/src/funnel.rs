@@ -173,11 +173,21 @@ pub fn run_cmd(args: &FunnelArgs) -> i32 {
         }
     };
 
-    let mut registry = match Registry::open(&args.out.join("registry.jsonl")) {
-        Ok(registry) => registry,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return EXIT_USAGE;
+    // A determinism gate is a question about the CODE, not a piece of research:
+    // it must charge no trial and leave no row behind (D-0083). The ephemeral
+    // registry honours insert-before-run in memory and never opens the file, so
+    // `--hash-only` cannot contaminate the research memory it is meant to be
+    // cheap to run against.
+    let registry_path = args.out.join("registry.jsonl");
+    let mut registry = if args.hash_only {
+        Registry::ephemeral(&registry_path)
+    } else {
+        match Registry::open(&registry_path) {
+            Ok(registry) => registry,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return EXIT_USAGE;
+            }
         }
     };
 

@@ -24,6 +24,22 @@
 //! 5. **The graveyard is a query, not a document**: [`Registry::verdicts`]
 //!    replays every kill with its stage, its reasons and its date.
 //!
+//! ## Correction is appended, never erased (D-0083)
+//!
+//! A row written in error is a fact: it happened. So the correction is a
+//! `void` line naming the offending `run_id` and a reason, and
+//! [`Registry::trials_for`] excludes voided runs **by construction** — a trial
+//! counts while at least one run charged to it still stands. Deleting the row
+//! instead would make the file claim the mistake never occurred, which is the
+//! same class of dishonesty as editing a golden value to get green.
+//!
+//! A trial count is a denominator: it feeds deflated Sharpe and every other
+//! multiple-testing correction. Wrong in the *large* direction it merely
+//! costs power; wrong in the *small* direction it flatters every result that
+//! reads it. That asymmetry is why an unknown line kind refuses rather than
+//! skips, and it is the same reason voiding had to be a first-class record
+//! rather than a hand-edit.
+//!
 //! ## What a trial is, precisely
 //!
 //! A **trial** is a distinct `(config_hash, account_id, combo_index)` — one
@@ -96,6 +112,13 @@ pub struct RunKey {
     pub seed: u64,
 }
 
+/// What a run is charged to: `(config_hash, account_id, combo_index)`.
+///
+/// Named because four indices key on it and clippy is right that the bare
+/// tuple had stopped being readable. Folds and seeds are deliberately absent —
+/// that is the whole of rule 3.
+type TrialKey = (String, Option<String>, usize);
+
 impl RunKey {
     /// The stable identity string a [`RunKey`] hashes to.
     fn canonical(&self) -> String {
@@ -119,7 +142,7 @@ impl RunKey {
     }
 
     /// The trial this run is charged to: identity minus the fold and the seed.
-    fn trial(&self) -> (String, Option<String>, usize) {
+    fn trial(&self) -> TrialKey {
         (
             self.config_hash.clone(),
             self.account_id.clone(),
@@ -232,6 +255,24 @@ enum Line {
     },
     /// A verdict over a combo.
     Verdict(Box<VerdictRow>),
+    /// A prior run, withdrawn from the record (D-0083).
+    ///
+    /// The store is append-only, so a row written in error is corrected by
+    /// appending its withdrawal rather than by deleting it: what happened is
+    /// that a row was written *and then* found not to be a trial, and a file
+    /// that erased the first half would be claiming the mistake never occurred.
+    /// A void names its target by [`RunKey::run_id`] — the same identity the
+    /// row was inserted under — so the correction is checkable against the
+    /// thing it corrects.
+    Void {
+        /// The `run_id` being withdrawn.
+        run_id: String,
+        /// Why, in words a reader five years from now can audit. Required: a
+        /// void with no reason is indistinguishable from a deletion.
+        reason: String,
+        /// Wall clock, supplied by the caller.
+        voided_at: String,
+    },
 }
 
 /// What [`Registry::insert_running`] did.
@@ -321,14 +362,24 @@ impl std::error::Error for RegistryError {
 #[derive(Debug)]
 pub struct Registry {
     path: PathBuf,
-    sink: File,
+    /// `None` for an ephemeral registry, which honours the contract in memory
+    /// and never touches the disk ([`Registry::ephemeral`]).
+    sink: Option<File>,
     /// Every run seen, and how it ended.
     runs: BTreeMap<String, RunStatus>,
     /// Distinct trials charged, per family.
     trials: BTreeMap<String, usize>,
     /// Which trials have already been charged, so a resumed fold does not
     /// charge its combo twice.
-    charged: BTreeMap<(String, Option<String>, usize), String>,
+    charged: BTreeMap<TrialKey, String>,
+    /// Every run_id ever charged to each trial, so withdrawing one can tell
+    /// whether the trial still has a surviving run behind it (D-0083).
+    trial_members: BTreeMap<TrialKey, Vec<String>>,
+    /// Which trial and family each run was charged to, so a void can find them
+    /// from the `run_id` alone.
+    run_trial: BTreeMap<String, (TrialKey, String)>,
+    /// Runs withdrawn from the record.
+    voided: std::collections::BTreeSet<String>,
     verdicts: Vec<VerdictRow>,
 }
 
@@ -359,14 +410,19 @@ impl Registry {
 
         let mut registry = Registry {
             path: path.to_owned(),
-            sink: OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .map_err(io)?,
+            sink: Some(
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .map_err(io)?,
+            ),
             runs: BTreeMap::new(),
             trials: BTreeMap::new(),
             charged: BTreeMap::new(),
+            trial_members: BTreeMap::new(),
+            run_trial: BTreeMap::new(),
+            voided: std::collections::BTreeSet::new(),
             verdicts: Vec::new(),
         };
 
@@ -386,6 +442,41 @@ impl Registry {
         Ok(registry)
     }
 
+    /// An **ephemeral** registry: the contract of this module honoured entirely
+    /// in memory, reading nothing and writing nothing (D-0083).
+    ///
+    /// This exists for the determinism gates. `--hash-only` asks "what number
+    /// does this config produce", which is a question about the *code*, not a
+    /// piece of research — so it must not charge a trial, and it must not
+    /// deposit rows in the research memory that a later deflated Sharpe would
+    /// divide by. A gate that costs trials makes the honesty machinery expensive
+    /// to test, which is the wrong incentive to build into it.
+    ///
+    /// It deliberately does **not** read the existing store either. A gate whose
+    /// output depended on how many times it had been run before would not be a
+    /// determinism gate; starting from an empty index makes the hash a function
+    /// of the config and the data alone.
+    #[must_use]
+    pub fn ephemeral(path: &Path) -> Registry {
+        Registry {
+            path: path.to_owned(),
+            sink: None,
+            runs: BTreeMap::new(),
+            trials: BTreeMap::new(),
+            charged: BTreeMap::new(),
+            trial_members: BTreeMap::new(),
+            run_trial: BTreeMap::new(),
+            voided: std::collections::BTreeSet::new(),
+            verdicts: Vec::new(),
+        }
+    }
+
+    /// Whether this registry only exists in memory.
+    #[must_use]
+    pub const fn is_ephemeral(&self) -> bool {
+        self.sink.is_none()
+    }
+
     /// Folds one record into the index. Shared by [`Registry::open`] and every
     /// append, so a fresh reader and a live writer cannot disagree about what
     /// the file means.
@@ -393,13 +484,20 @@ impl Registry {
         match record {
             Line::Run(row) => {
                 let id = row.key.run_id();
-                if self.runs.insert(id.clone(), RunStatus::Running).is_none()
-                    && self.charged.insert(row.key.trial(), id).is_none()
-                {
-                    *self
-                        .trials
-                        .entry(row.hypothesis_family.clone())
-                        .or_insert(0) += 1;
+                let trial = row.key.trial();
+                if self.runs.insert(id.clone(), RunStatus::Running).is_none() {
+                    self.run_trial
+                        .insert(id.clone(), (trial.clone(), row.hypothesis_family.clone()));
+                    self.trial_members
+                        .entry(trial.clone())
+                        .or_default()
+                        .push(id.clone());
+                    if self.charged.insert(trial, id).is_none() {
+                        *self
+                            .trials
+                            .entry(row.hypothesis_family.clone())
+                            .or_insert(0) += 1;
+                    }
                 }
             }
             Line::RunFinished { run_id, status, .. } => {
@@ -410,22 +508,47 @@ impl Registry {
                 *entry = status;
             }
             Line::Verdict(row) => self.verdicts.push(*row),
+            Line::Void { run_id, .. } => {
+                if !self.runs.contains_key(&run_id) {
+                    return Err(RegistryError::UnknownRun { run_id });
+                }
+                if self.voided.insert(run_id.clone())
+                    && let Some((trial, family)) = self.run_trial.get(&run_id).cloned()
+                {
+                    // The trial survives while ANY run charged to it is still
+                    // standing: folds of one combo are one trial (rule 3), so
+                    // withdrawing one of them must not withdraw the combo.
+                    let survives = self
+                        .trial_members
+                        .get(&trial)
+                        .is_some_and(|m| m.iter().any(|r| !self.voided.contains(r)));
+                    if !survives && let Some(n) = self.trials.get_mut(&family) {
+                        *n = n.saturating_sub(1);
+                    }
+                }
+            }
         }
         Ok(())
     }
 
     fn append(&mut self, record: &Line) -> Result<(), RegistryError> {
+        let Some(sink) = self.sink.as_mut() else {
+            // Ephemeral: the contract is honoured in memory and the disk is
+            // never touched. See [`Registry::ephemeral`].
+            return Ok(());
+        };
         let mut line = serde_json::to_string(record).map_err(|e| RegistryError::Io {
             path: self.path.clone(),
             source: std::io::Error::other(e),
         })?;
         line.push('\n');
+        let path = self.path.clone();
         let io = |source| RegistryError::Io {
-            path: self.path.clone(),
+            path: path.clone(),
             source,
         };
-        self.sink.write_all(line.as_bytes()).map_err(io)?;
-        self.sink.flush().map_err(io)
+        sink.write_all(line.as_bytes()).map_err(io)?;
+        sink.flush().map_err(io)
     }
 
     /// Where the store lives.
@@ -493,8 +616,58 @@ impl Registry {
         self.apply(record)
     }
 
+    /// Withdraws a previously-recorded run from the record (D-0083).
+    ///
+    /// Appends a `void` line rather than editing anything: the store is
+    /// append-only, and a row written in error is a fact about what happened.
+    /// After this, the run is excluded from [`Registry::trials_for`] — unless
+    /// another run charged to the same trial is still standing, because folds
+    /// of one combo are one trial (rule 3).
+    ///
+    /// # Errors
+    /// [`RegistryError::UnknownRun`] if no such run was ever inserted — a void
+    /// that names nothing would be an assertion about a row that does not
+    /// exist. [`RegistryError::Io`] if the line cannot be appended.
+    pub fn void(
+        &mut self,
+        run_id: &str,
+        reason: &str,
+        voided_at: &str,
+    ) -> Result<(), RegistryError> {
+        if !self.runs.contains_key(run_id) {
+            return Err(RegistryError::UnknownRun {
+                run_id: run_id.to_owned(),
+            });
+        }
+        let record = Line::Void {
+            run_id: run_id.to_owned(),
+            reason: reason.to_owned(),
+            voided_at: voided_at.to_owned(),
+        };
+        self.append(&record)?;
+        self.apply(record)
+    }
+
+    /// Whether this run has been withdrawn from the record.
+    #[must_use]
+    pub fn is_voided(&self, run_id: &str) -> bool {
+        self.voided.contains(run_id)
+    }
+
+    /// Every withdrawn run, in id order. A query over the corrections, so a
+    /// reader can audit what was withdrawn as easily as what was recorded.
+    #[must_use]
+    pub fn voided(&self) -> Vec<&str> {
+        self.voided.iter().map(String::as_str).collect()
+    }
+
     /// How many distinct trials this family has been charged — the number a
     /// deflated Sharpe divides by, read from here and never from memory.
+    ///
+    /// **Voided runs are excluded by construction** (D-0083): a trial counts
+    /// while at least one run charged to it is still standing. That is what
+    /// makes the correction real rather than cosmetic — the number that feeds
+    /// the multiple-testing correction is the one that moves.
     #[must_use]
     pub fn trials_for(&self, family: &str) -> usize {
         self.trials.get(family).copied().unwrap_or(0)
@@ -520,9 +693,56 @@ impl Registry {
     /// The strategy graveyard: every verdict ever recorded, in the order it
     /// was decided. A query, not a document — month three of research must not
     /// re-litigate month one.
+    ///
+    /// This returns **everything**, including verdicts whose runs were later
+    /// voided, because the log is the record of what happened. Statistics want
+    /// [`Registry::verdicts_standing`].
     #[must_use]
     pub fn verdicts(&self) -> &[VerdictRow] {
         &self.verdicts
+    }
+
+    /// Whether every run charged to this trial has been withdrawn (D-0083).
+    ///
+    /// A verdict has no `run_id` of its own — it is decided over a *combo*, not
+    /// a run — so its voided-ness is inherited from the trial it names, which is
+    /// exactly the `(config_hash, account_id, combo_index)` triple it carries.
+    #[must_use]
+    pub fn is_trial_voided(
+        &self,
+        config_hash: &str,
+        account_id: Option<&str>,
+        combo_index: usize,
+    ) -> bool {
+        let trial = (
+            config_hash.to_owned(),
+            account_id.map(str::to_owned),
+            combo_index,
+        );
+        match self.trial_members.get(&trial) {
+            // A trial nobody ever ran is not "voided", it is absent.
+            None => false,
+            Some(members) => members.iter().all(|r| self.voided.contains(r)),
+        }
+    }
+
+    /// The graveyard as **statistics** should read it: verdicts whose trials
+    /// still stand (D-0083).
+    ///
+    /// The distinction matters because a verdict is evidence about an idea, and
+    /// a verdict produced by a determinism gate is evidence about nothing. It is
+    /// a separate method rather than a filter inside [`Registry::verdicts`] so
+    /// that "what does the log say" and "what counts" stay askable separately —
+    /// collapsing them would make the correction invisible, which is the failure
+    /// voiding exists to avoid.
+    #[must_use]
+    pub fn verdicts_standing(&self) -> Vec<&VerdictRow> {
+        self.verdicts
+            .iter()
+            .filter(|v| {
+                !self.is_trial_voided(&v.config_hash, v.account_id.as_deref(), v.combo_index)
+            })
+            .collect()
     }
 }
 
@@ -560,6 +780,146 @@ mod tests {
         let path = dir.join(format!("{name}.jsonl"));
         let _ = std::fs::remove_file(&path);
         path
+    }
+
+    /// Rule 3 with a correction applied: a voided run stops counting as a
+    /// trial (D-0083). The trial count is a DENOMINATOR — wrong small, it
+    /// flatters every result that reads it — so the exclusion has to be real
+    /// rather than cosmetic.
+    #[test]
+    fn a_voided_row_is_excluded_from_the_trial_count() {
+        let path = tmp("void-excludes");
+        let mut r = Registry::open(&path).expect("opens");
+
+        let a = key(0, Some(0), 7);
+        let b = key(1, Some(0), 7);
+        r.insert_running(&row(a.clone(), "fam")).expect("insert a");
+        r.insert_running(&row(b.clone(), "fam")).expect("insert b");
+        assert_eq!(r.trials_for("fam"), 2, "two combos, two trials");
+
+        r.void(
+            &a.run_id(),
+            "written by a determinism gate",
+            "2026-07-30T00:00:00Z",
+        )
+        .expect("void");
+        assert_eq!(r.trials_for("fam"), 1, "the voided combo stops counting");
+        assert!(r.is_voided(&a.run_id()));
+        assert!(!r.is_voided(&b.run_id()));
+
+        // Append-only: the row it corrects is still in the file, and so is the
+        // correction. Nothing was erased.
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert_eq!(text.lines().count(), 3, "2 runs + 1 void, nothing deleted");
+        assert!(text.contains(r#""kind":"void""#), "{text}");
+        assert!(text.contains("written by a determinism gate"), "{text}");
+
+        // And a fresh reader reaches the same count from the file alone —
+        // otherwise the exclusion would live only in this process.
+        let reread = Registry::open(&path).expect("reopens");
+        assert_eq!(reread.trials_for("fam"), 1);
+        assert!(reread.is_voided(&a.run_id()));
+        assert_eq!(reread.voided(), vec![a.run_id().as_str()]);
+    }
+
+    /// A verdict inherits its voided-ness from the trial it names, because it
+    /// has no run_id of its own (D-0083). Two-sided: the log still shows it,
+    /// the statistics view does not.
+    #[test]
+    fn a_voided_trials_verdict_is_still_logged_but_no_longer_counts() {
+        let path = tmp("void-verdict");
+        let mut r = Registry::open(&path).expect("opens");
+        let k = key(0, Some(0), 7);
+        r.insert_running(&row(k.clone(), "fam")).expect("insert");
+        r.record_verdict(&VerdictRow {
+            config_hash: k.config_hash.clone(),
+            account_id: None,
+            combo_index: 0,
+            hypothesis_family: "fam".to_owned(),
+            decided_at: Stage::S1.to_string(),
+            verdict: Verdict::Kill,
+            reasons: vec!["dead cost-free".to_owned()],
+            trials_at_decision: 1,
+            decided_on: "2026-07-30T00:00:00Z".to_owned(),
+        })
+        .expect("verdict");
+
+        assert_eq!(r.verdicts().len(), 1);
+        assert_eq!(r.verdicts_standing().len(), 1, "standing before the void");
+
+        r.void(&k.run_id(), "gate", "2026-07-30T00:00:00Z")
+            .expect("void");
+
+        assert_eq!(r.verdicts().len(), 1, "the log still records what happened");
+        assert!(
+            r.verdicts_standing().is_empty(),
+            "but statistics must not read a gate's verdict as evidence"
+        );
+        assert!(r.is_trial_voided(&k.config_hash, None, 0));
+    }
+
+    /// Folds of one combo are ONE trial (rule 3), so withdrawing one fold must
+    /// not withdraw the combo. The third case that makes the two above agree:
+    /// it says the exclusion keys on the trial, not on the row.
+    #[test]
+    fn voiding_one_fold_does_not_withdraw_a_combo_another_fold_still_holds() {
+        let path = tmp("void-one-fold");
+        let mut r = Registry::open(&path).expect("opens");
+
+        let f0 = key(0, Some(0), 7);
+        let f1 = key(0, Some(1), 7);
+        r.insert_running(&row(f0.clone(), "fam"))
+            .expect("insert f0");
+        r.insert_running(&row(f1.clone(), "fam"))
+            .expect("insert f1");
+        assert_eq!(
+            r.trials_for("fam"),
+            1,
+            "two folds of one combo are one trial"
+        );
+
+        r.void(&f0.run_id(), "gate", "2026-07-30T00:00:00Z")
+            .expect("void f0");
+        assert_eq!(
+            r.trials_for("fam"),
+            1,
+            "fold 1 still stands, so the combo is still a trial"
+        );
+
+        r.void(&f1.run_id(), "gate", "2026-07-30T00:00:00Z")
+            .expect("void f1");
+        assert_eq!(r.trials_for("fam"), 0, "now nothing is left standing");
+    }
+
+    /// A void naming a run that was never inserted is refused. A correction
+    /// that points at nothing is an assertion about a row that does not exist.
+    #[test]
+    fn a_void_for_an_unknown_run_is_refused() {
+        let path = tmp("void-unknown");
+        let mut r = Registry::open(&path).expect("opens");
+        let e = r.void("deadbeefdeadbeef", "gate", "2026-07-30T00:00:00Z");
+        assert!(matches!(e, Err(RegistryError::UnknownRun { .. })), "{e:?}");
+    }
+
+    /// An ephemeral registry honours the contract and never touches the disk.
+    #[test]
+    fn an_ephemeral_registry_writes_no_file_at_all() {
+        let path = tmp("ephemeral");
+        let mut r = Registry::ephemeral(&path);
+        assert!(r.is_ephemeral());
+        let k = key(0, Some(0), 7);
+        assert_eq!(
+            r.insert_running(&row(k.clone(), "fam")).expect("insert"),
+            Inserted::New,
+            "insert-before-run still holds in memory"
+        );
+        r.finish(&k, RunStatus::Done, None, "2026-07-30T00:00:00Z")
+            .expect("finish");
+        assert_eq!(r.trials_for("fam"), 1, "the contract is honoured in memory");
+        assert!(
+            !path.exists(),
+            "an ephemeral registry must not create its file"
+        );
     }
 
     /// Rule 1: the row exists before the run does, and it says `running`.
