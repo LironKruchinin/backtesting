@@ -4,7 +4,7 @@
 1,737 curated files, seven roots (ES, NQ, RTY, CL, GC, 6E, ZN), 2010-06-06 →
 2026-07-28. The instrument is
 `crates/crucible-data/examples/session_profile.rs`; every count below is
-reproducible with the command printed beside it. Decision: D-0077.*
+reproducible with the command printed beside it. Decision: D-0086.*
 
 The governing principle, which is D-0040's and is why that entry exists: **the
 archive is evidence, a spec page is a claim.** Where they disagree the archive
@@ -47,7 +47,7 @@ out of a liquidity fact.
 
 ## 1. The per-era findings table (equity index)
 
-| era | span | open | close | halt | boundary evidence | table before D-0077 |
+| era | span | open | close | halt | boundary evidence | table before D-0086 |
 |---|---|---|---|---|---|---|
 | 1 | 2010-06-06 .. 2012-11-16 | 15:30 CT on D−1 (17:00 for Monday) | 15:15 CT | 16:30–17:00 CT **on D−1** | 16:16–16:30 CT traded through 2012-11-15, then silent for 158 consecutive trading dates. Friday 2012-11-16 closed 15:15; Friday 2012-11-30 closed 16:15 | **wrong** — and still not modelled, see §1.1 |
 | 2 | 2012-11-19 .. 2015-09-18 | 17:00 CT | 16:15 CT | 15:15–15:30 CT | 16:00–16:15 CT traded on all 78 Mon–Fri dates 2015-06-01..2015-09-18 and on none of the 200 from 2015-09-21 | **wrong** (`valid_from` excluded it) → now modelled |
@@ -93,7 +93,7 @@ nor a halt on D−1. Three options were considered:
 | do not model | `valid_from = 2012-11-19`; `qa` and `backtest` warn for any span starting earlier, as they already did |
 
 The third was taken. **2.4 of the archive's 16.1 years are unmodelled, down
-from 5.3 before D-0077.** Extending the template to a list of blocks with day
+from 5.3 before D-0086.** Extending the template to a list of blocks with day
 offsets and a "requires the previous day to be a trading day" flag is the fix
 if era 1 ever matters; it is written down here so that whoever needs it does
 not have to re-derive the shape.
@@ -150,7 +150,7 @@ MLK and Presidents' Day stayed closures a year longer than the other four.
 | New Year 2011-01-01, 2022-01-01 | full session | `sunday_to_monday` |
 
 `EVIDENCED`, twice each, and they differ — which is why the table now writes
-them differently. Before D-0077 Christmas used `sunday_to_monday` and the
+them differently. Before D-0086 Christmas used `sunday_to_monday` and the
 Christmas Eve rule gave 2021-12-24 a 12:15 CT close it did not have.
 
 ### 1.5 The day before Independence Day

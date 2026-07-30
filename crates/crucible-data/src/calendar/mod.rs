@@ -1015,7 +1015,7 @@ impl Calendar {
 
         // A reference span crossing an era boundary averages two different
         // exchanges together and produces a `bars_per_year` describing neither.
-        // D-0039 stated this as a rationale in prose; D-0077 makes it a check,
+        // D-0039 stated this as a rationale in prose; D-0086 makes it a check,
         // because the prose was true when it was written and became false the
         // moment era 3 turned out to be two eras.
         if let Some(crossed) = calendar.eras.iter().find(|era| {

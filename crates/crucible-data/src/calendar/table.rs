@@ -75,7 +75,7 @@ pub(super) struct CalendarSpec {
     /// A single-template calendar is a claim that the exchange has always run
     /// these hours, and for CME equity index that claim was false by 45
     /// minutes a day for three of the sixteen years this archive holds
-    /// (D-0077). Order does not matter; the loader sorts and checks.
+    /// (D-0086). Order does not matter; the loader sorts and checks.
     #[serde(default)]
     pub era: Vec<SessionSpec>,
     /// Span over which `bars_per_year` averages. Constant, so the number is
@@ -252,7 +252,7 @@ pub(super) enum HolidayRule {
         /// This exists because the early close before Independence Day happens
         /// only when 4 July falls Tuesday–Friday, and a rule that could not say
         /// so produced a confident early close on six dates the exchange traded
-        /// in full (D-0059 recorded the defect and could not fix it; D-0077
+        /// in full (D-0059 recorded the defect and could not fix it; D-0086
         /// does). The condition is on the anchor rather than on the result
         /// because that is how the exchange states it: it is about which
         /// weekday the holiday lands on, not which weekday precedes it.
@@ -689,7 +689,7 @@ mod tests {
     // Thursday, so 2024-07-03 qualifies; 2026-07-04 is a Saturday and
     // 2021-07-04 a Sunday, so neither produces a date at all — where the
     // unconditional rule produced 2026-07-03 and 2021-07-02, both of which the
-    // archive shows trading in full (D-0059's recorded defect, D-0077's fix).
+    // archive shows trading in full (D-0059's recorded defect, D-0086's fix).
     #[test]
     fn an_anchor_weekday_condition_suppresses_the_rule_entirely() {
         let rule = HolidayRule::WeekdayBefore {

@@ -160,7 +160,7 @@ fn warn_if_before_valid_from(calendar: &Calendar, first: crucible_core::types::T
 /// both sides of it. It is printed because a *single* coverage percentage over
 /// a span containing two different exchanges is one number describing two
 /// things, and a reader who cannot see the boundary has no way to know that
-/// (D-0077).
+/// (D-0086).
 fn note_era_boundaries(
     calendar: &Calendar,
     first: crucible_core::types::Ts,

@@ -320,7 +320,7 @@ source = "https://www.cmegroup.com/tools-information/holiday-calendar/files/2025
 [[calendar.holiday]]
 name = "Day before Independence Day"
 # Only when 4 July falls Tuesday-Friday, which is what `anchor_weekday` exists
-# to say (D-0059 recorded this gap and could not close it; D-0077 does). The
+# to say (D-0059 recorded this gap and could not close it; D-0086 does). The
 # archive shows a 12:15 CT close on 2013-07-03, 2014-07-03, 2017-07-03,
 # 2018-07-03, 2019-07-03, 2023-07-03, 2024-07-03 and 2025-07-03 — every year in
 # era 2 or later where 4 July was Tue-Fri and no year where it was not.

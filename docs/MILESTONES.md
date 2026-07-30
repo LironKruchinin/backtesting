@@ -88,7 +88,7 @@ deadline-driven (see `crucible-data::ingest` module docs).
       `chrono`/`chrono-tz` confined here, and `backtest` annualizing from it
       instead of from the sample (D-0039)
       - [x] Validated per era against 16 years of bars, and extended to the four
-            products that had none (2026-07-30, D-0077). A calendar now carries
+            products that had none (2026-07-30, D-0086). A calendar now carries
             session **eras**: equity index gains era 2 (close 16:15) and era 3a
             (close 16:00 **with** the 15:15–15:30 CT halt, which D-0040 had
             deleted from a January-2024 sample and which the archive shows real

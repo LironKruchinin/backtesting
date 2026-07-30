@@ -1889,7 +1889,7 @@ propose a superseding entry — don't silently diverge.
   eight days before expiry is an operator's parameter, not a sourced CME
   convention, and a `.c` alias with two stored tables refuses rather than picks.
   `raw/` untouched; roll tables are curated and disposable (D-0045).
-- **D-0077** (2026-07-30) — **A session calendar carries session ERAS, and the
+- **D-0086** (2026-07-30) — **A session calendar carries session ERAS, and the
   four products that had no table now have one — all of it measured from the
   archive.** Full workbook in `docs/SESSION_ERAS.md`; the instrument is
   `crucible-data/examples/session_profile.rs`, which bits every nonzero-volume

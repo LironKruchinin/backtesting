@@ -427,7 +427,7 @@ reference; supersede the decision if you disagree — don't hotfix.
   one about identity; the ten-year hole falls *between* sessions, and gold had no
   bundled calendar so `qa` never even looked. Do not "strengthen" either check to
   cover this — the partition key is what fixes it. **Gold has a calendar now**
-  (D-0077), so the second reason is gone and the same planted merge is loud —
+  (D-0086), so the second reason is gone and the same planted merge is loud —
   over 1.87 M missing bars, coverage under 0.1 %. That is a side effect of
   building a metals session table, and there is a companion test asserting it;
   the original test keeps its assertion for the calendar-less call the bug
@@ -476,7 +476,7 @@ reference; supersede the decision if you disagree — don't hotfix.
   and the calendar is used (D-0039, superseding D-0038's sample default). A
   large gap means a thin contract or a hole — that is the point of showing it.
 - **The 15:15–15:30 CT halt exists in one era of the equity-index calendar and
-  not in the next**, and both are right (D-0077). D-0040 deleted it after
+  not in the next**, and both are right (D-0086). D-0040 deleted it after
   finding 315 nonzero-volume ESH4 bars inside it in January 2024; that
   measurement stands, and January 2024 is era 3b. Over the whole archive the
   window carries 0.04 traded minutes per date on 2,018 dates from 2015-01-01 to
@@ -484,7 +484,7 @@ reference; supersede the decision if you disagree — don't hotfix.
   SER-8788R removed it effective exactly 2021-06-28. The archive is still the
   evidence; what changed is that the table can now hold two answers.
 - **A calendar carries session ERAS, and `[calendar.session]` is the current
-  one** (D-0077). Earlier templates are `[[calendar.era]]` entries with their
+  one** (D-0086). Earlier templates are `[[calendar.era]]` entries with their
   own `from`, open, close, halts and RTH. A `reference_span` that crosses an era
   boundary is REFUSED at load: `bars_per_year` averaged over two different
   exchanges describes neither, which D-0039 said in prose and which stopped
@@ -503,7 +503,7 @@ reference; supersede the decision if you disagree — don't hotfix.
   same time, and not at the same hour for every product.** CME's trading-hours
   *landing page* says "Globex closed" and its per-holiday grids disagree; the
   grids win, and MLK 2024-01-15 agrees with them. What the archive adds
-  (D-0077): equity index ran **full closures** from 2013-01-21 to 2014-02-17 —
+  (D-0086): equity index ran **full closures** from 2013-01-21 to 2014-02-17 —
   proved by the Sunday evenings that did not open — and 10:30 CT closes in era 1;
   and on MLK 2022-01-17 the last traded minute was 12:00 CT for ES and ZN, 13:30
   for CL and GC, and 15:58 for 6E, which traded a full session. One date, four
@@ -512,11 +512,11 @@ reference; supersede the decision if you disagree — don't hotfix.
   cash Treasury market closes on both and `docs/THETADATA_PLAN.md` §8.1 records
   Veterans Day as a day the NYSE trades and the bond market does not. CBOT
   Treasury **futures** on Globex traded a full session on every one of them in
-  sixteen years (D-0077). Cash and futures are different markets; the prior was
+  sixteen years (D-0086). Cash and futures are different markets; the prior was
   checked and refuted, not assumed.
 - **Christmas landing on a Saturday closes the Friday before and New Year's Day
   landing on a Saturday does not**, so the two rules are written differently
-  (D-0077). 2010-12-24 and 2021-12-24 have no session at all in the archive;
+  (D-0086). 2010-12-24 and 2021-12-24 have no session at all in the archive;
   2010-12-31 and 2021-12-31 are full ones. Making them symmetric re-introduces
   the 12:15 CT close 2021-12-24 never had.
 - **`rth_open_local`/`rth_close_local` on the four commodity tables are a cited

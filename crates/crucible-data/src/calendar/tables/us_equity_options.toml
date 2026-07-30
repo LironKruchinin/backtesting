@@ -53,7 +53,7 @@
 #   Eve when it falls on a weekday. They matter for `bars_per_year` and not at
 #   all for the trading-day set, which is what this file is used for today.
 # - **The July early close used to fire on six dates it should not** — and no
-#   longer does (D-0077). The NYSE closes early on 3 July only when 4 July falls
+#   longer does (D-0086). The NYSE closes early on 3 July only when 4 July falls
 #   Tuesday-Friday; when it lands on a weekend or a Monday there is no early
 #   close at all. `weekday_before` could not express that condition, so this
 #   table produced a phantom 13:00 close on **2015-07-02, 2016-07-01,
@@ -215,7 +215,7 @@ name = "Day before Independence Day"
 # Only when 4 July falls Tuesday-Friday. Without `anchor_weekday` this rule
 # produced a phantom 13:00 close on 2015-07-02, 2016-07-01, 2020-07-02,
 # 2021-07-02, 2022-07-01 and 2026-07-02 — the defect D-0059 recorded and could
-# not fix, closed by D-0077's rule-vocabulary extension.
+# not fix, closed by D-0086's rule-vocabulary extension.
 rule = { kind = "weekday_before", month = 7, day = 4, observance = "nearest_weekday", anchor_weekday = [
   "tuesday",
   "wednesday",

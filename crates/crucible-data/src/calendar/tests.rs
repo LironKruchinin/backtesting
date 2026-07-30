@@ -856,7 +856,7 @@ rationale = "fixture"
     ));
 }
 
-// The defect D-0059 recorded and deferred, now closed (D-0077) — same six
+// The defect D-0059 recorded and deferred, now closed (D-0086) — same six
 // dates, opposite assertion.
 //
 // These six dates are NOT early closes at the real exchange. The NYSE (and
@@ -914,7 +914,7 @@ fn the_six_july_early_closes_that_were_phantoms_are_ordinary_sessions() {
 }
 
 // ---------------------------------------------------------------------------
-// Session eras (D-0077)
+// Session eras (D-0086)
 // ---------------------------------------------------------------------------
 
 /// Two eras with different closes and a halt that exists in only one of them —
@@ -1051,7 +1051,7 @@ fn two_templates_starting_on_the_same_day_are_refused() {
     ));
 }
 
-// The check D-0039 stated as prose and D-0077 made binding: a reference span
+// The check D-0039 stated as prose and D-0086 made binding: a reference span
 // that crosses an era boundary averages two exchanges and describes neither.
 #[test]
 fn a_reference_span_crossing_an_era_boundary_is_refused() {
@@ -1104,7 +1104,7 @@ fn chicago(date: CivilDate, hour: i64, minute: i64, utc_offset_hours: i64) -> Ts
         * 1_000_000_000)
 }
 
-// THE D-0040 CORRECTION, CORRECTED (D-0077).
+// THE D-0040 CORRECTION, CORRECTED (D-0086).
 //
 // The 15:15-15:30 CT halt was real until 2021-06-25 and gone from 2021-06-28.
 // The archive says so with 2,018 silent trading dates before and 1,344 fully
@@ -1210,11 +1210,11 @@ fn the_day_before_independence_day_closes_early_only_when_the_fourth_is_midweek(
 }
 
 // ---------------------------------------------------------------------------
-// The four new tables (D-0077), against the archive they were measured from
+// The four new tables (D-0086), against the archive they were measured from
 // ---------------------------------------------------------------------------
 
 // Every root the acquisition basket holds now resolves to a calendar, and to
-// the right one. Before D-0077 four of the seven resolved to nothing and
+// the right one. Before D-0086 four of the seven resolved to nothing and
 // `bars_per_year` fell back to measuring the sample.
 #[test]
 fn every_archived_root_resolves_to_its_own_calendar() {

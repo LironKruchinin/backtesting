@@ -2083,7 +2083,7 @@ mod blind_detector_controls {
 
     // BLIND DETECTOR 2 — gaps inside sessions.
     //
-    // Two independent reasons it was silent, and D-0077 removed the first:
+    // Two independent reasons it was silent, and D-0086 removed the first:
     //
     // 1. **No bundled calendar claimed GC.** `Calendar::for_instrument` answered
     //    only for the equity-index roots, so `qa` had no definition of
@@ -2135,7 +2135,7 @@ mod blind_detector_controls {
         );
     }
 
-    // The half that D-0077 made possible: reason (1) is gone, and the same
+    // The half that D-0086 made possible: reason (1) is gone, and the same
     // planted merge is now loud.
     //
     // Ten years of gold sessions against 120 bars. The floor asserted below is
@@ -2150,7 +2150,7 @@ mod blind_detector_controls {
 
         let calendar = Calendar::for_instrument(&InstrumentId::new("GCZ4"))
             .expect("lookup")
-            .expect("cme_globex_metals governs GC as of D-0077");
+            .expect("cme_globex_metals governs GC as of D-0086");
         assert_eq!(calendar.id(), "cme_globex_metals");
 
         let report = qa::run(
