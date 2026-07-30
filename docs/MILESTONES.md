@@ -178,7 +178,7 @@ ESH4 January-2024 1m bars, 30,167 bars, −23.51% under `spread_cross`.
       reconcile to the nanodollar and a planted $100 daily-loss breach names day
       7 in both consumers. Retained artifact is 56 bytes a session — 226 KB for
       16 years, against 4.98 GiB for a per-bar series — and both sizes are
-      pinned by test. Every control was mutation-verified: 31 planted defects,
+      pinned by test. Every control was mutation-verified: 30 planted defects,
       each watched failing the control it targets, and the one control that did
       **not** fire (`a_flip_resets_the_excursions_with_the_episode`, blind to a
       missing excursion reset) was joined by a fixture that does. **Capture

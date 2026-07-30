@@ -1357,7 +1357,7 @@ propose a superseding entry — don't silently diverge.
   unchanged, and `capturing_changes_no_number_in_the_result` asserts a captured
   run and a plain run produce identical `BacktestResult`s field by field.
   **Every control was watched firing** (§7), and the record says which mutation
-  each one caught. Thirty-one defects were planted one at a time in
+  each one caught. Thirty defects were planted one at a time in
   `series.rs`, `portfolio.rs`, `replay.rs`, `bracket.rs` and
   `calendar/mod.rs`, each run against the whole audited set: the nanodollar
   off-by-one in the decline fails five (three unit, two integration); deleting
