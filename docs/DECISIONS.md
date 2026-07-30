@@ -1280,3 +1280,84 @@ propose a superseding entry — don't silently diverge.
   evidence with the absence of evidence, and quietly: the region would not look
   bad, it would look like nobody tried it. An axis is allowed to contain points
   that lose.
+- **D-0071** (2026-07-30) — **The account-evaluation series are CAPTURED inside
+  the mark loop, the trading day arrives as caller-supplied keys, and the
+  retained artifact is 56 bytes per session rather than 16 bytes per bar.**
+  Implements `docs/ACCOUNT_EVAL_SPEC.md` §3 (D-0067). Capture only: the breach
+  test, the block bootstrap, P(pass) and payout cadence are §4 and land with the
+  funnel in M3. `crucible-engine::series`, plus two fields on `ClosedTrade`.
+  **Capture, not reconstruction, and now with a number attached.** The intraday
+  high-water folds the same equity value the curve takes, on the same line of
+  `replay.rs` step 2. Rebuilding it from OHLC afterwards re-opens the intrabar
+  ordering `stop_first_intrabar` already settled (D-0069), and the drawdown it
+  computes is the drawdown of a path the account never took. §5.12's control is
+  implemented and was watched: on a bar touching both a stop at 98.00 and a
+  target at 103.00 from a long filled at 100.00, the capture reports peak $0 /
+  max drop $100 and a target-first rebuild reports peak $150 / max drop $0 —
+  the whole drawdown, plus a $150 peak that never existed, out of one
+  unknowable ordering. On a single-tick fixture where the stop still fires, all
+  three series agree exactly, which is what makes the divergence attributable to
+  the ambiguity rather than to a bug in the rebuild. Flipping the engine's own
+  convention to target-first makes the first control fail with exactly the
+  $150/$100 its comment predicts.
+  **The trading day is data (the fourth application of the D-0015 device).**
+  `crucible-engine` depends on `crucible-core` only, and a trading day is an
+  exchange fact that lives in `crucible-data::calendar`. So `AccountCapture`
+  takes `day_keys: &[i64]` — one nondecreasing
+  `days_from_civil(Calendar::trading_day(avail_ts))` per bar — which is
+  *literally the slice* `walkforward::folds::FoldPlan::build` already takes.
+  Not a trait object (that smuggles the calendar in behind a v-table), not a
+  boundary derived from timestamps inside the engine (that re-implements the
+  17:00 CT roll in the one crate forbidden to know about it). No dependency edge
+  moves. **One producer, both consumers**, and the reason is concrete: two
+  independent attributions of "which day" is how a daily-loss-limit breach lands
+  on a different date in two reports, with neither report looking wrong on its
+  own. `crucible-cli::walkforward::trading_days` is the producer; the funnel
+  cannot call the calendar either, so `cli` is the only layer that can.
+  The reconciliation is asserted (`day_slicing_and_fold_attribution_reconcile_
+  to_the_nanodollar`: every evaluable day's `close_pnl_nano_usd` equals the fold
+  machinery's window delta, exactly) and was watched failing — handing the
+  capture wall-clock keys reports "day 1 occupies different bars in the two
+  consumers: 3..9 vs 6..12". The wall-clock counter-fixture manufactures two
+  −$300 sessions (−$600 and −$400) out of a run whose worst calendar session was
+  −$150, purely by cutting each episode at its intraday high.
+  **A day opens at the previous day's CLOSE, not at its own first mark.** The
+  overnight gap is a real move of the account; anchoring on the first mark makes
+  it invisible in both excursions and breaks §3.3.1's recursion, which is what
+  lets a whole-day bootstrap answer an intraday question. The within-day
+  running peak is seeded at that same open — conservative, and inventing
+  nothing, because the open is a level the account genuinely stood at.
+  **Memory, derived rather than asserted.** `HighWaterState` is 16 bytes and
+  O(1) in the bar count: two integer comparisons per mark, never a `Vec`.
+  `DayRecord` is 56 bytes (`i64` key + `Range<usize>` + four `i64`), so 252 × 16
+  sessions is **226 KB** — against 4.98 GiB for a per-bar equity vector at a
+  16-year 1-second grain. `ClosedTrade` grows 16 → 40 bytes, ≤ 2 MB for 50,000
+  round-trips. Both sizes are pinned by test, because a field added without
+  thought should fail a test rather than become a memory regression nobody
+  measures. What is deliberately **not** done: spec §3.3's requirement 2, the
+  per-bar equity vector's opt-out. That is a change to an artifact the
+  walk-forward runner consumes, not a capture hook.
+  **The one approximate case is counted, not hidden.**
+  `intraday_peak_crossing(days, level)` returns the day on which the running
+  intraday peak first reaches `level` — M3 passes `L + D` — and
+  `approximate_day_count` is 0 or 1, never more, because a running peak is
+  non-decreasing and crosses a level once. The crossing day is *always* flagged:
+  a day's `peak_from_open` is by definition at least its `close_pnl`, so a
+  summary can never certify that the peak first reached the level at the day's
+  final mark rather than earlier inside it, and certifying it anyway would be
+  resolving an ambiguity in the flattering direction. An account whose ratchet
+  is `highest_daily_closing_equity` advances its peak only at a close, so its
+  lock engages at a close and it has no approximate day at all.
+  **`f64` appears nowhere in any of it.** Percentiles use nearest-rank on
+  integers — interpolating between two days would put a float where a dollar
+  amount belongs, and the answer is meant to name a day that happened.
+  **Capture is additive observation, and the hashes prove it.** `demo
+  --hash-only` `b55747513df596ed`, `combo --run --hash-only`
+  `0e1ab52d474b862b`, `walk-forward --hash-only` `711e1cb34a2ee2b4` — all three
+  unchanged, and `capturing_changes_no_number_in_the_result` asserts a captured
+  run and a plain run produce identical `BacktestResult`s field by field.
+  **Every control was watched firing** (§7): the nanodollar boundary (an
+  off-by-one nanodollar in the decline fails three tests), the day-open
+  convention, MAE/MFE including money already banked in the episode (measuring
+  unrealized alone reports MFE $0 for a trade that was $500 up), the
+  approximate-day counter, and both halves of §5.12.

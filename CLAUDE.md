@@ -510,6 +510,28 @@ reference; supersede the decision if you disagree — don't hotfix.
   count is zero and why.** No config can declare a bracket in this build, so
   "no number printed" and "no ambiguous bars" would look identical to a reader
   otherwise — and only one of them means the returns are safe to quote.
+- **The engine takes trading-day keys as an `&[i64]` argument rather than
+  asking a calendar**, and `DayRecord.trading_day_key` is a bare `i64` rather
+  than a date type (D-0071). `crucible-engine` may not depend on
+  `crucible-data`, and neither may `crucible-funnel`, so `crucible-cli`
+  computes `days_from_civil(Calendar::trading_day(avail_ts))` **once** and both
+  consumers read the same slice — the D-0015 / D-0060 / `FoldPlan` device again.
+  Two independent attributions of "which day" is how a daily-loss-limit breach
+  lands on a different date in two reports. Adding a `Calendar` argument, a
+  slicer trait, or a day derived from the timestamp inside the engine
+  reintroduces exactly that.
+- **A captured trading day opens at the PREVIOUS day's close, not at its own
+  first mark** (D-0071), so a day whose first print gaps down reports that gap
+  in `trough_from_open_nano_usd`. Anchoring on the first mark makes the
+  overnight move invisible and breaks the recursion that lets a whole-day
+  bootstrap answer an intraday question.
+- **MAE/MFE are sampled at bar closes and are therefore lower bounds** on what
+  a position actually endured, like every other number on a mark grid
+  (`ACCOUNT_EVAL_SPEC.md` §3.3.2). A round-trip can report `mae_nano_usd = 0`
+  while closing at a loss: no *mark* caught it down. They are also measured on
+  realized-plus-unrealized PnL of the episode, so a scale-out's banked profit
+  counts — measuring unrealized alone reports a trade that was $500 up as
+  never having been up at all.
 
 ---
 

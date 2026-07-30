@@ -20,15 +20,27 @@
 //! [`execution`] fill model, and — for stops and targets, where one bar can be
 //! consistent with two opposite outcomes — the [`bracket`] intrabar ordering
 //! convention.
+//!
+//! Step 2 is also where [`series`] captures the account-evaluation path
+//! functionals — per-trading-day PnL, the intraday high-water, and per
+//! round-trip excursions. They are captured *inside* the mark loop and never
+//! rebuilt from bars afterwards, because a rebuild would re-open the intrabar
+//! ordering the [`bracket`] convention already settled and measure a path the
+//! account never took (`docs/ACCOUNT_EVAL_SPEC.md` §3.3, D-0071).
 
 pub mod bracket;
 pub mod execution;
 pub mod metrics;
 pub mod portfolio;
 pub mod replay;
+pub mod series;
 
 pub use bracket::{ActiveBracket, INTRABAR_CONVENTION, Outcome, Resolution, StopFirstIntrabar};
 pub use execution::{FreeFills, SpreadCrossFills};
 pub use metrics::Summary;
 pub use portfolio::{ClosedTrade, FeeEvent, Portfolio};
-pub use replay::{BacktestParams, BacktestResult, EngineError, run};
+pub use replay::{BacktestParams, BacktestResult, EngineError, run, run_capturing};
+pub use series::{
+    AccountCapture, AccountSeries, CaptureError, DayRecord, HighWaterState, PeakCrossing,
+    WorstDayDistribution, approximate_day_count, intraday_peak_crossing,
+};

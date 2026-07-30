@@ -55,11 +55,14 @@
 //! into an out-of-sample statistic, that $400 is what shows up.
 
 use crucible_core::prelude::*;
-use crucible_engine::{BacktestParams, FreeFills};
+use crucible_engine::{
+    AccountCapture, AccountSeries, BacktestParams, BacktestResult, FreeFills, run_capturing,
+};
 use crucible_strategies::combo::{ComboSpec, Grid, IndicatorSpec, IntAxis, RuleSource};
 
 use super::folds::{FoldPlan, FoldScheme, FoldSpec};
 use super::runner::{RunIdentity, WalkForwardError, run_grid};
+use super::window::RunTrace;
 use crucible_strategies::combo::ConfigHash;
 
 /// Bars per trading day in the fixture.
@@ -542,5 +545,230 @@ fn a_plan_over_another_series_is_refused() {
             plan_bars: 72,
             series_bars: 60,
         }
+    );
+}
+
+// ------------------------------------------------------------------------
+// One producer of "which trading day", two consumers (D-0071)
+// ------------------------------------------------------------------------
+
+/// A feed over the shared fixture, so a test can drive one replay itself
+/// rather than through [`run_grid`].
+struct SliceFeed<'a> {
+    events: &'a [MarketEvent],
+    at: usize,
+}
+
+impl Feed for SliceFeed<'_> {
+    fn next_event(&mut self) -> Option<MarketEvent> {
+        let ev = self.events.get(self.at)?.clone();
+        self.at += 1;
+        Some(ev)
+    }
+}
+
+/// One replay of the fixture's single combo, with the account-evaluation
+/// series captured against `capture_keys`.
+fn replay_capturing(
+    events: &[MarketEvent],
+    capture_keys: &[i64],
+) -> (BacktestResult, AccountSeries) {
+    let g = grid(IntAxis::Fixed(2));
+    let mut strategy = g.aligned_strategy(0);
+    let mut fills = FreeFills;
+    let mut capture = AccountCapture::new(capture_keys, CASH, TimeFrame::M1);
+    let result = run_capturing(
+        &mut SliceFeed { events, at: 0 },
+        &mut strategy,
+        &mut fills,
+        &spec(),
+        &params(),
+        &mut capture,
+    )
+    .expect("the fixture replays");
+    (result, capture.finish())
+}
+
+/// The wall-clock slicer this control exists to falsify.
+///
+/// The fixture's sessions are 6 bars long and begin at bar indices 0, 6, 12 …
+/// A wall-clock day boundary does not land there — that is the whole content
+/// of the 17:00 CT roll — so this one cuts three bars earlier, mid-session:
+/// wall-clock day *k* is bars `6k − 3 .. 6k + 3`.
+fn wall_clock_keys(n_bars: usize) -> Vec<i64> {
+    (0..n_bars)
+        .map(|i| i64::try_from((i + 3) / BARS_PER_DAY).expect("small fixture index"))
+        .collect()
+}
+
+/// Keys of the days that closed at least `dollars` down — a daily loss limit,
+/// which is a question about a *day* and therefore about a boundary.
+fn days_losing_at_least(series: &AccountSeries, dollars: i64) -> Vec<i64> {
+    series
+        .days
+        .iter()
+        .filter(|r| r.close_pnl_nano_usd <= -dollars * 1_000_000_000)
+        .map(|r| r.trading_day_key)
+        .collect()
+}
+
+/// The day record carrying `key`, or a panic naming it.
+fn day_pnl(series: &AccountSeries, key: i64) -> NanoUsd {
+    series
+        .days
+        .iter()
+        .find(|r| r.trading_day_key == key)
+        .unwrap_or_else(|| panic!("the capture has no day {key}"))
+        .close_pnl_nano_usd
+}
+
+/// **The reconciliation, and it has teeth.** Walk-forward's fold attribution
+/// and account-eval's day slicing read the *same* trading-day key slice, so a
+/// day's PnL is the same number in both reports — to the nanodollar.
+///
+/// Two independent attributions of "which day" is how a daily-loss-limit
+/// breach lands on a different date in two reports, and neither report looks
+/// wrong on its own. The device that prevents it is the one D-0015, D-0060 and
+/// D-0062 already use: the layer that may hold a calendar computes the keys
+/// once, and every layer below takes them as data.
+///
+/// The identity checked here, for every evaluable trading day *d*:
+///
+/// ```text
+/// DayRecord[d].close_pnl  ==  window(day d's bars).final − .initial
+/// ```
+///
+/// Both sides are `equity[last bar of d] − equity[last bar of d−1]`: the fold
+/// machinery gets there by anchoring a window at `start − 1` (D-0063) and the
+/// capture by opening each day at the previous day's close. They agree because
+/// they are the same convention applied to the same boundaries — and they are
+/// the same boundaries because there is one producer.
+#[test]
+fn day_slicing_and_fold_attribution_reconcile_to_the_nanodollar() {
+    let ev = events();
+    let keys = day_keys(ev.len());
+    let g = grid(IntAxis::Fixed(2));
+    let plan = FoldPlan::build(&keys, g.max_warmup_bars(), fold_spec()).expect("the fixture plans");
+    let (result, series) = replay_capturing(&ev, &keys);
+    let trace = RunTrace::new(&result.equity, &result.closed_trades, &result.fee_events);
+
+    for (d, &key) in plan.days().iter().enumerate() {
+        let bars = plan.day_start_bar(d)..plan.day_start_bar(d + 1);
+        let by_fold_machinery = {
+            let s = trace.window(bars.clone(), CASH, PER_YEAR);
+            s.final_equity_nano_usd - s.initial_equity_nano_usd
+        };
+        let record = series
+            .days
+            .iter()
+            .find(|r| r.trading_day_key == key)
+            .expect("the capture saw every day the plan did");
+        assert_eq!(
+            record.bars, bars,
+            "day {key} occupies different bars in the two consumers"
+        );
+        assert_eq!(
+            record.close_pnl_nano_usd, by_fold_machinery,
+            "day {key} has two different PnLs"
+        );
+    }
+
+    // And a fold's out-of-sample PnL is the sum of its days'. The fixture's
+    // fold 1 test window is calendar days 7–8, holding the −$150 round-trip
+    // (day 7) and a flat day: −$150 + $0 = −$150.
+    let fold1 = &plan.folds()[1];
+    let oos = trace.window(fold1.test.bars.clone(), CASH, PER_YEAR);
+    let summed: NanoUsd = plan.days()[fold1.test.days.clone()]
+        .iter()
+        .map(|&key| day_pnl(&series, key))
+        .sum();
+    assert_eq!(
+        summed,
+        oos.final_equity_nano_usd - oos.initial_equity_nano_usd
+    );
+    assert_eq!(dollars(summed), -150);
+}
+
+/// **The negative control the ruling earns.** Hand ONE consumer a wall-clock
+/// slicer and the reconciliation breaks — with the daily-loss question landing
+/// on a day the other consumer does not have.
+///
+/// Hand arithmetic. Every episode peaks *inside* its session and gives some of
+/// it back before the close, so a boundary drawn three bars early cuts each one
+/// at its high — booking the run-up to one day and the give-back to the next.
+///
+/// Equity in whole dollars (the entry fills at the episode's second bar, the
+/// exit at its fifth):
+///
+/// | bars | 6–11 | 12–13 | 14 | 15–29 | 30–31 | 32 | 33–41 |
+/// |---|---|---|---|---|---|---|---|
+/// | equity | 100,000 | 100,000 | 101,000 | 100,400 | 100,400 | 100,900 | 100,500 |
+///
+/// (bar 14 marks day 2's long at 130: +20 pts × $50 = +$1,000; bar 32 marks
+/// day 5's long at 114: +10 × $50 = +$500.)
+///
+/// - **Calendar day 2** is bars 12–17: `equity[17] − equity[11]` =
+///   100,400 − 100,000 = **+$400**. Calendar day 3 is bars 18–23: **$0**.
+/// - **Wall-clock day 2** is bars 9–14: `equity[14] − equity[8]` =
+///   101,000 − 100,000 = **+$1,000**. Wall-clock day 3 is bars 15–20:
+///   `equity[20] − equity[14]` = 100,400 − 101,000 = **−$600**.
+/// - **Calendar day 5** is bars 30–35: `equity[35] − equity[29]` =
+///   100,500 − 100,400 = **+$100**. Calendar day 6 is bars 36–41: **$0**.
+/// - **Wall-clock day 5** is bars 27–32: `equity[32] − equity[26]` =
+///   100,900 − 100,400 = **+$500**. Wall-clock day 6 is bars 33–38:
+///   `equity[38] − equity[32]` = 100,500 − 100,900 = **−$400**.
+///
+/// So a $300 daily loss limit fires **twice** under the wall-clock slicer and
+/// on **no** calendar day at all. Same money, same trades, same engine — one
+/// boundary moved three bars, and a strategy whose worst session was −$150
+/// acquires a −$600 one.
+#[test]
+fn a_wall_clock_slicer_books_a_daily_loss_the_calendar_never_had() {
+    let ev = events();
+    let calendar = day_keys(ev.len());
+    let wall_clock = wall_clock_keys(ev.len());
+    assert_ne!(calendar, wall_clock);
+
+    let (_, by_calendar) = replay_capturing(&ev, &calendar);
+    let (_, by_wall_clock) = replay_capturing(&ev, &wall_clock);
+
+    assert_eq!(dollars(day_pnl(&by_calendar, 2)), 400);
+    assert_eq!(dollars(day_pnl(&by_calendar, 3)), 0);
+    assert_eq!(dollars(day_pnl(&by_wall_clock, 2)), 1_000);
+    assert_eq!(dollars(day_pnl(&by_wall_clock, 3)), -600);
+
+    assert_eq!(dollars(day_pnl(&by_calendar, 5)), 100);
+    assert_eq!(dollars(day_pnl(&by_calendar, 6)), 0);
+    assert_eq!(dollars(day_pnl(&by_wall_clock, 5)), 500);
+    assert_eq!(dollars(day_pnl(&by_wall_clock, 6)), -400);
+
+    // The planted daily-loss-limit breach: $300, tested against every day.
+    assert!(
+        days_losing_at_least(&by_calendar, 300).is_empty(),
+        "the calendar has no $300 losing session"
+    );
+    assert_eq!(
+        days_losing_at_least(&by_wall_clock, 300),
+        vec![3, 6],
+        "the wall-clock slicer must manufacture the breaches, or this control is decoration"
+    );
+
+    // And the reconciliation above genuinely fails on these keys: at least one
+    // day's PnL disagrees with the day carrying the same label in the other
+    // consumer.
+    let disagreements = by_wall_clock
+        .days
+        .iter()
+        .filter(|w| {
+            by_calendar
+                .days
+                .iter()
+                .find(|c| c.trading_day_key == w.trading_day_key)
+                .is_none_or(|c| c.close_pnl_nano_usd != w.close_pnl_nano_usd)
+        })
+        .count();
+    assert!(
+        disagreements > 0,
+        "two slicers that never disagree are the same slicer"
     );
 }

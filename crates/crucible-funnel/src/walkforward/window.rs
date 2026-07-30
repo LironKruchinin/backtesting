@@ -46,8 +46,14 @@ use crucible_engine::{ClosedTrade, FeeEvent, Summary};
 #[derive(Clone, Debug)]
 pub struct RunTrace<'a> {
     equity: &'a [(Ts, NanoUsd)],
-    /// `(bar index, net PnL)` per round-trip, in close order.
-    trades: Vec<(usize, NanoUsd)>,
+    /// `(bar index, round-trip)` in close order.
+    ///
+    /// The whole [`ClosedTrade`] rather than its net PnL, because it now
+    /// carries the MAE/MFE of the round-trip (`docs/ACCOUNT_EVAL_SPEC.md`
+    /// §3.4) and a fold's excursion distribution has to describe the same
+    /// trades its trade count does. Attribution is unchanged: by the closing
+    /// fill, per D-0063.
+    trades: Vec<(usize, ClosedTrade)>,
     /// `(bar index, fee)` per costed fill, in fill order.
     fees: Vec<(usize, NanoUsd)>,
 }
@@ -66,10 +72,7 @@ impl<'a> RunTrace<'a> {
     ) -> RunTrace<'a> {
         RunTrace {
             equity,
-            trades: index_by_bar(
-                equity,
-                closed_trades.iter().map(|t| (t.closed_ts, t.net_nano_usd)),
-            ),
+            trades: index_by_bar(equity, closed_trades.iter().map(|t| (t.closed_ts, *t))),
             fees: index_by_bar(equity, fee_events.iter().map(|f| (f.ts, f.fee_nano_usd))),
         }
     }
@@ -145,11 +148,11 @@ impl<'a> RunTrace<'a> {
                 level += self.equity[i].1 - self.equity[i - 1].1;
                 curve.push((self.equity[i].0, level));
             }
-            for &(bar, net) in &self.trades {
+            for &(bar, trade) in &self.trades {
                 if w.contains(&bar) {
                     trades.push(ClosedTrade {
                         closed_ts: self.equity[bar].0,
-                        net_nano_usd: net,
+                        ..trade
                     });
                 }
             }
@@ -173,10 +176,10 @@ impl<'a> RunTrace<'a> {
 /// curve did) and is dropped rather than panicking: losing one trade from a
 /// count is a smaller wrong than aborting a research run over an impossible
 /// branch.
-fn index_by_bar(
+fn index_by_bar<T>(
     equity: &[(Ts, NanoUsd)],
-    records: impl Iterator<Item = (Ts, NanoUsd)>,
-) -> Vec<(usize, NanoUsd)> {
+    records: impl Iterator<Item = (Ts, T)>,
+) -> Vec<(usize, T)> {
     let mut out = Vec::new();
     let mut at = 0usize;
     for (ts, value) in records {
@@ -286,10 +289,16 @@ mod tests {
             ClosedTrade {
                 closed_ts: Ts(1),
                 net_nano_usd: 5_000_000_000,
+                opened_ts: Ts(0),
+                mae_nano_usd: -1_000_000_000,
+                mfe_nano_usd: 6_000_000_000,
             },
             ClosedTrade {
                 closed_ts: Ts(4),
                 net_nano_usd: -2_000_000_000,
+                opened_ts: Ts(3),
+                mae_nano_usd: -3_000_000_000,
+                mfe_nano_usd: 0,
             },
         ];
         let fees = [
