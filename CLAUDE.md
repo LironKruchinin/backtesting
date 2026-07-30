@@ -390,8 +390,20 @@ The protocol:
    *at that moment*, and rewrites every placeholder **in the merge commit** —
    not in a follow-up. A tree that carries both `D-TBD(x)` and `D-0091` for the
    same decision is the stale-reference problem §8.1's third bullet is about.
-4. **`grep -r "D-TBD"` on `main` must return nothing.** If it returns something,
-   a merge forgot step 3.
+4. **No placeholder survives a merge.** The check is that `D-TBD(` appears
+   nowhere on `main` **except** where this section or a decision entry is
+   *describing* the protocol:
+
+   ```bash
+   grep -rn 'D-TBD(' --include='*.rs' --include='*.md' --include='*.toml' . \
+     | grep -v '^./.claude' | grep -v 'CLAUDE.md' | grep -v 'placeholder'
+   ```
+
+   Written as an exclusion because the naive `grep -r "D-TBD"` matches this
+   rule's own text and the two decision entries that explain why a number was
+   assigned directly — the first run of it did exactly that. A check that fires
+   on its own documentation gets ignored within a week, which is worse than not
+   having one.
 
 **The motivating record — four collisions, all on merge, all avoidable:**
 
