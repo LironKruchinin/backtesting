@@ -722,11 +722,23 @@ reference; supersede the decision if you disagree — don't hotfix.
   those words. A reader who saw no `GRADUATE` and no explanation would conclude
   nothing was good enough, which is a much more flattering claim than the true
   one. Do not "enable" it by relaxing the stage list.
-- **A config declaring `stages = ["s0", ...]` or `["s3", ...]` is REFUSED**,
-  not run with the missing stage skipped (D-0075). A config that asks for the
-  permutation battery and silently receives a fold table has been answered with
-  a different question than the one it asked, and the answer looks exactly like
-  the one it wanted. The refusal names what each stage needs.
+- **A config declaring `stages = ["s3", ...]` is REFUSED**, not run with the
+  missing stage skipped (D-0075). A config that asks for the permutation battery
+  and silently receives a fold table has been answered with a different question
+  than the one it asked, and the answer looks exactly like the one it wanted.
+  The refusal names what the stage needs. **`s0` left this list on 2026-07-31**
+  when its caller landed (D-0085) — in that same commit, never earlier.
+- **A `[s0]` block is required exactly when `stages` names `s0`, and refused
+  when it does not** (D-0085). A stage with no criteria is a stage with no
+  pre-registration; a block nothing evaluates is a config that thinks it asked
+  for something.
+- **S0 passes only when `|IC| >= min_abs_ic` AND the mean forward return's
+  bootstrap interval excludes zero, at the SAME horizon** (D-0085). `|IC|` alone
+  reads 0.0378 on 20,000 bars of seeded random walk, which clears any bar low
+  enough to be useful — size without significance is what a large enough sample
+  of noise gives away for free. The criterion was corrected when the null
+  harness exposed this; the threshold was deliberately *not* raised to fit the
+  fixture, which is the direction the seed-29 rule below forbids.
 - **`funnel` exits 5 when every combo is killed.** Not a failure and not
   success: most ideas must die, and a scheduled job that reads "everything was
   killed" as exit 0 learns nothing — the same argument `qa`'s exit 4 makes.
@@ -973,12 +985,14 @@ bottom is the fastest way to see what a verdict is made of. Then
 `crucible-funnel::stages` for the criteria and why `Graduate` is unreachable,
 `crucible-funnel::registry` for the five contract rules and why the backend is
 JSONL, and `crucible-strategies::controls` for the two benchmarks and the
-planted leak. M3 owes **two builds, in this order** (D-0081): first the **S0
-predictor seam** — score-emitting evaluation with forward-return joins, the
-M2.5 predictor workbench arriving *as* S0 — because S0-refused stops the front
-of the funnel for every predictor-shaped idea and no other open item unblocks
-anything; then `crucible-funnel::stats`, still a **spec in module docs**, whose
-absence `crucible-funnel/tests/planted_leak.rs` measures.
+planted leak. The **S0 predictor seam landed 2026-07-31** — D-0082 the
+measurement (`crucible-funnel::s0`: the forward-return join, the information
+coefficient, quantile buckets, session block bootstrap) and D-0085 the caller
+(`ComboScorer`, the `[s0]` config block, the registry row, and the gate ahead of
+S1). What M3 still owes is `crucible-funnel::stats` — deflated Sharpe, PBO/CSCV,
+the permutation and truncation harnesses — still a **spec in module docs**, and
+whose absence `crucible-funnel/tests/planted_leak.rs` measures. The plan for
+finishing it is `docs/plans/m3-full.md`.
 
 Known open questions (decide when reached, log when decided): margin
 modeling (M2); multi-instrument portfolio accounting (post-M4); Welford vs
