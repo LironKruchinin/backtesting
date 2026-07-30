@@ -831,6 +831,29 @@ reference; supersede the decision if you disagree — don't hotfix.
   of noise gives away for free. The criterion was corrected when the null
   harness exposed this; the threshold was deliberately *not* raised to fit the
   fixture, which is the direction the seed-29 rule below forbids.
+- **S0 DOES NOT CATCH LEAKS, and must never be "fixed" into a detector that
+  does** (D-0085). A leak planted in the forward-return join saturates the
+  information coefficient to **1.0000** and the verdict does **not** move: on a
+  zero-drift random walk the mean forward return is still indistinguishable
+  from zero, so S0's significance half fails and the combo is killed anyway —
+  for the right reason, by accident.
+
+  The saturated IC is a **leak signature**, and printing it is the whole of
+  S0's contribution here: a reader who sees `|IC| = 1.0000` on a real signal is
+  looking at a bug, because nothing predicts the next ten minutes perfectly.
+  What S0 cannot do is *decide* that, and the reason is the one this section
+  already gives for `LeakyZScore`: a leaked edge is indistinguishable from a
+  real one by any statistic computed **on the leaked run**, and the IC is such
+  a statistic. A threshold that killed leaks would kill real signals at the
+  same rate.
+
+  Catching a leak means asking a different question — does the edge survive
+  when the future is shuffled, or deleted — and that belongs to the
+  **permutation and truncation harnesses** arriving with
+  `crucible-funnel::stats` (`docs/plans/m3-full.md`, block A). Adding a
+  "suspicious IC" kill to S0 would put a detector nobody has watched fire in
+  front of the one that can be, and would make the planted-leak acceptance test
+  below passable without ever building the harness meant to pass it.
 - **`funnel` exits 5 when every combo is killed.** Not a failure and not
   success: most ideas must die, and a scheduled job that reads "everything was
   killed" as exit 0 learns nothing — the same argument `qa`'s exit 4 makes.

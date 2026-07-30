@@ -330,11 +330,12 @@ pub struct FunnelCfg {
     /// be a whole number of half-ticks — `0.0`, `0.5`, `1.0`, `2.0` — because
     /// that is what a price grid can express (D-0073).
     pub cost_sensitivity_ticks: Vec<f64>,
-    /// S0 sample-adequacy criterion: a combo with fewer out-of-sample
-    /// round-trips than this is killed for having nothing to measure, before
-    /// any performance number is looked at.
+    /// **Admission** criterion: a combo with fewer out-of-sample round-trips
+    /// than this is killed for having nothing to measure, before any
+    /// performance number is looked at. Not `s0` — sample adequacy is a
+    /// pre-trial check rather than the predictor gate (D-0084).
     pub min_oos_trades: usize,
-    /// S0 sample-adequacy criterion, the denominator §7.4 of the plan calls
+    /// **Admission** criterion, the denominator §7.4 of the plan calls
     /// "N independent days": out-of-sample trading days pooled across folds.
     pub min_oos_sessions: usize,
     /// S1 criterion, applied under `free_fills`: a strategy that cannot make

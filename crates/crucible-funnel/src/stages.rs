@@ -170,10 +170,13 @@ pub struct Criteria {
     /// the 0 / 0.5 / 1 / 2 ticks the rule names. Integers because a price grid
     /// has half-ticks and not tenths (D-0073).
     pub cost_sweep_half_ticks: Vec<i64>,
-    /// S0-adequacy: fewer pooled out-of-sample round-trips than this and there
-    /// is nothing to measure, whatever the return says.
+    /// **Admission**: fewer pooled out-of-sample round-trips than this and
+    /// there is nothing to measure, whatever the return says. Checked before
+    /// any stage runs, and named `admission` rather than `s0` since D-0084 —
+    /// sample adequacy is a pre-trial check, not the predictor gate.
     pub min_oos_trades: usize,
-    /// S0-adequacy: pooled out-of-sample trading days.
+    /// **Admission**: pooled out-of-sample trading days. See
+    /// [`Criteria::min_oos_trades`] for why this is not `s0`.
     pub min_oos_sessions: usize,
     /// S1: pooled out-of-sample return under `free_fills`.
     pub min_oos_return_pct_free_fills: f64,
