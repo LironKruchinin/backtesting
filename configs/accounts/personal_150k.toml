@@ -1,0 +1,81 @@
+# Personal cash futures account, $150000 baseline
+#
+# An ACCOUNT, as data. Pairs with a strategy config (`configs/*-combo.toml`) to
+# form one evaluation identity; the methodology, the engine capture contract and
+# the metric battery live in `docs/ACCOUNT_EVAL_SPEC.md`. Nothing here describes
+# execution costs — those stay in the strategy config's named `[execution]` fill
+# model (CLAUDE.md §2.4), because an account rule and a cost assumption are
+# different claims and must not share a field.
+#
+# Money is a decimal STRING in USD (D-0027); the loader parses it to
+# `_nano_usd` integers. Percentages are f64 on a 0-100 scale (§4).
+#
+# VERIFICATION: there is no firm and there are no firm rules to verify. The one
+# number a cash account would need from an outside authority is the margin
+# requirement, and `[margin]` explains why it is empty rather than guessed
+# (accessed 2026-07-30).
+#
+# The control arm. No firm, no profit target, no threshold, nothing to breach
+# -- which is the whole point of keeping these beside the prop files: every
+# metric that differs between `personal_150k` and a prop account of the same
+# size, on the same strategy and the same window, is attributable to the
+# ACCOUNT RULE and nothing else. That is the comparison the prop numbers only
+# mean something inside of.
+#
+# `[ruin]` replaces breach probability. `[margin]` is deliberately empty and
+# says why.
+
+schema_version = 1
+
+[account]
+id = "personal_150k"
+firm = "none"
+product = "self-funded cash account"
+phase = "cash"
+kind = "cash"
+nominal_size_usd = "150000"
+starting_balance_usd = "150000"
+
+[source]
+rule_pages = [
+  "https://www.cmegroup.com/solutions/risk-management/performance-bonds-margins.html",
+]
+accessed_date = "2026-07-30"
+page_last_updated = "unstated"
+
+[session]
+# The firm's trading day, which is NOT the exchange session. Daily PnL is
+# sliced on this day boundary via `crucible-data::calendar` (§4 pins fold
+# windows in trading days for the same reason a wall-clock day is wrong
+# here: 18:00 CT Monday is Tuesday's session).
+calendar_id = "cme_globex_equity_index"
+
+[position_limit]
+scaling = "none"
+# No firm-imposed cap. The real cap is margin, which is
+# unmodelled (see `[margin]`), so `max_contracts` is absent:
+# size comes from the strategy config's `qty_contracts` and
+# the report must say that no margin cap was checked.
+
+[ruin]
+# A cash account cannot be 'breached' -- there is no firm to close
+# it -- so risk-of-ruin replaces breach probability (ACCOUNT_EVAL_SPEC
+# §4.5). This threshold is OUR pre-declared research parameter, not
+# anybody's rule, and every report that quotes a ruin probability must
+# print the threshold beside it.
+threshold_cum_pnl_pct = -50.0
+basis = "equity_including_unrealized"
+
+[margin]
+# DELIBERATELY EMPTY. CME performance bonds change by clearing
+# advisory (several times a year), so a number pasted here would be
+# a stale constant wearing a spec's clothes -- and CME's Data Terms
+# of Use forbid automated retrieval, so this session could not read
+# one at all. Fill `initial_margin_per_contract_usd` and
+# `maintenance_margin_per_contract_usd` by hand from the official
+# product margin page, with `as_of_date`, or leave them absent and
+# accept that the contract-count cap is unmodelled -- which is what
+# absent MEANS here. It must never be silently defaulted.
+#   https://www.cmegroup.com/markets/equities/sp/e-mini-sandp500.margins.html
+#   https://www.cmegroup.com/markets/equities/sp/micro-e-mini-sandp-500.margins.html
+#   https://www.cmegroup.com/solutions/risk-management/performance-bonds-margins.html

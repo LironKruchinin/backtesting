@@ -1012,3 +1012,75 @@ propose a superseding entry — don't silently diverge.
   completion proof, not scaffolding. Severity is the justification and was
   unknowable before the audit — **ZN.FUT at 94 % missing** is the number that made
   this a close-blocker rather than a cleanup.
+- **D-0067** (2026-07-30) — **Account evaluation is a first-passage problem over
+  a captured intraday equity path, estimated by day-block bootstrap; accounts are
+  data, not code; headlines are out-of-sample only.** Spec:
+  `docs/ACCOUNT_EVAL_SPEC.md`; sixteen accounts in `configs/accounts/*.toml`,
+  every figure read off the firm's own page on 2026-07-30 and cited there.
+  Nothing is implemented — this lands with the funnel in M3, and it deliberately
+  does not respecify `crucible-funnel::stats` (deflated Sharpe, PBO/CSCV,
+  permutation nulls stay M3's).
+  **The failure mode it exists to prevent, named:** an intraday trailing
+  threshold evaluated on daily closing marks *understates* breach probability,
+  one-directionally, because the maximum decline from a running high-water is
+  never smaller than the decline between two endpoints of the same path. The
+  cheap version of this measurement is optimistic by construction and looks
+  careful, which is the worst combination available.
+  **The intraday-vs-EOD shorthand is wrong and the schema splits it in two.**
+  `ratchet_basis` says what advances the threshold upward (continuous peak
+  including unrealized PnL — Apex, TPT PRO — versus highest end-of-day balance —
+  Topstep, TPT Test); `breach_basis` says what is tested against it. Every firm
+  that documents the second one tests it on **intraday unrealized equity**,
+  including the "EOD" accounts: Topstep's own page says the MLL "updates at the
+  end of each trading day but is monitored in real time throughout the session".
+  A model that only checks daily closes is wrong about a Topstep account, not
+  approximately right about it. One formula covers all sixteen —
+  `threshold(t) = min(max(0, max_{s≤t} B(s)) − D, L)`, breach on `≤` — and it
+  reproduces every worked example on every firm's page, which is why those
+  examples become the golden fixtures.
+  **Everything is modelled in cumulative-PnL space**, not balance: a Topstep
+  Combine starts at $50,000 with its limit $2,000 below, and a Topstep Express
+  Funded Account starts at **$0** with its limit at −$2,000 locking at $0. Same
+  account in cum-PnL space, two accounts in balance space.
+  **Capture, not reconstruction.** The intraday high-water series is a streaming
+  O(1) reducer inside the engine's existing mark-to-market loop (`replay.rs`
+  step 2). It is never rebuilt from OHLC afterwards, because a reconstruction
+  re-opens the intrabar path ambiguity that the engine's worst-case fill
+  convention already resolved, and would measure the drawdown of a path the
+  account never took. A 16-year 1s replay is 334 M bars: the per-bar equity
+  vector alone is ~5 GiB, so full retention is refused and a 72-byte per-day
+  summary (290 KB for 4,032 sessions) replaces it — **with a proof that the
+  summary is exactly sufficient** for the breach question, plus the one
+  conservative case (a lock engaging mid-day) disclosed and counted rather than
+  absorbed.
+  **Block bootstrap, `L = 20` trading days, resampling whole days as objects**
+  rather than scalar daily PnL — that is what lets a daily bootstrap answer an
+  intraday question without inventing a within-day path. `L = 20` from three
+  independent arguments: the `O(n^{1/3})` rate (10–16 for 1–16 years of
+  sessions), volatility-clustering persistence of weeks, and the fact that first
+  passage is driven by runs of consecutive losing days, so the report prints the
+  empirical longest loss streak beside `L`. An i.i.d. bootstrap scatters a bad
+  month and **understates** breach probability; `L = 1` is kept in the mandatory
+  sweep so that understatement is a number rather than an argument.
+  **Account selection is priced, not forbidden.** `account_id` joins
+  `(config_hash, combo_index, fold)` in the run identity and the seed derivation
+  (extending D-0064), the registry insert happens before the run, and every extra
+  account tried is a trial charged to the hypothesis family. Choosing the account
+  size after seeing results is otherwise a maximum over sixteen draws reported as
+  an expectation — the same error as quoting the best grid combo's Sharpe.
+  `personal_*` gets **risk of ruin against a pre-declared threshold**, never a
+  synthetic drawdown limit: inventing a failure mode to make a comparison table
+  look uniform measures the invention.
+  **Refusals recorded rather than guessed** (twelve, in the spec's §8): CME
+  performance bonds are not encoded at all — CME's site blocks automated access
+  and its rates change by clearing advisory, so `[margin]` is empty and says why;
+  TPT's micro ratio, TPT's flat-by time (their own copy says both "5PM CT" and
+  "5PM EST", and 17:00 CT is the Globex *open*), and three firms' target-basis
+  wording are absent or encoded as the stricter reading with the ambiguity
+  written down. Take Profit Trader's PRO rules **prohibit automated trading
+  outright**, so those files are a reference point rather than a target, and that
+  is a fact about the product, not a caveat about the model. Ten baseline
+  figures were corrected against the firms' pages, including Apex's 150K drawdown
+  ($4,000, not $4,500 — corroborated by their own $154,100 safety net) and
+  Topstep's consistency rule (best day ≤ 50 % of the *profit target*, not 30 % of
+  total profit).

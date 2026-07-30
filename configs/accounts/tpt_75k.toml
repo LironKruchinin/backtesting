@@ -1,0 +1,152 @@
+# Take Profit Trader 75K -- Test (evaluation) account
+#
+# An ACCOUNT, as data. Pairs with a strategy config (`configs/*-combo.toml`) to
+# form one evaluation identity; the methodology, the engine capture contract and
+# the metric battery live in `docs/ACCOUNT_EVAL_SPEC.md`. Nothing here describes
+# execution costs — those stay in the strategy config's named `[execution]` fill
+# model (CLAUDE.md §2.4), because an account rule and a cost assumption are
+# different claims and must not share a field.
+#
+# Money is a decimal STRING in USD (D-0027); the loader parses it to
+# `_nano_usd` integers. Percentages are f64 on a 0-100 scale (§4).
+#
+# VERIFICATION: every number below was read off the firm's own page on
+# 2026-07-30. Sources and access date are in `[source]`. Where the page is
+# ambiguous or silent the field is ABSENT and the gap is named in
+# `docs/ACCOUNT_EVAL_SPEC.md` §8 — this file never carries a number that was
+# inferred, remembered, or taken from an aggregator.
+#
+# NOTHING HERE IS FROM MEMORY OR AN AGGREGATOR. Every figure was read off the
+# firm's own help centre on the access date below, including the $75,000 size
+# the working baseline did not list.
+#
+# READ THIS BEFORE QUOTING ANY TPT NUMBER: the PRO (funded) account rules say
+# 'No Trading bots/Algos -- We do not allow any automated or bot trading of any
+# kind. All trades must be manually executed by the trader.' A systematic
+# strategy therefore CANNOT be run on a TPT PRO account, and a P(pass) computed
+# for this Test file describes a path to an account this project's output is not
+# permitted to trade. The PRO page also forbids open positions one minute
+# either side of FOMC/NFP/CPI. That is a fact about the product, not a caveat
+# about the model, and it is the reason this file exists as a reference point
+# rather than as a target. Whether the ban extends to the Test phase is not
+# stated on the Test rule pages -- open question, not an assumption.
+
+schema_version = 1
+
+[account]
+id = "tpt_75k"
+firm = "Take Profit Trader"
+product = "Test"
+phase = "evaluation"
+kind = "prop_evaluation"
+# The label the firm sells. For a prop account it is buying power,
+# not always money in the account; `starting_balance_usd` is the
+# number the threshold arithmetic uses.
+nominal_size_usd = "75000"
+starting_balance_usd = "75000"
+
+[source]
+rule_pages = [
+  "https://takeprofittraderhelp.zendesk.com/hc/en-us/articles/15169070804125-Rule-1-Hit-Your-Profit-Target",
+  "https://takeprofittraderhelp.zendesk.com/hc/en-us/articles/15170265979165-Rule-3-Do-Not-Hit-End-Of-Day-EOD-Maximum-Trailing-Drawdown",
+  "https://takeprofittraderhelp.zendesk.com/hc/en-us/articles/15170316538013-Rule-5-Be-Consistent",
+  "https://takeprofittraderhelp.zendesk.com/hc/en-us/articles/15171769361053-PRO-Account-Rules",
+]
+accessed_date = "2026-07-30"
+page_last_updated = "2026-05-06"
+
+[session]
+# The firm's trading day, which is NOT the exchange session. Daily PnL is
+# sliced on this day boundary via `crucible-data::calendar` (§4 pins fold
+# windows in trading days for the same reason a wall-clock day is wrong
+# here: 18:00 CT Monday is Tuesday's session).
+calendar_id = "cme_globex_equity_index"
+# No flat-by time is encoded. TPT's own copy says 'before the
+# market closes at 5PM CT' for the Test and '5PM EST' for PRO;
+# 17:00 CT is the Globex OPEN and 16:00 CT is the close, so both
+# readings are wrong on their face and neither is safe to encode.
+# ACCOUNT_EVAL_SPEC §8 carries it.
+
+[objective]
+profit_target_usd = "4500"
+# Does the target have to be STANDING at the close, or does touching
+# it intraday count? The two give different P(pass) and the
+# difference is not small for a strategy that gives profit back.
+target_basis = "end_of_day_balance"
+# NOT STATED by TPT. Encoded as the stricter reading because
+# the Test drawdown is itself an end-of-day construction;
+# flagged in ACCOUNT_EVAL_SPEC §8.
+min_trading_days = 5
+
+[drawdown]
+# THE consequential section. Two independent axes, conflated by the
+# industry's 'intraday vs EOD' shorthand and separated here:
+#   ratchet_basis -- what advances the threshold UPWARD
+#   breach_basis  -- what is tested AGAINST the threshold
+# Both firms whose pages state it test the breach on intraday
+# unrealized equity; only the ratchet differs. See ACCOUNT_EVAL_SPEC
+# §2 for the threshold formula every firm's worked example satisfies.
+amount_usd = "2500"
+ratchet_basis = "highest_daily_closing_equity"
+# The threshold stops rising once it reaches this level, measured
+# as cumulative PnL from `starting_balance_usd` (so 0 = the
+# starting balance). Reached when peak equity is this level plus
+# `amount_usd`.
+ratchet_lock_at_cum_pnl_usd = "0"
+breach_basis = "equity_including_unrealized"
+breach_effect = "fail_account"
+# 'the minimum account balance follows your highest end-of-day
+# balance upward ... until [it] reaches the original starting
+# balance ... it stops trailing and remains fixed.'
+#
+# AMBIGUITY ON THE FIRM'S OWN PAGE, recorded not resolved: the
+# same article opens with 'the drawdown for test accounts is
+# calculated only at the end of the trading day, not during
+# open trades' and closes with 'If your account drops to the
+# Minimum Account Balance at any time -- through realized or
+# unrealized losses -- the account is immediately liquidated.'
+# The first sentence is about how the LEVEL is computed, the
+# second about when the BREACH is tested, and read that way
+# they agree -- which is precisely the ratchet/breach split
+# this schema encodes. The stricter reading is encoded because
+# it is the one in the 'When an Account Fails' section.
+#
+# The PRO phase ratchets on peak_equity_including_unrealized
+# with the same amount ('Maximum drawdown in PRO = maximum
+# drawdown from your passed test') and the same lock at the
+# starting balance. So one firm supplies both ratchet bases,
+# with the drawdown amount held constant -- the cleanest
+# available demonstration of what the distinction is worth.
+
+[daily_loss_limit]
+enforced = false
+# ARGUMENT FROM ABSENCE, labelled as such: the Test's own
+# enumerated core rules (profit target, position size, EOD
+# trailing drawdown, approved products/hours, consistency, no
+# counter positions) contain no daily loss limit, and neither
+# does the PRO rule list. TPT's marketing says outright that
+# there is none, but marketing copy is not a rule page, so the
+# enumeration is what this rests on.
+
+[position_limit]
+max_contracts = 9
+scaling = "none"
+# '9 Contracts'. The micro-to-mini ratio is NOT stated on the
+# rule pages, so `micros_per_contract` is absent rather than
+# assumed to be 10 like the other two firms. Open question.
+
+[consistency]
+rule = "best_day_vs_net_profit"
+threshold_pct = 50.0
+effect = "raise_profit_target"
+# 'no single trading day may exceed 50% of your total net
+# profits ... you simply need to increase your total profit
+# goal'. The required net profit is therefore best_day / 0.50.
+#
+# THE PAGE'S OWN FORMULA DISAGREES WITH ITS OWN RULE: it gives
+# 'Updated Profit Goal = Net P/L x 2' ($3,100 -> $6,200) and
+# then, two lines later, shows $2,000/$4,001 < 50% as
+# sufficient. best_day/0.50 = $4,000 is the reading consistent
+# with the rule and with their second line; the x2 form
+# overshoots whenever net P/L already exceeds the best day.
+# The rule form is encoded. Recorded in ACCOUNT_EVAL_SPEC §7.

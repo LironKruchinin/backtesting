@@ -1,0 +1,146 @@
+# Apex Trader Funding 100K -- Intraday Trailing Drawdown EVALUATION
+#
+# An ACCOUNT, as data. Pairs with a strategy config (`configs/*-combo.toml`) to
+# form one evaluation identity; the methodology, the engine capture contract and
+# the metric battery live in `docs/ACCOUNT_EVAL_SPEC.md`. Nothing here describes
+# execution costs — those stay in the strategy config's named `[execution]` fill
+# model (CLAUDE.md §2.4), because an account rule and a cost assumption are
+# different claims and must not share a field.
+#
+# Money is a decimal STRING in USD (D-0027); the loader parses it to
+# `_nano_usd` integers. Percentages are f64 on a 0-100 scale (§4).
+#
+# VERIFICATION: every number below was read off the firm's own page on
+# 2026-07-30. Sources and access date are in `[source]`. Where the page is
+# ambiguous or silent the field is ABSENT and the gap is named in
+# `docs/ACCOUNT_EVAL_SPEC.md` §8 — this file never carries a number that was
+# inferred, remembered, or taken from an aggregator.
+#
+# DISAGREES WITH THE WORKING BASELINE (verified figure wins, both recorded):
+#   - 150K max drawdown is $4,000, NOT $4,500. Corroborated twice: the
+#     Intraday Evaluation table AND the PA payout table's Safety Net of
+#     $154,100 = 150,000 + 4,000 + 100.
+#   - 100K max contracts is 8, not 10. 150K is 12, not 14.
+#   - the threshold does NOT lock at the starting balance in an evaluation.
+#     Three different lock levels are documented for three phases/platforms;
+#     see `[drawdown]`.
+
+schema_version = 1
+
+[account]
+id = "apex_100k"
+firm = "Apex Trader Funding"
+product = "Intraday Trailing Drawdown Evaluation"
+phase = "evaluation"
+kind = "prop_evaluation"
+# The label the firm sells. For a prop account it is buying power,
+# not always money in the account; `starting_balance_usd` is the
+# number the threshold arithmetic uses.
+nominal_size_usd = "100000"
+starting_balance_usd = "100000"
+
+[source]
+rule_pages = [
+  "https://support.apextraderfunding.com/hc/en-us/articles/45683414022299-Intraday-Trailing-Drawdown-Evaluations",
+  "https://support.apextraderfunding.com/hc/en-us/articles/45683513113115-Intraday-Trailing-Drawdown-Explained",
+  "https://support.apextraderfunding.com/hc/en-us/articles/46729420990235-Scaling-Levels-PA-Explained",
+  "https://support.apextraderfunding.com/hc/en-us/articles/47206370796827-Intraday-Trailing-Drawdown-Payouts",
+]
+accessed_date = "2026-07-30"
+page_last_updated = "unstated"
+
+[session]
+# The firm's trading day, which is NOT the exchange session. Daily PnL is
+# sliced on this day boundary via `crucible-data::calendar` (§4 pins fold
+# windows in trading days for the same reason a wall-clock day is wrong
+# here: 18:00 CT Monday is Tuesday's session).
+calendar_id = "cme_globex_equity_index"
+# Apex's own pages do not state a flat-by time for this product,
+# so none is encoded. The evaluation is marked passed 'after
+# market close', which is why `target_basis` is end-of-day.
+
+[objective]
+profit_target_usd = "6000"
+# Does the target have to be STANDING at the close, or does touching
+# it intraday count? The two give different P(pass) and the
+# difference is not small for a strategy that gives profit back.
+target_basis = "end_of_day_balance"
+# 'the evaluation will be marked as passed after market close'
+# -- Intraday Trailing Drawdown Evaluations. So the target is
+# read off a closing balance while the breach is tested on the
+# intraday path: an asymmetry that lowers P(pass), and exactly
+# the kind a daily-close-only model would miss.
+min_trading_days = 0
+access_period_calendar_days = 30
+
+[drawdown]
+# THE consequential section. Two independent axes, conflated by the
+# industry's 'intraday vs EOD' shorthand and separated here:
+#   ratchet_basis -- what advances the threshold UPWARD
+#   breach_basis  -- what is tested AGAINST the threshold
+# Both firms whose pages state it test the breach on intraday
+# unrealized equity; only the ratchet differs. See ACCOUNT_EVAL_SPEC
+# §2 for the threshold formula every firm's worked example satisfies.
+amount_usd = "3000"
+ratchet_basis = "peak_equity_including_unrealized"
+# The threshold stops rising once it reaches this level, measured
+# as cumulative PnL from `starting_balance_usd` (so 0 = the
+# starting balance). Reached when peak equity is this level plus
+# `amount_usd`.
+ratchet_lock_at_cum_pnl_usd = "6000"
+breach_basis = "equity_including_unrealized"
+breach_effect = "fail_account"
+#
+# PLATFORM-DEPENDENT LOCK, and the page says so:
+#   Rithmic / WealthCharts evaluation -> locks at the profit-target
+#     balance (encoded above). Their worked example: 50K, $2,000
+#     drawdown, threshold fixes at $53,000 once peak equity
+#     touches $55,000.
+#   Tradovate evaluation -> 'trails indefinitely with the peak
+#     account balance'. That is `ratchet_lock_at_cum_pnl_usd`
+#     ABSENT, and it is a strictly harder account.
+#   Performance Account (post-pass) -> locks at starting balance
+#     + $100.
+# The encoded value is the Rithmic/WealthCharts one. It does not
+# move the headline: the lock is only reached at peak =
+# target + drawdown, which is beyond the level that already
+# passed the evaluation, so P(breach before target) is identical
+# under both variants. It WILL matter the day a funded phase is
+# modelled. Recorded, not guessed at.
+#
+# The page contradicts itself once and the worked examples win:
+# the FAQ says trailing stops when the threshold 'reaches Profit
+# Target Balance + $2,000' while its own example fixes the
+# threshold at $53,000 on a $53,000 target. $2,000 is the 50K
+# drawdown, i.e. the sentence describes the PEAK trigger and
+# mislabels it the threshold. Same shape of slip on the PA page.
+
+[daily_loss_limit]
+enforced = false
+# 'The Intraday Evaluation does not have a Daily Loss Limit.
+# Risk control is enforced entirely through the real-time
+# trailing threshold.' Stated, not inferred from absence.
+# The Intraday PERFORMANCE account does have a tier-based DLL
+# (and tier-based position size); neither is encoded here
+# because this file is the evaluation phase. ACCOUNT_EVAL_SPEC
+# §8 carries it as an open item.
+
+[position_limit]
+max_contracts = 8
+micros_per_contract = 10
+scaling = "none"
+# 'Contract limits remain fixed throughout the Evaluation. They
+# do not scale with profits.' Micro equivalence is Apex's own:
+# 'ten (10) micro contracts equal one (1) standard contract'.
+# The matching PA starts at 6 contracts under tier scaling --
+# a path-dependent position size this file does not model.
+
+[consistency]
+rule = "none"
+# 'Consistency: Not Applied' for all four evaluation sizes.
+# The PA phase applies 50% consistency at payout: no single
+# profitable day may be >= 50% of profit since the last
+# approved payout. PA payout gates, for the day a funded phase
+# is modelled: 5 qualifying days of >= $250 net, Safety Net
+# $103100 (= start + drawdown + $100), minimum request $500,
+# maximum 6 payouts, then the PA closes. 100% split.
