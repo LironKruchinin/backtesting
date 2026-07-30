@@ -241,7 +241,7 @@ mod tests {
         let gathered =
             gather_series(dir.path(), "ES", TimeFrame::M1, DecadeAnchor::DEFAULT).expect("gather");
         assert_eq!(gathered.series.len(), 3);
-        let expiries = BTreeMap::new();
+        let expiries = crate::continuous::ExpiryHistory::default();
         let table = build_roll_table(&RollTableInput {
             root: "ES",
             tf: TimeFrame::M1,

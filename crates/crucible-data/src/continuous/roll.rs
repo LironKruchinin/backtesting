@@ -38,7 +38,41 @@
 //!   contract did not trade counts as zero volume and breaks the streak.
 //! - [`RollRule::CalendarDaysBeforeExpiry`] — Databento's `.c`. Rolls on the
 //!   first session at or after `expiry − days` on which both contracts
-//!   traded.
+//!   traded — where `expiry` is **the expiry known at that session's own
+//!   decision instant** (D-0085; see below).
+//!
+//! ## The calendar rule's fixed point, and why it needs no iteration
+//!
+//! Since D-0085 an expiry is a function of when you ask:
+//! [`ExpiryHistory::as_of`] returns the latest statement whose `ts_recv` does
+//! not lie in the asker's future. That makes the calendar rule circular on its
+//! face: `due` depends on the expiry, the expiry depends on the decision
+//! instant, and the decision instant is the roll that `due` produces.
+//!
+//! ```text
+//! D = g(f(D))   f = expiry as of an instant, g = the roll instant a due date gives
+//! ```
+//!
+//! **The circle is only apparent, because the candidate set does not depend on
+//! the expiry.** A candidate is a session both contracts traded, and its
+//! decision instant `max(front.avail_ts(day), next.avail_ts(day))` is a property
+//! of the bars alone — no expiry enters it. So the equation decomposes into an
+//! independent test per candidate: *given what was knowable at this candidate's
+//! own instant, was the roll due by this session?* A candidate that passes its
+//! own test **is** a solution of `D = g(f(D))`, and the answer is the earliest
+//! such candidate, because a roll is the first time a rule fires.
+//!
+//! `calendar_roll_day` therefore resolves the fixed point in one ascending
+//! scan, at most one step per front session, with no iteration to diverge and
+//! nothing that could depend on iteration order or on a float (§2.2). There is
+//! no "did not converge" branch because there is no loop that could fail to
+//! converge: the bound is the session count, finite by construction — a
+//! [`ContractSeries`] holds a `Vec`.
+//!
+//! What this buys is the case plain "latest wins" cannot even see: a correction
+//! published *after* the roll it would have moved is invisible to that roll, as
+//! it must be, because a backtest could not have read it. Where the archive
+//! holds one, [`late_expiry_corrections`] names it instead of absorbing it.
 //!
 //! **Open interest (`.n`) is deliberately absent, as a variant and not only
 //! as an implementation.** It needs the `statistics` schema's open-interest
@@ -103,6 +137,7 @@ use crate::catalog::{TsRange, ts_serde};
 use crate::curated::path::encode_instrument;
 
 use super::error::ContinuousError;
+use super::expiry::ExpiryHistory;
 use super::session::{ContractSeries, SessionBar};
 use super::symbol::{ContractSymbol, DecadeAnchor};
 
@@ -196,6 +231,25 @@ impl RollRule {
                 })
             }
             _ => Ok(()),
+        }
+    }
+
+    /// Whether this rule reads [`RollTableInput::expiries`] at all.
+    ///
+    /// The volume rule does not: it compares two contracts' session volumes, and
+    /// the expiry backstop is a statement about *which contract stops trading
+    /// first*, read off the bars. Measured on this archive, `.v` on GC, ZN and
+    /// 6E produces byte-identical tables under either expiry (D-0085).
+    ///
+    /// It is public because the CLI must not *resolve* an input the rule will
+    /// not *read* — resolving GC's expiries used to exit 4 on a `.v` build that
+    /// then never looked at them. One predicate, so the caller and the builder
+    /// cannot drift.
+    #[must_use]
+    pub const fn reads_expiries(&self) -> bool {
+        match self {
+            RollRule::VolumeCrossover { .. } => false,
+            RollRule::CalendarDaysBeforeExpiry { .. } => true,
         }
     }
 
@@ -455,9 +509,10 @@ pub struct RollTableInput<'a> {
     pub rule: RollRule,
     /// Anchor used to parse one-digit contract years.
     pub decade_anchor: DecadeAnchor,
-    /// Contract expiries. Required by a calendar rule; unused by the volume
-    /// rule, which is why it can run with none.
-    pub expiries: &'a BTreeMap<ContractSymbol, Ts>,
+    /// Contract expiries, with when each became knowable. Read **only** by a
+    /// calendar rule ([`RollRule::reads_expiries`]); the volume rule runs with
+    /// an empty history and produces the same table it would with a full one.
+    pub expiries: &'a ExpiryHistory,
     /// Where those expiries came from, for the record.
     pub expiry_source: &'a str,
     /// One series per contract, keyed by delivery so iteration order is the
@@ -522,12 +577,24 @@ pub fn build_roll_table(input: &RollTableInput<'_>) -> Result<RollTable, Continu
                 volume_crossover_day(front_series, next_series, confirm_days, after_day)
             }
             RollRule::CalendarDaysBeforeExpiry { days } => {
-                let expiry = input.expiries.get(front_symbol).ok_or_else(|| {
-                    ContinuousError::MissingExpiry {
+                // A contract the source names nothing about is a refusal; one
+                // whose expiry is not knowable *yet* is simply not due yet, and
+                // the scan handles that. The two are different sentences and
+                // `as_of` cannot tell them apart, which is why the question is
+                // asked here.
+                if !input.expiries.contains(front_symbol) {
+                    return Err(ContinuousError::MissingExpiry {
                         contract: front_series.instrument.as_str().to_owned(),
-                    }
-                })?;
-                calendar_roll_day(front_series, next_series, *expiry, days, after_day)
+                    });
+                }
+                calendar_roll_day(
+                    front_series,
+                    next_series,
+                    front_symbol,
+                    input.expiries,
+                    days,
+                    after_day,
+                )
             }
         };
         // The backstop, and its own precondition. A contract that stops
@@ -619,21 +686,110 @@ fn volume_crossover_day(
     None
 }
 
-/// First session at or after `expiry − days` on which both contracts traded.
+/// First session both contracts traded on at or after `expiry − days`, where
+/// `expiry` is the one knowable **at that session's own decision instant**.
+///
+/// The fixed-point resolution the module docs argue for, in one ascending scan:
+/// each candidate is tested against what was knowable when the candidate's own
+/// bars became available, so a candidate that passes is self-consistent and the
+/// earliest one is the roll.
+///
+/// A session whose decision instant precedes every statement about the contract
+/// simply is not due — the rule cannot fire on an expiry nobody had published
+/// yet — so the scan continues rather than refusing. A contract the history does
+/// not name at all is refused by the caller before the scan starts.
 fn calendar_roll_day(
     front: &ContractSeries,
     next: &ContractSeries,
-    expiry: Ts,
+    contract: &ContractSymbol,
+    history: &ExpiryHistory,
     days: u32,
     after_day: i64,
 ) -> Option<i64> {
-    let expiry_day = crate::ingest::window::days_from_civil(crate::ingest::window::date_of(expiry));
-    let due = expiry_day - i64::from(days);
-    front
-        .sessions
-        .iter()
-        .find(|s| s.day > after_day && s.day >= due && next.session(s.day).is_some())
-        .map(|s| s.day)
+    for bucket in front.sessions.iter().filter(|s| s.day > after_day) {
+        let Some(next_bucket) = next.session(bucket.day) else {
+            continue;
+        };
+        // Exactly the instant `build_roll_table` will stamp on the roll if this
+        // candidate wins, and it is computed from the bars alone — which is what
+        // makes the test self-consistent rather than circular.
+        let decision_ts = Ts(bucket.avail_ts.0.max(next_bucket.avail_ts.0));
+        let Some(expiry) = history.as_of(contract, decision_ts) else {
+            continue;
+        };
+        let expiry_day =
+            crate::ingest::window::days_from_civil(crate::ingest::window::date_of(expiry));
+        if bucket.day >= expiry_day - i64::from(days) {
+            return Some(bucket.day);
+        }
+    }
+    None
+}
+
+/// A restatement of a contract's expiry that landed **after** the roll it would
+/// have moved.
+///
+/// The lookahead D-0085's availability filter refuses to absorb, made countable.
+/// Plain "latest wins" cannot report this, because it never looks at when a
+/// statement arrived; it just quietly uses the correction. Measured on this
+/// archive: **zero** — every correction landed between 7 days and 18 months
+/// before its own roll — which is the number this type exists to keep honest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LateExpiryCorrection {
+    /// The contract being left at that roll.
+    pub contract: String,
+    /// The roll instant the table recorded.
+    pub roll_ts: Ts,
+    /// The expiry the roll was decided on — the one knowable at `roll_ts`.
+    pub used: Ts,
+    /// The expiry the source ends up stating.
+    pub latest: Ts,
+    /// When the correction became knowable. Strictly after `roll_ts`, which is
+    /// the whole point.
+    pub corrected_avail_ts: Ts,
+}
+
+/// Every roll in `table` that a later expiry statement would have moved.
+///
+/// Empty for a rule that reads no expiries ([`RollRule::reads_expiries`]) — a
+/// correction cannot be late for a decision that never consulted it.
+///
+/// # Errors
+/// [`ContinuousError::UnparseableSymbol`] if a contract in the table cannot be
+/// parsed against `anchor`, which [`RollTable::validate`] already refuses.
+pub fn late_expiry_corrections(
+    table: &RollTable,
+    history: &ExpiryHistory,
+    anchor: DecadeAnchor,
+) -> Result<Vec<LateExpiryCorrection>, ContinuousError> {
+    let mut out = Vec::new();
+    if !table.rule.reads_expiries() {
+        return Ok(out);
+    }
+    for row in &table.rows {
+        let symbol = ContractSymbol::parse_with_anchor(&row.from_contract, anchor)?;
+        let (Some(used), Some(latest)) =
+            (history.as_of(&symbol, row.roll_ts), history.latest(&symbol))
+        else {
+            continue;
+        };
+        if used == latest {
+            continue;
+        }
+        let corrected_avail_ts = history
+            .revisions(&symbol)
+            .iter()
+            .find(|r| r.expiration == latest)
+            .map_or(row.roll_ts, |r| r.avail_ts);
+        out.push(LateExpiryCorrection {
+            contract: row.from_contract.clone(),
+            roll_ts: row.roll_ts,
+            used,
+            latest,
+            corrected_avail_ts,
+        });
+    }
+    Ok(out)
 }
 
 /// Last session strictly after `after_day` on which both contracts traded —
@@ -899,7 +1055,7 @@ mod tests {
     fn build(
         series: &BTreeMap<ContractSymbol, ContractSeries>,
         rule: RollRule,
-        expiries: &BTreeMap<ContractSymbol, Ts>,
+        expiries: &ExpiryHistory,
     ) -> Result<RollTable, ContinuousError> {
         build_roll_table(&RollTableInput {
             root: "ES",
@@ -913,8 +1069,21 @@ mod tests {
         })
     }
 
-    fn no_expiries() -> BTreeMap<ContractSymbol, Ts> {
-        BTreeMap::new()
+    fn no_expiries() -> ExpiryHistory {
+        ExpiryHistory::default()
+    }
+
+    /// A history stating one expiry per contract, knowable from the beginning
+    /// of time — the shape every pre-D-0085 fixture implied.
+    fn always(entries: &[(&str, Ts)]) -> ExpiryHistory {
+        ExpiryHistory::from_observations(entries.iter().map(|(symbol, expiry)| {
+            (
+                ContractSymbol::parse(symbol).expect("valid"),
+                crate::continuous::expiry::ALWAYS_KNOWN,
+                *expiry,
+            )
+        }))
+        .expect("one statement per contract cannot disagree with itself")
     }
 
     // A clean roll. ESH4 leads on days 0 and 1; ESM4 out-trades it from day 2
@@ -1124,8 +1293,7 @@ mod tests {
                 series("ESM4", 0, &[(1, 105), (1, 105), (1, 105), (1, 105)]),
             ),
         ]);
-        let mut expiries = BTreeMap::new();
-        expiries.insert(ContractSymbol::parse("ESH4").expect("valid"), Ts(10 * DAY));
+        let expiries = always(&[("ESH4", Ts(10 * DAY))]);
         let table = build(
             &series,
             RollRule::CalendarDaysBeforeExpiry { days: 8 },
@@ -1137,6 +1305,249 @@ mod tests {
             Ts(2 * DAY + 12 * 3_600_000_000_000 + MIN)
         );
         assert_eq!(table.alias().as_str(), "ES.c.0");
+    }
+
+    // ------------------------------------ the availability rule (D-0085)
+
+    /// Four sessions of both contracts, so a calendar rule has somewhere to
+    /// land. Day 0..3, one bar each, available at 12:01.
+    fn four_sessions() -> BTreeMap<ContractSymbol, ContractSeries> {
+        chain_of(vec![
+            (
+                "ESH4",
+                series("ESH4", 0, &[(100, 100), (100, 100), (100, 100), (100, 100)]),
+            ),
+            (
+                "ESM4",
+                series("ESM4", 0, &[(1, 105), (1, 105), (1, 105), (1, 105)]),
+            ),
+        ])
+    }
+
+    /// The decision instant of session `day` in [`four_sessions`]: both
+    /// contracts' buckets close at 12:01.
+    fn decision_ts(day: i64) -> Ts {
+        Ts(day * DAY + 12 * 3_600_000_000_000 + MIN)
+    }
+
+    /// One nanosecond before `ts` — a statement that is knowable *just* in time.
+    fn before(ts: Ts) -> Ts {
+        Ts(ts.0 - 1)
+    }
+
+    /// A history for ESH4 from `(ts_recv, expiry)` pairs.
+    fn esh4_history(records: &[(Ts, Ts)]) -> ExpiryHistory {
+        ExpiryHistory::from_observations(records.iter().map(|(recv, expiry)| {
+            (
+                ContractSymbol::parse("ESH4").expect("valid"),
+                *recv,
+                *expiry,
+            )
+        }))
+        .expect("orderable")
+    }
+
+    // ======================================================================
+    // THE TRAP CONTROL, at the level that matters — a roll DATE. The vendor
+    // states ESH4 expiring on day 10, then restates it on day 9 as expiring on
+    // day 9 instead: later record, earlier expiry, the direction all four real
+    // cases take. With `days = 8`:
+    //   max(ts_recv)     -> expiry day 9  -> due day 1 -> roll on day 1
+    //   max(expiration)  -> expiry day 10 -> due day 2 -> roll on day 2
+    // An implementation keyed on the expiry moves this roll a session late, and
+    // that is exactly what would have happened to ZN and 6E.
+    // ======================================================================
+    #[test]
+    fn a_restatement_moves_the_calendar_roll_and_the_key_is_ts_recv() {
+        let series = four_sessions();
+        let history = esh4_history(&[
+            // Said on day 0: expires day 10.
+            (before(decision_ts(0)), Ts(10 * DAY)),
+            // Restated during day 1, before that session's decision instant:
+            // expires day 9 after all.
+            (before(decision_ts(1)), Ts(9 * DAY)),
+        ]);
+        let table = build(
+            &series,
+            RollRule::CalendarDaysBeforeExpiry { days: 8 },
+            &history,
+        )
+        .expect("build");
+        assert_eq!(
+            table.rows[0].roll_ts,
+            decision_ts(1),
+            "the restated (earlier) expiry was knowable, so the roll is due a \
+             session earlier — max(ts_recv)"
+        );
+        assert_ne!(
+            table.rows[0].roll_ts,
+            decision_ts(2),
+            "day 2 is what max(expiration) would give: the stale record's due day"
+        );
+    }
+
+    // The availability filter, biting at roll level. Same fixture, but the
+    // correction lands *after* every session it would have moved: the roll must
+    // be decided on the pre-correction expiry, because a backtest standing there
+    // could not have read the restatement. Plain latest-wins would silently roll
+    // on day 1 — one session of lookahead, invisible on an adjusted chart.
+    #[test]
+    fn a_correction_landing_after_its_own_roll_does_not_move_it() {
+        let series = four_sessions();
+        let history = esh4_history(&[
+            (before(decision_ts(0)), Ts(10 * DAY)),
+            // Published a year later. Real, true, and unreadable at the roll.
+            (Ts(400 * DAY), Ts(9 * DAY)),
+        ]);
+        let table = build(
+            &series,
+            RollRule::CalendarDaysBeforeExpiry { days: 8 },
+            &history,
+        )
+        .expect("build");
+        assert_eq!(
+            table.rows[0].roll_ts,
+            decision_ts(2),
+            "the roll used the only expiry it could have known"
+        );
+
+        // And the detector says so, rather than the omission being invisible.
+        let late =
+            late_expiry_corrections(&table, &history, DecadeAnchor::DEFAULT).expect("parses");
+        assert_eq!(late.len(), 1, "{late:?}");
+        assert_eq!(late[0].contract, "ESH4");
+        assert_eq!(late[0].used, Ts(10 * DAY));
+        assert_eq!(late[0].latest, Ts(9 * DAY));
+        assert_eq!(late[0].corrected_avail_ts, Ts(400 * DAY));
+        assert!(late[0].corrected_avail_ts > late[0].roll_ts);
+    }
+
+    // The same detector on the same shape of data, with the correction landing
+    // BEFORE the roll: nothing was withheld, so nothing is reported. A detector
+    // that fired on every restatement would be noise; one that never fires is
+    // decoration (CLAUDE.md §7).
+    #[test]
+    fn a_correction_landing_before_its_own_roll_is_not_reported_as_late() {
+        let series = four_sessions();
+        let history = esh4_history(&[
+            (before(decision_ts(0)), Ts(10 * DAY)),
+            (before(decision_ts(1)), Ts(9 * DAY)),
+        ]);
+        let table = build(
+            &series,
+            RollRule::CalendarDaysBeforeExpiry { days: 8 },
+            &history,
+        )
+        .expect("build");
+        let late =
+            late_expiry_corrections(&table, &history, DecadeAnchor::DEFAULT).expect("parses");
+        assert!(late.is_empty(), "{late:?}");
+    }
+
+    // A session whose decision instant precedes every statement is not due —
+    // the rule cannot fire on an expiry nobody had published yet — so the scan
+    // continues rather than refusing or guessing. Here the expiry only becomes
+    // knowable during day 2, and day 2 is where the roll lands even though the
+    // due day (1) had already passed.
+    #[test]
+    fn a_rule_cannot_fire_on_an_expiry_that_was_not_published_yet() {
+        let series = four_sessions();
+        let history = esh4_history(&[(decision_ts(2), Ts(9 * DAY))]);
+        let table = build(
+            &series,
+            RollRule::CalendarDaysBeforeExpiry { days: 8 },
+            &history,
+        )
+        .expect("build");
+        assert_eq!(
+            table.rows[0].roll_ts,
+            decision_ts(2),
+            "overdue the instant it became knowable, and not before"
+        );
+    }
+
+    // The fixed point, exercised where it could plausibly wobble: the expiry is
+    // restated three times, twice moving the due day back past sessions already
+    // scanned. The answer is the earliest session that is due *by its own*
+    // decision instant — day 3, since day 0 saw expiry day 20 (due 12), days 1
+    // and 2 saw expiry day 30 (due 22), and only day 3 sees expiry day 10
+    // (due 2). One ascending pass decides it; there is nothing to iterate.
+    #[test]
+    fn the_calendar_fixed_point_is_the_first_self_consistent_session() {
+        let series = four_sessions();
+        let history = esh4_history(&[
+            (before(decision_ts(0)), Ts(20 * DAY)),
+            (before(decision_ts(1)), Ts(30 * DAY)),
+            (before(decision_ts(3)), Ts(10 * DAY)),
+        ]);
+        let table = build(
+            &series,
+            RollRule::CalendarDaysBeforeExpiry { days: 8 },
+            &history,
+        )
+        .expect("build");
+        assert_eq!(table.rows[0].roll_ts, decision_ts(3));
+        // And the solution really is self-consistent: the expiry knowable at
+        // the roll instant is the one whose due day the roll satisfies.
+        let esh4 = ContractSymbol::parse("ESH4").expect("valid");
+        let used = history
+            .as_of(&esh4, table.rows[0].roll_ts)
+            .expect("known by then");
+        assert_eq!(used, Ts(10 * DAY));
+    }
+
+    // ======================================================================
+    // The `.v` control. `build_roll_table` must read `expiries` only in the
+    // calendar arm, so a volume table is byte-identical under any history —
+    // including an absurd one. That is what makes it safe for the CLI to skip
+    // resolving expiries entirely for `.v`, which is what stopped `rolls --root
+    // GC` exiting 4 for an input it never read (D-0085).
+    // ======================================================================
+    #[test]
+    fn the_volume_rule_builds_the_same_table_under_any_expiry_history() {
+        let series = four_sessions();
+        let rule = RollRule::VolumeCrossover { confirm_days: 1 };
+        assert!(!rule.reads_expiries());
+
+        let none = build(&series, rule, &no_expiries()).expect("build");
+        let sane = build(&series, rule, &esh4_history(&[(Ts(0), Ts(10 * DAY))])).expect("build");
+        let absurd = build(
+            &series,
+            rule,
+            &esh4_history(&[
+                (Ts(i64::MIN / 2), Ts(-500 * DAY)),
+                (Ts(i64::MAX / 2), Ts(50_000 * DAY)),
+            ]),
+        )
+        .expect("build");
+
+        assert_eq!(none.rows, sane.rows);
+        assert_eq!(none.rows, absurd.rows);
+        assert_eq!(none.contracts, absurd.contracts);
+        // And a late-correction report is meaningless for a rule that read
+        // nothing, so it is empty rather than invented.
+        assert!(
+            late_expiry_corrections(
+                &absurd,
+                &esh4_history(&[(Ts(0), Ts(10 * DAY))]),
+                DecadeAnchor::DEFAULT
+            )
+            .expect("parses")
+            .is_empty()
+        );
+    }
+
+    // The other half of that claim: the calendar rule DOES read them, so the
+    // same three histories must not all agree. Without this the control above
+    // would pass on a build that ignored expiries everywhere.
+    #[test]
+    fn the_calendar_rule_does_read_the_history_it_is_given() {
+        let series = four_sessions();
+        let rule = RollRule::CalendarDaysBeforeExpiry { days: 8 };
+        assert!(rule.reads_expiries());
+        let early = build(&series, rule, &esh4_history(&[(Ts(0), Ts(9 * DAY))])).expect("build");
+        let late = build(&series, rule, &esh4_history(&[(Ts(0), Ts(11 * DAY))])).expect("build");
+        assert_ne!(early.rows[0].roll_ts, late.rows[0].roll_ts);
     }
 
     #[test]

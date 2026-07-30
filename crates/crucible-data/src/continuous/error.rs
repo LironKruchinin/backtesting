@@ -16,6 +16,27 @@ use crucible_core::types::{TimeFrame, Ts};
 
 use crate::curated::CuratedError;
 
+/// One contract whose expiry statements cannot be put in availability order.
+///
+/// Two statements about the same contract are a **revision** when their
+/// availability windows are disjoint — the vendor said one thing, then said
+/// another, and `max(ts_recv)` names which is current (D-0085). They are a
+/// **conflict** when the windows overlap, because then there is no "latest": at
+/// some availability instant the source asserts both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpiryDisagreement {
+    /// The contract, as this build spells it.
+    pub contract: String,
+    /// The earlier-starting statement's expiry.
+    pub first: Ts,
+    /// The window of availability instants over which `first` was stated.
+    pub first_avail: (Ts, Ts),
+    /// The later-starting statement's expiry.
+    pub second: Ts,
+    /// The window of availability instants over which `second` was stated.
+    pub second_avail: (Ts, Ts),
+}
+
 /// Why a continuous series could not be built, stored, or replayed.
 #[derive(Debug)]
 pub enum ContinuousError {
@@ -136,22 +157,41 @@ pub enum ContinuousError {
         /// Explanation from the decoder.
         detail: String,
     },
-    /// Two definition records give one contract two different expiries.
-    ExpiryConflict {
-        /// The contract with two answers.
+    /// A definition record states an expiry but not **when** that statement
+    /// became knowable, so §2.1's first question — "as known when?" — has no
+    /// answer for it.
+    ///
+    /// The vendor's `ts_recv` is that answer (D-0085). A record missing it
+    /// cannot be placed in a revision history, and placing it anyway would mean
+    /// guessing whether a roll could have seen it.
+    UnavailableExpiry {
+        /// The contract the record names.
         contract: String,
-        /// The expiry recorded first.
-        first: Ts,
-        /// The expiry recorded second.
-        second: Ts,
+        /// The expiry it states.
+        expiration: Ts,
+    },
+    /// One or more contracts are stated to expire at two different instants
+    /// over **overlapping** availability windows, so there is no latest
+    /// statement to take (D-0085).
+    ///
+    /// Every offending contract in the root is listed, never the first one
+    /// found: a refusal that reports one of two makes the archive look better
+    /// than it is, which is exactly how `ZNM2012` sat hidden behind `ZNZ2011`.
+    ExpiryConflict {
+        /// Every contract whose revisions cannot be ordered, in symbol order.
+        conflicts: Vec<ExpiryDisagreement>,
     },
     /// Two definition records for one contract expire in different *years*, so
     /// the one-digit year cannot be resolved from the record at all.
     ///
-    /// Weaker than [`ContinuousError::ExpiryConflict`] on purpose: an hour's
-    /// disagreement about when `GCX1` settled does not make it a different
-    /// contract, and the real archive carries such disagreements (D-0072). A
-    /// year's does.
+    /// Asks a coarser question than [`ContinuousError::ExpiryConflict`] on
+    /// purpose: an hour's disagreement about when `GCX2021` settled does not
+    /// make it a different contract, and the real archive carries such
+    /// disagreements (D-0072). A year's does. The cycle reader also has no
+    /// decision instant to filter against — a curated partition key is an
+    /// archival identity, not a choice made at a point in time — so it reads the
+    /// observed span where the roll reader reads the availability history
+    /// (D-0085).
     ExpiryYearConflict {
         /// The contract as the vendor spells it.
         contract: String,
@@ -317,16 +357,47 @@ impl core::fmt::Display for ContinuousError {
             ContinuousError::Undecodable { path, detail } => {
                 write!(f, "could not decode {}: {detail}", path.display())
             }
-            ContinuousError::ExpiryConflict {
+            ContinuousError::UnavailableExpiry {
                 contract,
-                first,
-                second,
+                expiration,
             } => write!(
                 f,
-                "{contract} is defined with expiry {first} and also {second}. Every \
-                 roll decided from that contract depends on which is true, so picking \
-                 one would make the table unreproducible"
+                "a definition record says {contract} expires at {expiration} but carries \
+                 no ts_recv, so there is no answer to \"as known when?\" (§2.1). An \
+                 expiry whose availability is unknown cannot be filtered against a roll's \
+                 decision instant, and using it anyway would be a guess about what a \
+                 backtest could have seen"
             ),
+            ContinuousError::ExpiryConflict { conflicts } => {
+                write!(
+                    f,
+                    "{} contract(s) are stated to expire at two instants over \
+                     OVERLAPPING availability windows, so neither statement is the \
+                     latest and there is nothing for max(ts_recv) to pick:",
+                    conflicts.len()
+                )?;
+                for c in conflicts {
+                    write!(
+                        f,
+                        "\n\x20     {} expires {} (stated {}..{}) and also {} (stated \
+                         {}..{})",
+                        c.contract,
+                        c.first,
+                        c.first_avail.0,
+                        c.first_avail.1,
+                        c.second,
+                        c.second_avail.0,
+                        c.second_avail.1
+                    )?;
+                }
+                write!(
+                    f,
+                    "\n\x20  Every roll decided from such a contract depends on which is \
+                     true at the deciding instant, so picking one would make the table \
+                     unreproducible. Disjoint windows are a revision and resolve fine; \
+                     these overlap"
+                )
+            }
             ContinuousError::ExpiryYearConflict {
                 contract,
                 earliest,

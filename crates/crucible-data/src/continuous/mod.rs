@@ -92,16 +92,17 @@ pub use adjust::{
     unadjusted_offsets,
 };
 pub use error::ContinuousError;
+pub use error::ExpiryDisagreement;
 pub use expiry::{
-    CONTRACT_CYCLE_DAYS, ContractCycles, NO_EXPIRY_SOURCE, NOMINAL_EXPIRY_SOURCE, nominal_expiries,
-    nominal_expiry,
+    ALWAYS_KNOWN, CONTRACT_CYCLE_DAYS, ContractCycles, ExpiryHistory, ExpiryHistoryBuilder,
+    ExpiryRevision, NO_EXPIRY_SOURCE, NOMINAL_EXPIRY_SOURCE, nominal_expiries, nominal_expiry,
 };
 pub use feed::{ContinuousFeed, ContinuousSegment};
 pub use gather::{GatheredSeries, gather_series};
 pub use roll::{
-    CURATED_ROLLS_DIR, ROLL_TABLE_SCHEMA_VERSION, RollRow, RollRule, RollSource, RollTable,
-    RollTableInput, build_roll_table, read_roll_table, roll_table_for_alias, roll_table_path,
-    roll_tables_for, write_roll_table,
+    CURATED_ROLLS_DIR, LateExpiryCorrection, ROLL_TABLE_SCHEMA_VERSION, RollRow, RollRule,
+    RollSource, RollTable, RollTableInput, build_roll_table, late_expiry_corrections,
+    read_roll_table, roll_table_for_alias, roll_table_path, roll_tables_for, write_roll_table,
 };
 pub use session::{ContractSeries, SessionAccumulator, SessionBar, series_of};
 pub use symbol::{
