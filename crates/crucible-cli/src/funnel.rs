@@ -86,7 +86,7 @@ pub struct FunnelArgs {
 /// path below, and `--check-config`. A lint that re-listed these requirements
 /// would be a second copy of them, and the requirement the copy dropped would
 /// be the one nobody noticed — which is exactly the failure that let two
-/// backlog registrations sit unrunnable (D-TBD(backlog-registration-lint)).
+/// backlog registrations sit unrunnable (D-0101).
 ///
 /// The git sha is deliberately **not** checked here. It is provenance, not
 /// configuration: a registration is well-formed or not regardless of whether
