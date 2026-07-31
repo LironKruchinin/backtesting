@@ -398,6 +398,20 @@ detector. The **truncation-invariance** half of the clause is still open.
 
 ## M4 — Calibration + write-up (~3–4 weeks)
 
+> **BLOCKER ON THE RATES LEG, carried forward from M1 (D-0099).**
+> **44 of 68 ZN contracts — 65 % of the rates leg — have never had spike
+> detection run on them at all.** `qa`'s robust sigma is
+> `1.4826 × median(|Δclose|)`, and ZN's 1/64 tick against quiet 1-minute bars
+> makes that median exactly zero, so the check returned early. Until
+> 2026-07-31 it returned **silently**: no line, which an automated sweep scored
+> as zero spikes and a reader saw as nothing to report. The reporting half is
+> fixed — every check now emits `SKIPPED — <reason>` — so the gap is visible,
+> but it is **not closed**: those contracts are still unchecked, and the
+> replacement estimator is unimplemented. Archive-wide, 47 contracts and
+> **4,002,334 of 70,641,676 curated bars (5.7 %)** are affected.
+> M4 calibrates against L1 and ZN is one of its instruments, so this is owed
+> before any rates number is quoted.
+
 - [ ] Spread/slippage calibration from archived L1 (measured half-spread by
       time-of-day replaces the hand-set 1 tick)
 - [ ] MBO queue-position fill model prototype for limit orders; document

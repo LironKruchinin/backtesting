@@ -156,6 +156,109 @@ pub struct Gap {
     pub missing_bars: i64,
 }
 
+/// Why a check produced no result.
+///
+/// A reason, never a bare "skipped": an operator reading a report has to be
+/// able to tell "this contract is too thin to say anything about" from "this
+/// build could not compute the statistic", and those want different responses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkipReason {
+    /// Fewer adjacent same-interval pairs than the check needs.
+    TooFewMoves {
+        /// Pairs available.
+        have: usize,
+        /// Pairs required.
+        need: usize,
+    },
+    /// The robust scale came out zero: over half the moves were exactly zero.
+    ///
+    /// Not a thin-data accident — it is what a fine tick and a quiet minute
+    /// produce, and it is why 44 of 68 ZN contracts have never been spike
+    /// checked (D-0099).
+    ZeroScale {
+        /// Moves the scale was computed over.
+        moves: usize,
+    },
+    /// No bundled calendar claims this instrument, so "expected" is undefined.
+    NoCalendar,
+    /// The span is empty, so there is nothing to place against a calendar.
+    NoBars,
+}
+
+impl std::fmt::Display for SkipReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SkipReason::TooFewMoves { have, need } => write!(
+                f,
+                "only {have} usable move(s), needs {need} — the contract is too thin to measure"
+            ),
+            SkipReason::ZeroScale { moves } => write!(
+                f,
+                "the robust scale is zero over {moves} move(s): more than half of them were \
+                 exactly zero, so there is no scale to measure against. NOT a clean result — \
+                 this contract has NOT been checked (D-0099)"
+            ),
+            SkipReason::NoCalendar => write!(
+                f,
+                "no bundled calendar claims this instrument, so \"expected\" is undefined"
+            ),
+            SkipReason::NoBars => write!(f, "the span is empty"),
+        }
+    }
+}
+
+/// What one named check did.
+///
+/// **Every check records one of these, and the report prints every one.** The
+/// rule exists because `qa` used to `return` silently when a precondition
+/// failed: no line at all, which an automated read scores as the field's zero
+/// and a human reads as "nothing to report". A contract that was never examined
+/// then looks exactly like a clean one — 5.7 % of the archive was reported clean
+/// that way (D-0099). An absent detector must never render as a passing one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckStatus {
+    /// The check's name, as printed.
+    pub check: &'static str,
+    /// `None` when it ran; the reason when it did not.
+    pub skipped: Option<SkipReason>,
+}
+
+impl CheckStatus {
+    /// Whether this check actually produced a result.
+    #[must_use]
+    pub const fn ran(&self) -> bool {
+        self.skipped.is_none()
+    }
+}
+
+impl QaReport {
+    /// Records that a named check ran.
+    fn ran(&mut self, check: &'static str) {
+        self.checks.push(CheckStatus {
+            check,
+            skipped: None,
+        });
+    }
+
+    /// Records that a named check did **not** run, and why.
+    fn skip(&mut self, check: &'static str, reason: SkipReason) {
+        self.checks.push(CheckStatus {
+            check,
+            skipped: Some(reason),
+        });
+    }
+
+    /// Every check that did not run.
+    ///
+    /// The query a sweep wants: an archive-wide script can count skipped checks
+    /// per contract instead of inferring them from a missing line, which is the
+    /// inference that failed for 5.7 % of the archive (D-0099).
+    #[must_use]
+    pub fn skipped_checks(&self) -> Vec<&CheckStatus> {
+        self.checks.iter().filter(|c| !c.ran()).collect()
+    }
+}
+
 /// A bar whose return is an outlier by the robust measure.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Spike {
@@ -245,6 +348,11 @@ pub struct QaReport {
     pub spikes: Vec<Spike>,
     /// How many returns exceeded the threshold in total, before truncation.
     pub spike_count: usize,
+    /// Every check this run performed, in the order it ran, with whether it
+    /// produced a result and why not when it did not.
+    ///
+    /// Rendered unconditionally. Silence is the bug this field exists to end.
+    pub checks: Vec<CheckStatus>,
     /// The robust-sigma threshold this run actually used.
     pub spike_sigmas: f64,
     /// Robust sigma of adjacent-bar returns, in points.
@@ -346,6 +454,7 @@ pub fn run(
         spikes: Vec::new(),
         spike_count: 0,
         spike_sigmas: options.spike_sigmas,
+        checks: Vec::new(),
         robust_sigma_points: None,
         ohlc_violations: Vec::new(),
         dst_boundaries: Vec::new(),
@@ -353,11 +462,20 @@ pub fn run(
         condition_sources: Vec::new(),
     };
 
+    // Both of these walk the bars unconditionally: they have no precondition
+    // that can fail, so they always ran and always say so.
     check_ohlc(&bars, &mut report);
+    report.ran("ohlc");
     check_zero_volume(&bars, options, &mut report);
+    report.ran("zero-volume");
     check_spikes(&bars, tf, options, &mut report);
     if let Some(cal) = calendar {
         check_against_calendar(&bars, tf, cal, options, &mut report);
+    } else {
+        // The case D-0072 was hidden by: gold had no bundled calendar, so `qa`
+        // skipped coverage entirely and printed `calendar none` — which read as
+        // a clean report on a contract holding two decades concatenated.
+        report.skip("coverage", SkipReason::NoCalendar);
     }
     read_conditions(data_dir, &mut report)?;
     Ok(report)
@@ -434,6 +552,13 @@ fn check_spikes(bars: &[Bar], tf: TimeFrame, options: &QaOptions, report: &mut Q
         ));
     }
     if moves.len() < 3 {
+        report.skip(
+            "spikes",
+            SkipReason::TooFewMoves {
+                have: moves.len(),
+                need: 3,
+            },
+        );
         return;
     }
 
@@ -441,13 +566,20 @@ fn check_spikes(bars: &[Bar], tf: TimeFrame, options: &QaOptions, report: &mut Q
     magnitudes.sort_by(f64::total_cmp);
     let mad = magnitudes[magnitudes.len() / 2];
     // An all-zero median means more than half the bars did not move at all —
-    // common on a thin contract. There is no scale to measure against, so no
+    // common on a fine tick grid. There is no scale to measure against, so no
     // spike claim can be made honestly.
+    //
+    // **It is recorded, not returned silently.** This path fires on 47
+    // contracts — 44 of 68 ZN — and it used to emit nothing at all, so a
+    // contract that was never examined printed identically to a clean one and
+    // 5.7 % of the archive was reported clean without being checked (D-0099).
     if mad <= 0.0 {
+        report.skip("spikes", SkipReason::ZeroScale { moves: moves.len() });
         return;
     }
     let sigma = mad * MAD_TO_SIGMA;
     report.robust_sigma_points = Some(sigma);
+    report.ran("spikes");
 
     let mut spikes: Vec<Spike> = moves
         .into_iter()
@@ -483,8 +615,10 @@ fn check_against_calendar(
     report: &mut QaReport,
 ) {
     let (Some(first), Some(last)) = (report.first_ts_open, report.last_ts_open) else {
+        report.skip("coverage", SkipReason::NoBars);
         return;
     };
+    report.ran("coverage");
     let interval = tf.duration_ns();
 
     // Coverage is claimed only over the span actually held: from the first bar
@@ -751,6 +885,14 @@ impl core::fmt::Display for QaReport {
                     String::new()
                 }
             )?;
+        }
+        // Every check that did NOT run says so, here, unconditionally. A
+        // skipped check used to print nothing, so it read as a clean one
+        // (D-0099). This is the line that makes an absence visible.
+        for status in self.skipped_checks() {
+            if let Some(reason) = &status.skipped {
+                writeln!(f, "  {:<14} SKIPPED — {reason}", status.check)?;
+            }
         }
         for spike in &self.spikes {
             writeln!(

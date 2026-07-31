@@ -3349,3 +3349,43 @@ propose a superseding entry — don't silently diverge.
   spike line even when it cannot compute a sigma, saying so and counting the bars
   it skipped. That is a reporting fix, independent of every open statistical
   question, and until it lands no archive-wide spike number can be quoted.
+- **D-0100** (2026-07-31) — **Every `qa` check emits an explicit outcome:
+  computed, or SKIPPED with a named reason. Silence is banned.**
+  *Implements the reporting half of D-0099. Independent of the estimator, which
+  remains unimplemented.*
+  **The defect.** A check whose precondition failed used to `return` with
+  nothing printed. An absent field and a zero field render identically, so an
+  automated sweep scored the missing `spikes` line as zero and a human read it
+  as "nothing to report" — a contract that was never examined looked exactly
+  like a clean one. **4,002,334 of 70,641,676 curated bars (5.7 %)** were
+  reported clean without being checked, across 47 contracts, 44 of them ZN.
+  **The rule is general, not a patch on one call site.** `SkipReason` and
+  `CheckStatus` are the mechanism; `QaReport::checks` records one entry per
+  check in run order and the renderer prints every skip unconditionally. Four
+  reasons exist today — `ZeroScale`, `TooFewMoves`, `NoCalendar`, `NoBars` —
+  and the point is the shape: any future check with a precondition inherits the
+  obligation rather than re-deriving it. `moves.len() < 3` will keep skipping
+  thin contracts forever and that is fine; it now says so.
+  **The reasons stay distinguishable on purpose.** "This contract is too thin to
+  measure" and "this build has no scale to measure against" want different
+  responses — the first is a fact about the contract, the second is a gap in the
+  statistic. A control asserts the two render differently, because collapsing
+  them would restore the ambiguity in a new place.
+  **The wording is load-bearing.** A skipped spike check renders
+  `NOT a clean result — this contract has NOT been checked (D-0099)`. A neutral
+  "skipped" would be read as "not applicable", which is what the silence already
+  meant. There is a mutation control on exactly that phrase.
+  **`NoCalendar` is included although nothing regressed there**, because it is
+  the shape that hid D-0072: gold had no bundled calendar, `qa` printed
+  `calendar none`, and a partition holding two decades concatenated passed every
+  visible check. That path now names itself too.
+  **Controls, mutation-verified and each watched failing, restored
+  byte-exactly:** the zero-scale skip going silent again (the original bug); the
+  "NOT a clean result" wording softened; the two reasons rendering identically;
+  every check marked skipped (a detector that fires on everything — caught by
+  the converse); and the render loop dropping the skip lines.
+  **What this does NOT fix.** Those 47 contracts are still unchecked. The gap is
+  now visible rather than invisible, which is the whole of the claim.
+  `docs/MILESTONES.md` carries it as a blocker on M4's rates leg, since ZN is
+  one of M4's calibration instruments and 65 % of it has never been spike
+  checked.

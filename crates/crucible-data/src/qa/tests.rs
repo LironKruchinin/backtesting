@@ -95,6 +95,7 @@ fn blank_report() -> QaReport {
         spikes: Vec::new(),
         spike_count: 0,
         spike_sigmas: DEFAULT_SPIKE_SIGMAS,
+        checks: Vec::new(),
         robust_sigma_points: None,
         ohlc_violations: Vec::new(),
         dst_boundaries: Vec::new(),
@@ -494,4 +495,126 @@ fn a_hole_after_the_halt_is_still_found() {
     assert_eq!(report.gaps.len(), 1);
     assert_eq!(report.gaps[0].from_ts, Ts(SESSION_OPEN_NS + 21 * HOUR_NS));
     assert_eq!(report.unexpected_bar_count, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Every check emits an outcome. Never silence. (D-0099)
+//
+// The defect these controls exist for: a check whose precondition failed used
+// to `return` with nothing printed, so an automated read scored the missing
+// field as zero and a human read it as "nothing to report". A contract that was
+// never examined looked exactly like a clean one — 44 of 68 ZN contracts and
+// 5.7 % of the archive's bars were reported clean without being checked.
+// ---------------------------------------------------------------------------
+
+/// PLANTED CONTROL: a fixture that trips the zero-scale precondition must
+/// carry a skip marker naming the reason, and must NOT look clean.
+#[test]
+fn planted_a_zero_scale_contract_reports_a_skip_and_never_reads_as_clean() {
+    // Every bar closes at the same price, so every move is exactly zero and
+    // the median absolute move is zero — the ZN case, in miniature.
+    let bars = hourly_session(23);
+    let mut report = report_for(&bars);
+    check_spikes(&bars, TimeFrame::H1, &QaOptions::default(), &mut report);
+
+    // No claim is made, as before.
+    assert!(report.robust_sigma_points.is_none());
+    assert!(report.spikes.is_empty());
+
+    // But the absence is now RECORDED, which is the whole point.
+    let skipped = report.skipped_checks();
+    assert_eq!(skipped.len(), 1, "exactly one check was skipped");
+    assert_eq!(skipped[0].check, "spikes");
+    assert!(
+        matches!(
+            skipped[0].skipped,
+            Some(SkipReason::ZeroScale { moves: 22 })
+        ),
+        "expected ZeroScale over 22 moves, got {:?}",
+        skipped[0].skipped
+    );
+
+    // And it is VISIBLE: the rendered report must say so in words a reader
+    // cannot mistake for a pass.
+    let rendered = report.to_string();
+    assert!(rendered.contains("SKIPPED"), "{rendered}");
+    assert!(
+        rendered.contains("NOT a clean result"),
+        "a skipped check must not read as a passing one: {rendered}"
+    );
+}
+
+/// The converse: a contract that CAN be measured reports no skip at all.
+///
+/// Without this, a build that marked every check skipped would pass the control
+/// above perfectly.
+#[test]
+fn converse_a_measurable_contract_records_no_skip() {
+    let mut bars = hourly_session(23);
+    // Give it a real scale: alternate the closes so the median move is nonzero.
+    for (i, b) in bars.iter_mut().enumerate() {
+        let bump = if i % 2 == 0 { 0 } else { 1 };
+        b.close = Price::from_points(5000 + bump);
+    }
+    let mut report = report_for(&bars);
+    check_spikes(&bars, TimeFrame::H1, &QaOptions::default(), &mut report);
+
+    assert!(
+        report.robust_sigma_points.is_some(),
+        "the fixture must be measurable or the control proves nothing"
+    );
+    assert!(
+        report.skipped_checks().is_empty(),
+        "a check that ran must not report a skip: {:?}",
+        report.checks
+    );
+    assert!(!report.to_string().contains("SKIPPED"));
+}
+
+/// The other precondition — too few usable moves — is recorded too.
+///
+/// `moves.len() < 3` will keep skipping contracts however the estimator
+/// changes, so it needs its own marker rather than being folded into the
+/// zero-scale one.
+#[test]
+fn planted_a_too_thin_contract_reports_its_own_distinct_skip_reason() {
+    let bars = hourly_session(2); // one move, needs three
+    let mut report = report_for(&bars);
+    check_spikes(&bars, TimeFrame::H1, &QaOptions::default(), &mut report);
+
+    let skipped = report.skipped_checks();
+    assert_eq!(skipped.len(), 1);
+    assert!(
+        matches!(
+            skipped[0].skipped,
+            Some(SkipReason::TooFewMoves { have: 1, need: 3 })
+        ),
+        "got {:?}",
+        skipped[0].skipped
+    );
+    // The two reasons must stay distinguishable: they want different responses.
+    assert_ne!(
+        format!("{}", skipped[0].skipped.clone().expect("skipped")),
+        format!("{}", SkipReason::ZeroScale { moves: 1 }),
+    );
+}
+
+/// A contract with no calendar reports coverage as skipped, not as clean.
+///
+/// This is the shape that hid D-0072: gold had no bundled calendar, `qa`
+/// printed `calendar none`, and a partition holding two decades concatenated
+/// passed every visible check.
+#[test]
+fn planted_a_contract_with_no_calendar_reports_coverage_as_skipped() {
+    let bars = hourly_session(23);
+    let mut report = report_for(&bars);
+    report.skip("coverage", SkipReason::NoCalendar);
+
+    let rendered = report.to_string();
+    assert!(rendered.contains("coverage"), "{rendered}");
+    assert!(rendered.contains("SKIPPED"), "{rendered}");
+    assert!(
+        rendered.contains("no bundled calendar"),
+        "the reason must name itself: {rendered}"
+    );
 }
