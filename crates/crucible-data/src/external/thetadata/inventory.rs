@@ -91,6 +91,70 @@ pub const INVENTORY_SCHEMA_VERSION: u32 = 1;
 /// File name of the per-vendor inventory, under `external/thetadata/`.
 pub const INVENTORY_FILE: &str = "inventory.jsonl";
 
+/// Why a request produced no archivable data, on a line that records absence.
+///
+/// An absence record is the third thing an inventory line can say. The first
+/// two are *here is a file* and *asked, answered, nothing there* (the vendor's
+/// 472, written with an empty `file_path`). This is the third: **asked,
+/// answered, and what came back cannot become archive** — with the reason
+/// named rather than left to a console that no longer exists.
+///
+/// It exists because a refusal previously wrote nothing at all, so a refused
+/// request and one never attempted were indistinguishable in the inventory, and
+/// every resume re-asked all 794 of them forever (D-0092, and the measurement
+/// in `docs/T0_REFUSAL_FORENSIC.md`).
+///
+/// # Why an enum and not a free-text reason
+///
+/// The reason string is *also* recorded, but the cause is what a reader
+/// aggregates on, and free text cannot be counted. Two causes were measured on
+/// this archive and they need different remedies, so collapsing them into
+/// "refused" would destroy the only distinction that matters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AbsenceCause {
+    /// The vendor's IV solver did not converge for the whole response.
+    ///
+    /// Every row carries `iv_error >= IV_ERROR_SENTINEL`, so every row is the
+    /// vendor's "absent" spelling and nothing survives the sentinel sweep.
+    /// The underlying price on such a response is real; the greeks are not.
+    SolverSentinel,
+    /// One identity repeated with the same discriminator and **differing**
+    /// market fields.
+    ///
+    /// Not the same thing as the byte-identical repeat that
+    /// [`super::validate`] collapses deterministically: two rows that disagree
+    /// about the same contract at the same instant cannot both be true, and
+    /// nothing in the vendor's model says which wins. Recorded as absent rather
+    /// than adjudicated, because picking one is a guess wearing a datum's
+    /// clothes.
+    AmbiguousDuplicate,
+}
+
+impl AbsenceCause {
+    /// The spelling that goes on the line.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            AbsenceCause::SolverSentinel => "solver_sentinel",
+            AbsenceCause::AmbiguousDuplicate => "ambiguous_duplicate",
+        }
+    }
+
+    /// Reads a cause back, or `None` for a spelling this build does not know.
+    ///
+    /// Unknown is `None` rather than a default: a future cause read as
+    /// `SolverSentinel` would be counted under a remedy that does not apply to
+    /// it.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<AbsenceCause> {
+        match value {
+            "solver_sentinel" => Some(AbsenceCause::SolverSentinel),
+            "ambiguous_duplicate" => Some(AbsenceCause::AmbiguousDuplicate),
+            _ => None,
+        }
+    }
+}
+
 /// One completed fetch-and-write.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InventoryRecord {
@@ -156,6 +220,19 @@ pub struct InventoryRecord {
     /// does not read the wall clock (§2.2, D-0032), and the one implementation
     /// that does lives in a bin target.
     pub fetched_ts: i64,
+    /// Why this line records an absence, or `None` when it records data.
+    ///
+    /// `None` covers both a written file and the vendor's 472 — in each case
+    /// the request was answered and the answer is archived, as bytes or as a
+    /// stated emptiness. `Some` means the answer could not become archive, and
+    /// names why.
+    pub absence: Option<AbsenceCause>,
+    /// The refusal text behind [`InventoryRecord::absence`], verbatim.
+    ///
+    /// Empty when there is no absence. Kept beside the enum rather than
+    /// instead of it: the enum is what a reader counts, and this is what a
+    /// human needs in order to disagree with the classification.
+    pub absence_detail: String,
 }
 
 impl InventoryRecord {
@@ -202,7 +279,68 @@ impl InventoryRecord {
             zero_ohlc_rate: report.zero_ohlc_rate(),
             reconciliation,
             fetched_ts,
+            absence: None,
+            absence_detail: String::new(),
         }
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "an absence line IS this many independent facts, exactly as \n                  InventoryRecord::new is, and bundling them into a struct just \n                  to pass them would be the same arguments with a longer path"
+    )]
+    /// Builds a line that records **absence with a named cause**.
+    ///
+    /// No file, no rows, and a cause. The request string is the resume key, so
+    /// writing this is what stops the same unanswerable question being asked on
+    /// every subsequent run — which is the whole point: before this existed, a
+    /// refusal appended nothing and 794 requests were re-issued forever.
+    ///
+    /// It deliberately reuses the empty-record shape rather than inventing a
+    /// second one. A reader that only understands v1 lines sees an ordinary
+    /// no-file record, which is the *conservative* misreading: it still means
+    /// "do not ask again", and it merely loses the reason.
+    #[must_use]
+    pub fn absence(
+        endpoint: &str,
+        root: &str,
+        grain: &str,
+        start_date: &str,
+        end_date: &str,
+        request: &str,
+        cause: AbsenceCause,
+        detail: &str,
+        fetched_ts: i64,
+    ) -> InventoryRecord {
+        InventoryRecord {
+            schema_version: INVENTORY_SCHEMA_VERSION,
+            endpoint: endpoint.to_owned(),
+            root: root.to_owned(),
+            grain: grain.to_owned(),
+            start_date: start_date.to_owned(),
+            end_date: end_date.to_owned(),
+            request: request.to_owned(),
+            file_path: String::new(),
+            file_blake3: String::new(),
+            size_bytes: 0,
+            row_count: 0,
+            distinct_contracts: 0,
+            dup_rate: 0.0,
+            n_builds_distribution: BTreeMap::new(),
+            conflicting_pairs: 0,
+            sentinel_rows_dropped: 0,
+            fetch_millis: 0,
+            zero_ohlc_rate: None,
+            reconciliation: None,
+            fetched_ts,
+            absence: Some(cause),
+            absence_detail: detail.to_owned(),
+        }
+    }
+
+    /// Whether this line records an absence rather than data.
+    #[must_use]
+    pub const fn is_absence(&self) -> bool {
+        self.absence.is_some()
     }
 
     /// The key a resume diff matches on.
@@ -243,7 +381,8 @@ impl InventoryRecord {
              \"file_blake3\":{},\"size_bytes\":{},\"row_count\":{},\
              \"distinct_contracts\":{},\"dup_rate\":{},\"n_builds_distribution\":{{{}}},\
              \"conflicting_pairs\":{},\"sentinel_rows_dropped\":{},\"fetch_millis\":{},\
-             \"zero_ohlc_rate\":{},\"reconciliation\":{},\"fetched_ts\":{}}}",
+             \"zero_ohlc_rate\":{},\"reconciliation\":{},\"fetched_ts\":{},\
+             \"absence\":{},\"absence_detail\":{}}}",
             self.schema_version,
             json_string(&self.endpoint),
             json_string(&self.root),
@@ -265,6 +404,9 @@ impl InventoryRecord {
                 .map_or_else(|| "null".to_owned(), format_ratio),
             reconciliation,
             self.fetched_ts,
+            self.absence
+                .map_or_else(|| "null".to_owned(), |c| json_string(c.as_str())),
+            json_string(&self.absence_detail),
         )
     }
 }
@@ -403,6 +545,21 @@ impl Inventory {
 
     /// The `request` string of every complete record, for a resume diff.
     ///
+    /// **Absence records count as complete, deliberately.** A line that says
+    /// "asked, answered, unarchivable, here is the cause" has settled that
+    /// request as firmly as one that wrote a file: re-issuing it produces the
+    /// same refusal, because the causes are deterministic in the response. That
+    /// is the entire remedy for the 794 — before absence records existed a
+    /// refusal appended nothing, so every resume asked all of them again and
+    /// got the same answer. No special case is needed here to achieve it: this
+    /// keys on `request`, and an absence record carries one.
+    ///
+    /// The consequence is worth stating plainly, because it is a real cost: a
+    /// build that later learns to read one of these responses will not re-fetch
+    /// it on its own. Removing an absence class is a deliberate act — delete
+    /// those lines, or re-run with the plan widened — never something that
+    /// happens by accident.
+    ///
     /// A truncated final line — the signature of a run that died mid-write — is
     /// **skipped, not repaired**: the file it describes may or may not be
     /// complete, so the honest move is to leave the request looking un-done and
@@ -495,6 +652,26 @@ impl Inventory {
             .cloned()
             .collect())
     }
+
+    /// How many absence records the inventory holds, per cause.
+    ///
+    /// The number a resume report prints so that "0 outstanding" cannot be
+    /// mistaken for "everything was acquired". An archive with 794 absences and
+    /// nothing outstanding is complete in the sense that nothing more can be
+    /// asked, and incomplete in the sense that matters to research — and only
+    /// this count tells the two apart.
+    ///
+    /// # Errors
+    /// [`ThetaError::Io`] if the inventory cannot be read.
+    pub fn absences_by_cause(&self) -> Result<BTreeMap<AbsenceCause, u64>, ThetaError> {
+        let mut out = BTreeMap::new();
+        for record in self.read_all()? {
+            if let Some(cause) = record.absence {
+                *out.entry(cause).or_default() += 1;
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// Pulls one bare (unquoted) field out of a JSON line: numbers and `null`.
@@ -544,6 +721,11 @@ fn parse_line(line: &str) -> Option<InventoryRecord> {
         fetched_ts: extract_bare_field(line, "fetched_ts")
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(0),
+        // A line written before absence records existed has no `absence` field,
+        // and `null` is how a data line spells it. Both read as `None`, which
+        // is exactly what they meant: this line is not an absence.
+        absence: string("absence").as_deref().and_then(AbsenceCause::parse),
+        absence_detail: string("absence_detail").unwrap_or_default(),
     })
 }
 

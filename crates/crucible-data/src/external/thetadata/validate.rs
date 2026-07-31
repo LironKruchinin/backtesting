@@ -185,6 +185,17 @@ pub struct ValidationReport {
     /// revision between build passes is the vendor changing its mind about a
     /// printed value, and an operator should see how often that happens.
     pub conflicting_pairs: u64,
+    /// Rows dropped because they repeated an identity **at the same
+    /// discriminator** and were byte-identical to the row they repeated.
+    ///
+    /// Distinct from [`ValidationReport::identical_pairs`], which counts
+    /// agreement *across* build stamps — an ordinary rebuild. This counts a
+    /// single stamp emitting one contract twice, which no vendor mechanism
+    /// explains and which refused the whole file until it was measured to be
+    /// byte-identical (D-0095). Counted rather than silent precisely because
+    /// nothing explains it: a rate that moves is a vendor change nobody
+    /// announced.
+    pub identical_repeats_collapsed: u64,
     /// Rows dropped by the zero-sentinel condition (§4.3).
     pub sentinel_rows_dropped: u64,
     /// Kept rows whose whole OHLC block is zero.
@@ -444,9 +455,23 @@ fn dedup(
             });
         };
 
-        // Distinct discriminator values. `(identity, discriminator)` appearing
-        // twice is NOT the vendor running two builds — it is one build emitting
-        // one contract twice, which no mechanism explains. Refuse the file.
+        // `(identity, discriminator)` appearing twice is NOT the vendor running
+        // two builds — it is one build emitting one contract twice, and the
+        // stamp that would say which is later says they are simultaneous.
+        //
+        // Whether that is recoverable depends on a fact about the bytes, not on
+        // a preference. Two rows that agree in every column carry one datum
+        // written twice: collapsing them to the first is deterministic, loses
+        // nothing, and is not an adjudication. Two rows that DISAGREE about the
+        // same contract at the same instant cannot both be true and nothing
+        // ranks them, so the file is refused and recorded as an absence.
+        //
+        // Measured before being decided: SPX greeks/eod 2023-09-19 answers with
+        // 12,492 rows over 6,246 identities — 6,246 distinct FULL rows, so
+        // every pair is byte-identical. The differing case has never been seen
+        // on this archive and is still implemented, because "never seen" is a
+        // statement about the past (D-0095).
+        let mut collapsed: Vec<RawRow> = Vec::with_capacity(group.len());
         let mut stamps: BTreeSet<&str> = BTreeSet::new();
         for row in &group {
             let stamp = row
@@ -456,7 +481,21 @@ fn dedup(
                     row: row.row,
                     detail: format!("missing the {discriminator} column"),
                 })?;
-            if !stamps.insert(stamp) {
+            if stamps.insert(stamp) {
+                collapsed.push(row.clone());
+                continue;
+            }
+            // A repeat of a stamp already seen. Find the row it repeats and ask
+            // whether the bytes agree.
+            let first = collapsed
+                .iter()
+                .find(|r| r.get(index, discriminator) == Some(stamp))
+                .ok_or_else(|| ThetaError::MalformedRow {
+                    path: request_path.to_owned(),
+                    row: row.row,
+                    detail: "a repeated stamp with no first occurrence".to_owned(),
+                })?;
+            if first.fields != row.fields {
                 return Err(ThetaError::DuplicateRow {
                     path: request_path.to_owned(),
                     identity: key,
@@ -464,7 +503,9 @@ fn dedup(
                     discriminator: Some((discriminator, stamp.to_owned())),
                 });
             }
+            report.identical_repeats_collapsed += 1;
         }
+        let group = collapsed;
         *report
             .n_builds_distribution
             .entry(stamps.len())

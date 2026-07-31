@@ -198,14 +198,22 @@ fn the_post_2022_eod_shape_is_already_distinct() {
     assert_eq!(out.report.identical_pairs, 0);
 }
 
-// PLANTED CONTROL: the same contract with the same `created`. D-0054 explains
-// a contract repeating across build passes; it does not explain one build
-// emitting a contract twice. Refuse.
+// PLANTED CONTROL: the same contract with the same `created` **and a different
+// price**. D-0054 explains a contract repeating across build passes; it does not
+// explain one build emitting a contract twice, and two prices for one instant
+// cannot both be true. Refuse.
+//
+// This control was narrowed by D-0095, which is a semantics change and not a
+// loosened expectation. It previously planted two BYTE-IDENTICAL rows, and
+// those now collapse deterministically — measured on SPX greeks/eod 2023-09-19,
+// where every duplicate half was byte-equal and refusing cost 794 records for
+// nothing. The identical case keeps its own assertion immediately below, so the
+// pair still covers both sides of the rule rather than only the surviving one.
 #[test]
-fn planted_duplicate_contract_with_the_same_build_stamp_refuses_the_file() {
+fn planted_differing_duplicate_with_the_same_build_stamp_refuses_the_file() {
     let rows = vec![
         eod_row("470.000", "CALL", "2024-01-02T18:00:00.000", "4.20"),
-        eod_row("470.000", "CALL", "2024-01-02T18:00:00.000", "4.20"),
+        eod_row("470.000", "CALL", "2024-01-02T18:00:00.000", "4.25"),
     ];
     let err = validate(Endpoint::OptionEod, &body(EOD_HEADER, &rows), "/x")
         .expect_err("(contract, created) twice is unexplained");
@@ -221,6 +229,22 @@ fn planted_duplicate_contract_with_the_same_build_stamp_refuses_the_file() {
         }
         other => panic!("expected DuplicateRow with a discriminator, got {other}"),
     }
+}
+
+// The other half of the pair the rule above was narrowed into (D-0095). Two
+// byte-equal rows at one stamp are one datum written twice: collapse, count,
+// and do NOT refuse. Without this beside the refusal, "the gate fires" and "the
+// gate fires on everything" would look identical.
+#[test]
+fn an_identical_duplicate_with_the_same_build_stamp_collapses_instead() {
+    let rows = vec![
+        eod_row("470.000", "CALL", "2024-01-02T18:00:00.000", "4.20"),
+        eod_row("470.000", "CALL", "2024-01-02T18:00:00.000", "4.20"),
+    ];
+    let out = validate(Endpoint::OptionEod, &body(EOD_HEADER, &rows), "/x")
+        .expect("two copies of one datum are one datum");
+    assert_eq!(out.rows.len(), 1);
+    assert_eq!(out.report.identical_repeats_collapsed, 1);
 }
 
 // A revision between build passes: the vendor changed a printed value. Keep
@@ -275,16 +299,32 @@ fn open_interest_is_gated_for_uniqueness_even_though_it_was_never_duplicated() {
     let out = validate(Endpoint::OptionOpenInterest, &clean, "/x").expect("valid");
     assert!((out.report.dup_rate() - 1.000).abs() < 1e-9);
 
+    // Two DIFFERENT open-interest figures for one contract at one instant: the
+    // gate still refuses (narrowed by D-0095, same as the `eod` control).
     let planted = body(
+        OI_HEADER,
+        &[
+            oi_row("470.000", "CALL", "12345"),
+            oi_row("470.000", "CALL", "12346"),
+        ],
+    );
+    let err = validate(Endpoint::OptionOpenInterest, &planted, "/x")
+        .expect_err("same contract, same timestamp, two different figures");
+    assert!(matches!(err, ThetaError::DuplicateRow { .. }), "{err}");
+
+    // And the byte-identical repeat collapses rather than refusing, on this
+    // endpoint too — the rule is a property of the validator, not of `eod`.
+    let identical = body(
         OI_HEADER,
         &[
             oi_row("470.000", "CALL", "12345"),
             oi_row("470.000", "CALL", "12345"),
         ],
     );
-    let err = validate(Endpoint::OptionOpenInterest, &planted, "/x")
-        .expect_err("same contract, same timestamp");
-    assert!(matches!(err, ThetaError::DuplicateRow { .. }), "{err}");
+    let out =
+        validate(Endpoint::OptionOpenInterest, &identical, "/x").expect("one datum written twice");
+    assert_eq!(out.rows.len(), 1);
+    assert_eq!(out.report.identical_repeats_collapsed, 1);
 }
 
 // -------------------------------------------------------------------------
@@ -839,4 +879,186 @@ fn an_index_root_and_an_etf_root_expect_the_same_sessions() {
     let b = coverage_vs_calendar(&spy, day(2024, 1, 1), day(2024, 1, 7), &held);
     assert_eq!(a, b);
     assert!(a.is_clean());
+}
+
+// ---------------------------------------------------------------------------
+// The two measured refusal causes, as planted controls (D-0094, D-0095).
+//
+// Both fixtures are the shape the live Terminal actually served, not an
+// invention: SPX `greeks/eod` 2021-03-02 answered 5,947 rows every one of which
+// carried `iv_error = 100.0000` beside a real `underlying_price = 3870.29`, and
+// 2023-09-19 answered 12,492 rows over 6,246 identities whose duplicate halves
+// were byte-identical. Each control below is the smallest body with that
+// property, and each has a converse asserting the gate does NOT fire on the
+// neighbouring good case.
+// ---------------------------------------------------------------------------
+
+/// CAUSE A, PLANTED. Every row carries the failed-solve sentinel, so the whole
+/// response is the vendor's "absent" and nothing may reach the archive.
+///
+/// The underlying price is deliberately REAL (3870.29). That is the whole point
+/// of the fixture: the refusal must not depend on the underlying being zero,
+/// because on the measured days it never was.
+#[test]
+fn planted_a_whole_chain_of_failed_solves_refuses_and_writes_no_row() {
+    let rows: Vec<String> = ["400", "410", "420", "430"]
+        .iter()
+        .flat_map(|k| {
+            [
+                greeks_row(k, "CALL", "100.0000", "3870.2900"),
+                greeks_row(k, "PUT", "100.0000", "3870.2900"),
+            ]
+        })
+        .collect();
+    let err = validate(
+        Endpoint::OptionGreeksEod,
+        &body(GREEKS_EOD_HEADER, &rows),
+        "/greeks/eod",
+    )
+    .expect_err("a chain of failed solves is not archivable");
+
+    assert!(
+        matches!(err, ThetaError::AllZeroSeries { rows: 8, .. }),
+        "expected the file-level gate, got {err}"
+    );
+    // And it classifies, which is what makes it recordable rather than a
+    // refusal that vanishes with the process.
+    assert_eq!(
+        crate::external::thetadata::run::absence_cause_of(&err),
+        Some(crate::external::thetadata::AbsenceCause::SolverSentinel),
+    );
+}
+
+/// CONVERSE of cause A. One ordinary solve among failures keeps the file.
+///
+/// Without this, a gate that refused every `greeks/eod` response would pass the
+/// control above and nobody would know.
+#[test]
+fn one_converged_solve_is_enough_to_keep_the_file() {
+    let rows = vec![
+        greeks_row("400", "CALL", "100.0000", "3870.2900"),
+        greeks_row("410", "CALL", "100.0000", "3870.2900"),
+        greeks_row("420", "CALL", "0.0006", "3870.2900"),
+    ];
+    let out = validate(
+        Endpoint::OptionGreeksEod,
+        &body(GREEKS_EOD_HEADER, &rows),
+        "/greeks/eod",
+    )
+    .expect("one real solve is a real file");
+    assert_eq!(out.rows.len(), 1, "only the converged row survives");
+    assert_eq!(out.report.sentinel_rows_dropped, 2);
+}
+
+/// CAUSE B, PLANTED, IDENTICAL HALF. One contract emitted twice at one stamp
+/// with byte-equal fields collapses deterministically and does not refuse.
+///
+/// This is the case measured on 2023-09-19, and it is a *repair*: the file
+/// refused before this rule existed.
+#[test]
+fn planted_a_byte_identical_repeat_at_one_stamp_collapses_keep_first() {
+    let row = greeks_row("400", "CALL", "0.0006", "4443.9500");
+    let out = validate(
+        Endpoint::OptionGreeksEod,
+        &body(GREEKS_EOD_HEADER, &[row.clone(), row]),
+        "/greeks/eod",
+    )
+    .expect("two identical copies of one datum are one datum");
+
+    assert_eq!(out.rows.len(), 1, "collapsed to one");
+    assert_eq!(
+        out.report.identical_repeats_collapsed, 1,
+        "and counted, because nothing explains why the vendor sent it twice"
+    );
+}
+
+/// CAUSE B, PLANTED, DIFFERING HALF. The same contract at the same stamp with
+/// a different price cannot be adjudicated, so the file is refused.
+///
+/// Never seen on this archive. Implemented and controlled anyway, because
+/// "never seen" is a statement about the past.
+#[test]
+fn planted_a_differing_repeat_at_one_stamp_refuses_and_is_ambiguous() {
+    let first = greeks_row("400", "CALL", "0.0006", "4443.9500");
+    // Same identity, same timestamp, different underlying — they disagree.
+    let second = greeks_row("400", "CALL", "0.0006", "4444.9500");
+    let err = validate(
+        Endpoint::OptionGreeksEod,
+        &body(GREEKS_EOD_HEADER, &[first, second]),
+        "/greeks/eod",
+    )
+    .expect_err("two rows disagreeing about one instant cannot both be kept");
+
+    assert!(
+        matches!(
+            err,
+            ThetaError::DuplicateRow {
+                discriminator: Some(("timestamp", _)),
+                ..
+            }
+        ),
+        "expected the same-stamp duplicate refusal, got {err}"
+    );
+    assert_eq!(
+        crate::external::thetadata::run::absence_cause_of(&err),
+        Some(crate::external::thetadata::AbsenceCause::AmbiguousDuplicate),
+    );
+}
+
+/// The two causes must not collapse into one another.
+///
+/// A single classifier returning the same answer for both would satisfy each
+/// test above in isolation while destroying the only distinction that decides
+/// which remedy applies.
+#[test]
+fn the_two_causes_are_distinguishable_and_an_unknown_refusal_is_neither() {
+    use crate::external::thetadata::AbsenceCause;
+    use crate::external::thetadata::run::absence_cause_of;
+
+    let sentinel = ThetaError::AllZeroSeries {
+        path: "/x".to_owned(),
+        rows: 10,
+    };
+    let ambiguous = ThetaError::DuplicateRow {
+        path: "/x".to_owned(),
+        identity: "k".to_owned(),
+        occurrences: 2,
+        discriminator: Some(("timestamp", "t".to_owned())),
+    };
+    assert_ne!(
+        absence_cause_of(&sentinel),
+        absence_cause_of(&ambiguous),
+        "one classifier for both causes is one remedy for two problems"
+    );
+    assert_eq!(
+        absence_cause_of(&sentinel),
+        Some(AbsenceCause::SolverSentinel)
+    );
+    assert_eq!(
+        absence_cause_of(&ambiguous),
+        Some(AbsenceCause::AmbiguousDuplicate)
+    );
+
+    // The default is REFUSING to claim absence. A malformed row is this build
+    // failing to read, not the vendor failing to have — so it stays
+    // outstanding and gets asked again.
+    let malformed = ThetaError::MalformedRow {
+        path: "/x".to_owned(),
+        row: 3,
+        detail: "short".to_owned(),
+    };
+    assert_eq!(
+        absence_cause_of(&malformed),
+        None,
+        "an unnameable refusal must never be recorded as absence"
+    );
+    // And a repeat with NO discriminator is the interval-endpoint bug, which is
+    // also not an absence.
+    let no_disc = ThetaError::DuplicateRow {
+        path: "/x".to_owned(),
+        identity: "k".to_owned(),
+        occurrences: 2,
+        discriminator: None,
+    };
+    assert_eq!(absence_cause_of(&no_disc), None);
 }

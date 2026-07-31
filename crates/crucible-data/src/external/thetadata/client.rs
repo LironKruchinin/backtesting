@@ -34,6 +34,7 @@
 //! taking tokio's `fs` feature, which offloads onto a blocking thread pool —
 //! threads, in the crate that must not have them.
 
+use std::ops::ControlFlow;
 use std::time::Duration;
 
 use reqwest::StatusCode;
@@ -221,10 +222,13 @@ impl ThetaClient {
         // Implemented on top of the streaming path rather than beside it, so
         // there is one spawn-and-drive implementation to be right about and
         // every `fetch_batch` test exercises the streaming code too.
+        // `fetch_batch` wants every result, so it never breaks: the caller
+        // asked for the whole batch and gets it.
         self.fetch_streaming(requests, |index, result, _elapsed| {
             if let Some(slot) = out.get_mut(index) {
                 *slot = Some(result);
             }
+            ControlFlow::Continue(())
         });
 
         out.into_iter()
@@ -270,10 +274,16 @@ impl ThetaClient {
     /// alternative is buffering every body until the end, which is the barrier
     /// this exists to remove — but it is why the callback should write a file,
     /// not compute a quarter of one.
+    /// `on_result` returns [`ControlFlow::Break`] to stop the batch.
+    ///
+    /// The return value is the whole of the cancellation mechanism, and it is a
+    /// return value rather than a flag the caller sets because the decision is
+    /// made *inside* the callback, on the result it was just handed. A shared
+    /// `AtomicBool` would be the same thing with a race in it.
     pub fn fetch_streaming(
         &self,
         requests: &[Request],
-        mut on_result: impl FnMut(usize, Result<Vec<u8>, ThetaError>, Duration),
+        mut on_result: impl FnMut(usize, Result<Vec<u8>, ThetaError>, Duration) -> ControlFlow<()>,
     ) {
         // Spawning happens INSIDE `block_on`. `JoinSet::spawn` needs an active
         // runtime context and panics without one — "there is no reactor
@@ -294,7 +304,24 @@ impl ThetaClient {
             }
             while let Some(joined) = set.join_next().await {
                 match joined {
-                    Ok((index, result, elapsed)) => on_result(index, result, elapsed),
+                    Ok((index, result, elapsed)) => {
+                        if on_result(index, result, elapsed).is_break() {
+                            // The caller has decided the run is over. Everything
+                            // still queued is work it has already said it will
+                            // not keep, so stop issuing rather than draining.
+                            //
+                            // Measured: 794 outstanding against a 2,048-request
+                            // window is ONE window, so "the breaker stops the
+                            // run at a window boundary" stopped nothing — the
+                            // remaining 594 were fetched and discarded after the
+                            // 200th refusal (D-0096).
+                            set.abort_all();
+                            break;
+                        }
+                    }
+                    Err(e) if e.is_cancelled() => {
+                        // Ours, from `abort_all` above. Not a failure.
+                    }
                     Err(e) => {
                         // A task cannot panic here without a bug in this
                         // module; surface it rather than losing a slot.
@@ -607,6 +634,7 @@ mod tests {
             timings.push((index, elapsed));
             let body = String::from_utf8(result.expect("200")).expect("utf8");
             bodies.push((index, body));
+            ControlFlow::Continue(())
         });
 
         assert_eq!(arrival.len(), 4, "every request is delivered exactly once");
@@ -653,6 +681,7 @@ mod tests {
         client.fetch_streaming(&requests, |index, result, _| {
             seen.push(index);
             assert!(result.is_err(), "nothing listens on port 1");
+            ControlFlow::Continue(())
         });
         seen.sort_unstable();
         assert_eq!(seen, vec![0, 1, 2]);

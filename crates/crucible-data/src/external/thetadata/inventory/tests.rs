@@ -10,6 +10,7 @@ fn report() -> ValidationReport {
         n_builds_distribution: BTreeMap::from([(2, 2956)]),
         identical_pairs: 2956,
         conflicting_pairs: 0,
+        identical_repeats_collapsed: 0,
         sentinel_rows_dropped: 0,
         // The measured VIX-style shape: most of a chain does not trade on a
         // given day, so a high rate is ordinary and only a *change* is a
@@ -265,4 +266,141 @@ mod deny_share {
             other => panic!("expected an Io error, got {other:?}"),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Absence records (D-0093): the third thing a line can say, and the arithmetic
+// that closes the 794.
+// ---------------------------------------------------------------------------
+
+/// An absence record round-trips, and reads back with its cause intact.
+#[test]
+fn an_absence_record_round_trips_with_its_cause_and_detail() {
+    let dir = TempDir::new();
+    let inventory = Inventory::open(dir.path());
+    let record = InventoryRecord::absence(
+        "/option/history/greeks/eod",
+        "SPX",
+        "daily",
+        "2021-03-02",
+        "2021-03-02",
+        "/option/history/greeks/eod?symbol=SPX&expiration=*&start_date=20210302",
+        AbsenceCause::SolverSentinel,
+        "answered with 5946 rows that are entirely zero",
+        1_700_000_000_000_000_000,
+    );
+    inventory.append(&record).expect("append");
+
+    let back = inventory.read_all().expect("read");
+    assert_eq!(back.len(), 1);
+    assert!(back[0].is_absence());
+    assert_eq!(back[0].absence, Some(AbsenceCause::SolverSentinel));
+    assert!(back[0].absence_detail.contains("entirely zero"));
+    // No file is claimed, which is what makes it an absence rather than a
+    // record of bytes nobody can find.
+    assert!(back[0].file_path.is_empty());
+    assert_eq!(back[0].row_count, 0);
+}
+
+/// **THE 794 → 0 ARITHMETIC.** Absence records satisfy plan-minus-inventory,
+/// so a resume over the same plan issues nothing.
+///
+/// This is the whole remedy stated as a test: before absence records existed a
+/// refusal appended nothing, so every one of the 794 stayed outstanding and was
+/// re-issued on every run forever. The count is the real one deliberately —
+/// a fixture of 3 would pass while proving nothing about the case that matters.
+#[test]
+fn absence_records_satisfy_the_plan_and_drive_outstanding_to_zero() {
+    let dir = TempDir::new();
+    let inventory = Inventory::open(dir.path());
+
+    let plan: Vec<String> = (0..794)
+        .map(|n| format!("/option/history/greeks/eod?symbol=SPX&start_date=2021{n:04}"))
+        .collect();
+
+    // Before: the whole plan is outstanding.
+    assert_eq!(
+        inventory.outstanding(&plan).expect("outstanding").len(),
+        794,
+        "nothing recorded yet"
+    );
+
+    for (n, request) in plan.iter().enumerate() {
+        // Two causes, mixed, because the real set is mixed.
+        let cause = if n % 3 == 0 {
+            AbsenceCause::AmbiguousDuplicate
+        } else {
+            AbsenceCause::SolverSentinel
+        };
+        inventory
+            .append(&InventoryRecord::absence(
+                "/option/history/greeks/eod",
+                "SPX",
+                "daily",
+                "2021-03-02",
+                "2021-03-02",
+                request,
+                cause,
+                "measured cause",
+                1,
+            ))
+            .expect("append");
+    }
+
+    // After: nothing is outstanding, and NOTHING was fetched to achieve it.
+    assert_eq!(
+        inventory.outstanding(&plan).expect("outstanding").len(),
+        0,
+        "an absence record settles its request"
+    );
+
+    // And "0 outstanding" is never allowed to read as "everything acquired":
+    // the causes are counted and stay countable.
+    let by_cause = inventory.absences_by_cause().expect("absences");
+    assert_eq!(by_cause[&AbsenceCause::AmbiguousDuplicate], 265);
+    assert_eq!(by_cause[&AbsenceCause::SolverSentinel], 529);
+    assert_eq!(by_cause.values().sum::<u64>(), 794);
+}
+
+/// A line written before absence records existed reads as data, not absence.
+///
+/// The reader-first obligation (CLAUDE.md §8) in one assertion: every one of
+/// the 82,668 lines already in the archive predates the `absence` field, and
+/// each must keep meaning exactly what it meant.
+#[test]
+fn a_v1_line_without_the_absence_field_reads_as_data() {
+    let dir = TempDir::new();
+    let inventory = Inventory::open(dir.path());
+    let path = inventory.path();
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
+    // Hand-written in the pre-absence shape, field-for-field.
+    std::fs::write(
+        path,
+        "{\"schema_version\":1,\"endpoint\":\"/option/history/eod\",\"root\":\"SPY\",\
+         \"grain\":\"daily\",\"start_date\":\"2024-01-02\",\"end_date\":\"2024-01-02\",\
+         \"request\":\"/option/history/eod?symbol=SPY\",\"file_path\":\"a.parquet\",\
+         \"file_blake3\":\"ab\",\"size_bytes\":10,\"row_count\":2,\"distinct_contracts\":1,\
+         \"dup_rate\":2.000,\"n_builds_distribution\":{\"2\":1},\"conflicting_pairs\":0,\
+         \"sentinel_rows_dropped\":0,\"fetch_millis\":5,\"zero_ohlc_rate\":0.500,\
+         \"reconciliation\":null,\"fetched_ts\":7}\n",
+    )
+    .expect("write");
+
+    let back = inventory.read_all().expect("read");
+    assert_eq!(back.len(), 1);
+    assert!(
+        !back[0].is_absence(),
+        "a v1 line is data; reading it as absence would retire a request nobody settled"
+    );
+    assert_eq!(back[0].absence, None);
+    assert!(back[0].absence_detail.is_empty());
+    assert_eq!(back[0].file_path, "a.parquet");
+    // It still satisfies resume, exactly as it always did.
+    assert_eq!(
+        inventory
+            .outstanding(&["/option/history/eod?symbol=SPY".to_owned()])
+            .expect("outstanding")
+            .len(),
+        0
+    );
 }

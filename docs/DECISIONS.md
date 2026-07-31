@@ -3051,3 +3051,137 @@ propose a superseding entry — don't silently diverge.
   `ExitKind::Panicked` exists and nothing writes it, because the CLI installs no
   panic hook — verified, not assumed. A panic still leaves no exit record. That
   is the one gap this entry does not close.
+- **D-0093** (2026-07-31) — **The inventory gains a third kind of line: an
+  ABSENCE record**, carrying `absence` (a cause enum) and `absence_detail` (the
+  refusal verbatim). Plan-minus-inventory treats it as satisfied.
+  **Why.** A line could previously say two things — *here is a file*, or *asked,
+  answered, nothing there* (the vendor's 472, written with an empty
+  `file_path`). A refusal said nothing at all, which is why the T0 tranche's 794
+  missing `greeks/eod` records were indistinguishable from requests never
+  attempted, and why every resume re-issued all 794 and got the same answer
+  (D-0092; the measurement is `docs/T0_REFUSAL_FORENSIC.md`). An absence record
+  is the third statement: **asked, answered, and the answer cannot become
+  archive — here is why.**
+  **The mechanism is deliberately boring.** Resume keys on the rendered request
+  string, and an absence record carries one, so it settles its request with no
+  special case anywhere in the diff. `absence_records_satisfy_the_plan_and_drive_outstanding_to_zero`
+  is that arithmetic as a test, at the real width: 794 requests outstanding, 794
+  absence records appended, 0 outstanding, **zero network requests issued**. A
+  fixture of three would have passed while proving nothing about the case this
+  exists for.
+  **The cause is an enum, not free text.** The reason string is recorded too —
+  a human needs it in order to disagree with the classification — but a reader
+  aggregates on the cause, and free text cannot be counted. Two causes were
+  measured and they need different remedies (D-0094, D-0095); collapsing them
+  into "refused" would destroy the only distinction that decides what to do.
+  **Classification refuses to guess, and that is the load-bearing half.**
+  `absence_cause_of` returns `None` for any error it cannot name, and a `None`
+  writes no record — so the request stays outstanding and is asked again.
+  Absence is a claim that data cannot be had; a build may only make it where it
+  has been measured. `the_two_causes_are_distinguishable_and_an_unknown_refusal_is_neither`
+  pins both directions, including that a `MalformedRow` — this build failing to
+  read, not the vendor failing to have — is never an absence.
+  **Classification is by error variant and never by message text**, so that
+  improving a sentence cannot silently reclassify an archive.
+  **The cost is stated rather than hidden**: a build that later learns to read
+  one of these responses will not re-fetch it on its own. Removing an absence
+  class is a deliberate act — delete those lines, or widen the plan — never
+  something that happens by accident. `absences_by_cause` exists so that "0
+  outstanding" can never be read as "everything was acquired", and the run
+  report prints the count **even when it is zero**, for the reason §9's
+  intrabar-convention line gives.
+  **Reader-first (§8) is satisfied by construction and checked, not assumed.**
+  The on-`main` reader is a field-extractor that ignores unknown fields and maps
+  a missing or `null` field to `None` — which is exactly what the 82,668
+  existing lines meant. `a_v1_line_without_the_absence_field_reads_as_data`
+  parses a hand-written pre-absence line and asserts it is data, not absence:
+  the failure this guards against is a v1 line being read as a settled absence,
+  which would retire a request nobody settled.
+- **D-0094** (2026-07-31) — **Cause A: a response whose every row carries the
+  vendor's failed-solve sentinel is recorded as `SolverSentinel` absence.** The
+  refusal itself is unchanged; what changes is that it now leaves a record.
+  **Why not repaired instead.** `is_zero_sentinel` is
+  `underlying_price == 0.0 || iv_error >= IV_ERROR_SENTINEL`, and there is a
+  pre-existing test pinning `is_zero_sentinel(4742.83, 100.0) == true` — a real
+  underlying beside a failed solve is a sentinel **by intent**, not by accident.
+  On the measured days (SPX 2020-10-29, 2021-03-02, 2021-12-23) `implied_vol`
+  and `iv_error` are exactly `0.5000` and `100.0000` across the entire
+  chain-day: an IV solver that never converged and emitted its initial guess
+  with a maximum-error flag. Greeks derived from a non-converged fit are not
+  data, so nothing is salvaged into the archive and **no sentinel row is ever
+  written** (`planted_a_whole_chain_of_failed_solves_refuses_and_writes_no_row`).
+  **The salvage option, recorded because it was asked for and is real.** The
+  `underlying_price` on these responses IS correct (SPX 3870.29 on 2021-03-02),
+  and the contract set reconciles with `eod` at exact parity. A search for
+  consumers found **none**: `transcode.rs` maps the column's type on the way
+  out, `validate.rs` reads it only for this sentinel, and nothing in
+  `crucible-engine`, `crucible-strategies` or `crucible-funnel` reads greeks at
+  all. So absence is recorded **whole**, per the ruling. What makes this worth
+  revisiting rather than closing: `external::thetadata`'s own module doc records
+  that the Index tier is FREE — `/index/history/price` answers 403 — and that
+  "the greeks endpoints carry an `underlying_price` column, so the SPX/VIX/RUT
+  levels arrive with the option data anyway". That is a *planned* consumer with
+  no code yet. If it is built, these days hold a real index level behind an
+  unusable IV surface, and the file-level gate is all-or-nothing. Splitting the
+  channel is a decision with its own control, not a tweak.
+  **The converse control is what keeps the gate honest.**
+  `one_converged_solve_is_enough_to_keep_the_file` asserts a single ordinary
+  `iv_error = 0.0006` row among failures keeps the file — without it, a gate
+  that refused every `greeks/eod` response would pass the planted control and
+  nobody would know.
+- **D-0095** (2026-07-31) — **Cause B: one identity repeated at ONE
+  discriminator value collapses keep-first when the rows are byte-identical, and
+  refuses as `AmbiguousDuplicate` when they differ.** (narrows the blanket
+  refusal D-0054's dedup left in place)
+  **Why, and it is a fact about the bytes rather than a preference.** SPX
+  `greeks/eod` 2023-09-19 answers with 12,492 rows over 6,246 identities —
+  **6,246 distinct FULL rows**, so every duplicate half is byte-equal, and the
+  same holds for 2023-09-27. Two rows that agree in every column are one datum
+  written twice: keeping the first is deterministic, loses nothing, and is not
+  an adjudication. Two rows that *disagree* about one contract at one instant
+  cannot both be true and nothing ranks them, so the file is refused and
+  recorded as an absence — **no guessing, per the ruling.** The differing case
+  has never been seen on this archive and is implemented and controlled anyway,
+  because "never seen" is a statement about the past.
+  **These days are recoverable data, and that is the point.** The measured 2023
+  rows carry `iv_error = 0.0006` and a real underlying — ordinary data that was
+  being refused for a vendor artefact. Cause B is a repair; cause A is not.
+  **Two pre-existing merge-blocking controls changed meaning, and were
+  rederived rather than relaxed** (§7's "decision-log entry + rederived
+  values"). `planted_duplicate_contract_with_the_same_build_stamp_refuses_the_file`
+  and the `open_interest` uniqueness gate both planted **byte-identical**
+  repeats and asserted a refusal. Each was narrowed to plant a *differing*
+  repeat — preserving the original intent, that a repeat nothing explains is
+  refused — and each gained a companion asserting the identical case now
+  collapses. The pair is the point: without the companion, "the gate fires" and
+  "the gate fires on everything" look identical.
+  **`identical_repeats_collapsed` is counted, not silent.** Nothing in the
+  vendor's model explains why one build emits one contract twice, so a rate that
+  moves is a vendor change nobody announced — the same argument the dup-rate era
+  fingerprint already makes.
+- **D-0096** (2026-07-31) — **A halted run stops ISSUING requests, not merely
+  stops keeping them.** `fetch_streaming`'s callback returns `ControlFlow`, and
+  a `Break` aborts the `JoinSet`.
+  **Why.** The breaker's own rationale was that the window "gives the
+  refusal-rate breaker a place to stop the run rather than draining 80,000
+  fetches it has already decided not to keep". Measured on 2026-07-31, it did
+  not: `BREAKER_CHECKPOINT` is 2,048 and the outstanding set was **794**, so the
+  whole run was ONE window — every request was already spawned into the
+  `JoinSet` before the first response arrived. The breaker tripped at attempt
+  200 and the remaining 594 were fetched over the network and discarded
+  unprocessed. The guarantee held for a large tranche and was vacuous for a
+  small resume, which is exactly the shape a resume has.
+  **A return value, not a shared flag**: the decision is made inside the
+  callback on the result it was just handed, and an `AtomicBool` would be the
+  same thing with a race in it. Aborted tasks surface as
+  `JoinError::is_cancelled` and are ignored — without that they would hit the
+  `debug_assert!` that exists to catch a panicking fetch task, turning the
+  repair into a debug-build panic.
+  **Nothing in flight is written**, so resume is unaffected: an aborted request
+  was never inventoried and is picked up untouched.
+  **The breaker's rate now excludes classified absences** (D-0093), and this is
+  not a loosened threshold. A resume re-attempts *only* the previously-refused
+  set, so its refusal rate is ~100 % by construction; counting absences would
+  halt every repair run at attempt 200 — the run that is *fixing* the 794. What
+  the breaker still asks is the question it was written for: "am I misreading
+  the feed?", where a refusal this build cannot name is the evidence.

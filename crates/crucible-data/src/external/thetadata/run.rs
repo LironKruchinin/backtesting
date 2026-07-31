@@ -60,12 +60,13 @@
 //! ends. It gets an inventory line with no file — `file_path` empty, row count
 //! zero — which is the honest statement: *asked, answered, nothing there*.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 use super::client::ThetaClient;
 use super::error::ThetaError;
-use super::inventory::{Inventory, InventoryRecord};
+use super::inventory::{AbsenceCause, Inventory, InventoryRecord};
 use super::plan::{PlannedRequest, TranchePlan};
 use super::schema::Endpoint;
 use super::telemetry::{self, Counts, ExitKind, HEARTBEAT_EVERY};
@@ -122,8 +123,16 @@ pub struct RunReport {
     pub written: u64,
     /// Requests the vendor answered 472 for, recorded as empty.
     pub empty: u64,
-    /// Requests refused. Not written to the inventory, so resume retries them.
+    /// Requests refused, classified or not.
     pub refusals: Vec<Refusal>,
+    /// Refusals this build could name, and therefore wrote as absence records.
+    ///
+    /// These are subtracted from the breaker's rate: an absence is this build
+    /// succeeding at saying what it cannot have, and the run that repairs the
+    /// 794 is ~100% absences by construction.
+    pub absences: u64,
+    /// The same count, split by cause, for the run's own report.
+    pub absences_by_cause: BTreeMap<AbsenceCause, u64>,
     /// Bytes of Parquet written.
     pub bytes_written: u64,
     /// Golden-raw samples kept this run.
@@ -147,13 +156,22 @@ fn millis_of(elapsed: core::time::Duration) -> u64 {
 }
 
 impl RunReport {
-    /// Refusals as a fraction of attempts.
+    /// Refusals this build could **not** name, as a fraction of attempts.
+    ///
+    /// Classified absences are excluded on purpose. The breaker's question is
+    /// "am I misreading the feed?", and a refusal that resolved to a recorded
+    /// absence with a measured cause is the opposite of that — it is the build
+    /// reading the feed correctly and archiving the conclusion. Including them
+    /// would halt every repair run at attempt 200, because a resume re-attempts
+    /// only the previously-refused set and so runs at ~100% by construction.
     #[must_use]
     pub fn refusal_rate(&self) -> f64 {
         if self.attempted == 0 {
             return 0.0;
         }
-        self.refusals.len() as f64 / self.attempted as f64
+        let unclassified =
+            self.refusals.len() as u64 - self.absences.min(self.refusals.len() as u64);
+        unclassified as f64 / self.attempted as f64
     }
 
     /// Whether the refusal rate has become a finding rather than noise.
@@ -214,11 +232,27 @@ impl core::fmt::Display for RunReport {
             "  bytes written  {}",
             super::plan::human_bytes(self.bytes_written)
         )?;
-        if !self.refusals.is_empty() {
+        // Printed even at zero, and deliberately: "no absences" and "this build
+        // does not record absences" must not look the same to a reader, which is
+        // the same argument the intrabar-convention line makes in §9.
+        writeln!(f, "  absences       {}", self.absences)?;
+        for (cause, count) in &self.absences_by_cause {
+            writeln!(f, "    {:<22} {count}", cause.as_str())?;
+        }
+        let unclassified =
+            self.refusals.len() as u64 - self.absences.min(self.refusals.len() as u64);
+        if unclassified > 0 {
             writeln!(
                 f,
-                "\n  refusal ledger (not inventoried — resume retries these):"
+                "\n  refusal ledger ({unclassified} unclassified — not inventoried, resume retries these):"
             )?;
+        } else if !self.refusals.is_empty() {
+            writeln!(
+                f,
+                "\n  refusal ledger (all classified and inventoried as absences):"
+            )?;
+        }
+        if !self.refusals.is_empty() {
             for refusal in self.refusals.iter().take(40) {
                 writeln!(f, "    {} — {}", refusal.request, refusal.reason)?;
             }
@@ -322,7 +356,15 @@ enum Outcome {
         report: ValidationReport,
     },
     Empty,
-    Refused(String),
+    Refused {
+        /// The rendered refusal, for a human to read and disagree with.
+        reason: String,
+        /// The absence this refusal represents, when it names one.
+        ///
+        /// `None` means this build cannot classify it, which keeps the request
+        /// outstanding rather than recording a claim it has not earned.
+        cause: Option<AbsenceCause>,
+    },
 }
 
 /// Runs the outstanding half of a plan.
@@ -355,13 +397,14 @@ pub fn run_tranche(
         // the moment it arrives, so no request waits on a slower neighbour.
         client.fetch_streaming(&requests, |index, body, elapsed| {
             if fatal.is_some() || report.halted.is_some() {
-                // The run is already over. Remaining fetches drain without
-                // being written, and because they were never inventoried,
-                // resume picks them up untouched.
-                return;
+                // The run is already over, and now says so: nothing further is
+                // issued (D-0096). Anything already in flight is discarded
+                // unwritten, and because it was never inventoried, resume picks
+                // it up untouched.
+                return ControlFlow::Break(());
             }
             let Some(request) = window.get(index) else {
-                return;
+                return ControlFlow::Continue(());
             };
             report.attempted += 1;
             report.latencies_ms.push(millis_of(elapsed));
@@ -380,18 +423,40 @@ pub fn run_tranche(
 
             match outcome {
                 Err(e) => fatal = Some(e),
-                Ok(Outcome::Refused(reason)) => {
+                Ok(Outcome::Refused { reason, cause }) => {
+                    // A *classified* refusal is an absence and gets a line, so
+                    // the next resume does not ask it again. An unclassified
+                    // one gets nothing, exactly as before: it stays outstanding
+                    // because this build cannot say the data is unavailable,
+                    // only that it could not read it (D-0093).
+                    if let Some(cause) = cause {
+                        report.absences += 1;
+                        *report.absences_by_cause.entry(cause).or_default() += 1;
+                        let mut record = absence_record(request, &rendered, cause, &reason, now_ts);
+                        record.fetch_millis = millis_of(elapsed);
+                        if let Err(e) = inventory.append(&record) {
+                            fatal = Some(e);
+                        }
+                    }
                     report.refusals.push(Refusal {
                         request: rendered,
                         reason,
                     });
                     // A systemic refusal rate is a finding about this build,
                     // not a reason to keep going and archive the result.
+                    //
+                    // Classified absences are excluded from the rate: they are
+                    // this build working — it asked, it could not archive the
+                    // answer, and it said so durably. Counting them would trip
+                    // the breaker on exactly the run that is *fixing* the 794,
+                    // whose refusal rate is ~100% by construction because the
+                    // resume set is the previously-refused set.
                     if report.refusal_rate_is_systemic() {
                         report.halted = Some(format!(
-                            "refusal rate {:.1}% over {} attempts exceeds the {:.1}% limit — \
-                             that is this build misreading the feed, not a vendor hiccup. \
-                             Nothing refused was inventoried, so a fixed build resumes cleanly",
+                            "unclassified refusal rate {:.1}% over {} attempts exceeds the \
+                             {:.1}% limit — that is this build misreading the feed, not a \
+                             vendor hiccup. Nothing unclassified was inventoried, so a fixed \
+                             build resumes cleanly",
                             report.refusal_rate() * 100.0,
                             report.attempted,
                             REFUSAL_RATE_LIMIT * 100.0
@@ -440,6 +505,11 @@ pub fn run_tranche(
                     }
                 }
             }
+            if fatal.is_some() || report.halted.is_some() {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
         });
 
         if let Some(e) = fatal {
@@ -471,12 +541,22 @@ fn process_one(
         // A tripped breaker means the Terminal has stopped answering; more
         // requests will not change that (D-0056).
         Err(e @ ThetaError::CircuitOpen { .. }) => return Err(e),
-        Err(e) => return Ok(Outcome::Refused(e.to_string())),
+        Err(e) => {
+            return Ok(Outcome::Refused {
+                reason: e.to_string(),
+                cause: absence_cause_of(&e),
+            });
+        }
     };
 
     let validated = match validate(request.endpoint, &body, rendered) {
         Ok(validated) => validated,
-        Err(e) => return Ok(Outcome::Refused(e.to_string())),
+        Err(e) => {
+            return Ok(Outcome::Refused {
+                reason: e.to_string(),
+                cause: absence_cause_of(&e),
+            });
+        }
     };
 
     // Golden-raw is kept from the same bytes that were just validated, before
@@ -509,7 +589,10 @@ fn process_one(
         // A write failure that is not about this file — a full disk — would
         // recur on every subsequent request and the refusal-rate breaker will
         // catch it within 200 attempts.
-        Err(e) => Ok(Outcome::Refused(e.to_string())),
+        Err(e) => Ok(Outcome::Refused {
+            reason: e.to_string(),
+            cause: absence_cause_of(&e),
+        }),
     }
 }
 
@@ -529,6 +612,58 @@ fn empty_record(request: &PlannedRequest, rendered: &str, now_ts: i64) -> Invent
         0,
         &ValidationReport::default(),
         None,
+        now_ts,
+    )
+}
+
+/// Which absence a refusal represents, or `None` when it represents none.
+///
+/// **Classification is by error variant, never by matching the message text.**
+/// The rendered reason is written beside the cause for a human to disagree
+/// with, but a build that classified on its own prose would silently reclassify
+/// every record the day somebody improved a sentence.
+///
+/// `None` is the important half and it is deliberately the default: a refusal
+/// this build cannot name is **not** written as an absence, so it stays
+/// outstanding and gets re-asked. Absence is a claim that the data cannot be
+/// had, and a claim like that is only allowed where it has been measured
+/// (D-0093).
+#[must_use]
+pub fn absence_cause_of(error: &ThetaError) -> Option<AbsenceCause> {
+    match error {
+        // Every row was the vendor's "absent" spelling. On this archive that is
+        // an IV solve that did not converge for a whole chain-day: the
+        // underlying price is real, the greeks are not, and the file-level gate
+        // is all-or-nothing (D-0094).
+        ThetaError::AllZeroSeries { .. } => Some(AbsenceCause::SolverSentinel),
+        // Only the same-discriminator case reaches here — byte-identical
+        // repeats are collapsed in `validate` and never refuse (D-0095). What
+        // remains is two rows disagreeing about one contract at one instant.
+        ThetaError::DuplicateRow {
+            discriminator: Some(_),
+            ..
+        } => Some(AbsenceCause::AmbiguousDuplicate),
+        _ => None,
+    }
+}
+
+/// An inventory line recording that a request produced no archivable data.
+fn absence_record(
+    request: &PlannedRequest,
+    rendered: &str,
+    cause: AbsenceCause,
+    detail: &str,
+    now_ts: i64,
+) -> InventoryRecord {
+    InventoryRecord::absence(
+        request.endpoint.path(),
+        &request.root,
+        "daily",
+        &render_date(request.date),
+        &render_date(request.date),
+        rendered,
+        cause,
+        detail,
         now_ts,
     )
 }
