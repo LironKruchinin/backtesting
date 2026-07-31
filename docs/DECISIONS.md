@@ -3262,3 +3262,90 @@ propose a superseding entry — don't silently diverge.
   deflated Sharpe lands complete with both controls. When it comes, its fold
   structure must respect the existing `FoldPlan` machinery or be flagged under
   §9 — no quiet fold redefinition.
+- **D-0098** (2026-07-31) — **Operational telemetry lives in a decided root
+  directory, `telemetry/`, archive-wide and not per vendor.**
+  **The problem it fixes.** D-0092 wrote `heartbeat.txt` and `last_exit.json`
+  bare at the archive root. `layout-check` rule 7 — "anything unrecognized at the
+  archive root" — refused both, so **every run exited 4**, permanently. A red
+  check that is always red trains a reader to ignore it, which costs more than
+  the thing the check was watching. Three documents disagreed at once: the
+  module doc said "inside the tranche's data directory", the files were at the
+  root, and `DATA_LAYOUT.md` had never heard of them.
+  **Why a new root entry rather than widening the parser.** Rule 7 exists to
+  catch exactly this — the tree growing something nobody decided on — so
+  tolerating bare files at the root would delete the rule to silence its one
+  true positive. The fix is to *decide*, which is what `staging/` and
+  `delivery/` already did for operational non-data: not depth-checked, never in
+  `manifest.jsonl`, documented as siblings. `telemetry/` joins them on the same
+  terms and for the same reason: none of the three is an acquisition.
+  **Why archive-wide and NOT `external/thetadata/`.** A heartbeat answers "is
+  the machine still working?", and that is not a question about whichever vendor
+  happens to be running. The next Databento tranche wants the same file at the
+  same path; filing it per vendor means a second copy of the same idea the first
+  time anything else runs unattended, and — worse — an operator checking whether
+  a run is alive would have to already know which vendor was running in order to
+  find out whether anything was. Per-vendor placement was considered and
+  rejected on that ground, not on tidiness.
+  **A latent bug fixed on the way.** Both writers are best-effort and swallow
+  their errors, so once the path gained a directory component a missing parent
+  would have meant writing **nothing, silently** — the exact failure D-0092
+  exists to end. Both now create the directory, and
+  `the_writers_create_the_telemetry_directory_when_it_is_absent` asserts it on a
+  fixture that starts without one.
+  **Done when `layout-check` exits 0**, and it does: `layout clean`, 33 raw
+  files, 1,751 curated files, 33 manifest records.
+- **D-0099** (2026-07-31) — **The spike sigma's defect is RESOLUTION, not
+  staleness; the "dominated by calm 2019" account is struck. And `qa` reports
+  nothing at all on 47 contracts, which is the larger finding.**
+  *Corrects `docs/SPIKE_FORENSIC.md` and the CLAUDE.md §9 entry that repeated it.
+  No code changes; the estimator remains deliberately unimplemented.*
+  **What was measured.** A read-only `qa --timeframe 1m` sweep over **all 863
+  curated contracts**, recording each contract's robust sigma.
+  **The mechanism.** `sigma = 1.4826 × median(|Δclose|)` over adjacent
+  same-interval bars. Every price is an integer multiple of the tick, so every
+  `Δclose` is, so their median is — the estimator **cannot return anything but an
+  integer number of ticks**. The whole archive holds **43 distinct sigma values**.
+  ES reads 1 tick on 44 of 67 contracts (2011 → 2023, ESH2020 among them), 2 on
+  13, 3 on 9, 7 on one; GC spans 1→20 ticks, NQ 1→43, RTY never reads 1. So it
+  *is* a volatility estimate, quantised to the tick lattice and floored at one,
+  with **no resolution between adjacent integers** — a 40 % volatility change is
+  invisible.
+  **Three struck claims, each refuted rather than softened.** (1) "Every CL
+  contract shares a sigma of 0.0148" — CL takes eight values across 221
+  contracts and only 42 read 0.0148. (2) "ESH2020's 0.3707 is computed over
+  Jan-2019 → Mar-2020 and therefore dominated by calm 2019" — 0.3707 is
+  *identical* on ESH2011, ESM2013, ESU2016, ESZ2018, ESM2021 and ESU2023; it is
+  one ES tick and carries no information about any year. (3) The framing that the
+  defect is staleness. The arithmetic that made ESH2020 look regime-conflated
+  still holds — a 2-point jump in quiet July 2019 sits at 5.4σ — but because 8σ
+  is pinned to the tick grid at a constant 2.9656 points, not because a calm year
+  diluted a crisis.
+  **The verdict the document reached is UNAFFECTED and stands.** The six-contract
+  event attributions — the Fed's emergency cut minute, the Sunday-reopen
+  limit-downs, all four level-1 circuit-breaker days, negative WTI — were
+  clustering arguments about *when* the flagged bars fall. They never depended on
+  why the threshold sat where it did. A wrong mechanism did not make the flagged
+  moves less real.
+  **The larger finding: 47 contracts get no spike check and nothing says so.**
+  `if mad <= 0.0 { return; }` fires whenever over half a contract's bars did not
+  move — **44 of 68 ZN contracts (65 %)**, a 1/64 tick against quiet minutes,
+  plus CLZ2029/2030/2031. (A further 16 contracts of ≤3 bars hit the separate
+  `moves.len() < 3` return, and 28 deep-deferred ones are indistinguishable from
+  outside; those are benign.) `qa` prints **no `spikes` line at all** in that
+  case — not "0 spikes", nothing — so an automated extraction scores the missing
+  field as zero and a skipped contract reads exactly like a clean one.
+  **4,002,334 of 70,641,676 curated bars (5.7 %) have been reported clean
+  without being examined**, and every count in `SPIKE_FORENSIC.md` — the 0–6,974
+  range, the ~249 median — is therefore drawn from an **undeclared subsample**.
+  That is now stated in the document rather than left to be rediscovered.
+  **Why this changes the proposed repair.** "Replace the full-span sigma with a
+  rolling one" would not fix ES: a rolling median of ES 1-minute moves is one
+  tick in essentially every window too, and a rolling median saturates *harder*
+  than a full-span one — fewer samples, more ties at the floor — reaching the
+  zero-scale case more often, not less. The general form: **any order statistic
+  of a lattice-valued variable is lattice-valued.** An estimator that escapes it
+  has to average rather than rank. That design is not specified here.
+  **What is owed first, and it is not the estimator.** `qa` should print the
+  spike line even when it cannot compute a sigma, saying so and counting the bars
+  it skipped. That is a reporting fix, independent of every open statistical
+  question, and until it lands no archive-wide spike number can be quoted.

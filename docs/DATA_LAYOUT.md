@@ -51,6 +51,8 @@ $CRUCIBLE_DATA_DIR/
 │   └── {intent_id}/…
 ├── delivery/                      per-job support files kept after collection
 │   └── {job_id}/condition.json, metadata.json, symbology.json
+├── telemetry/                     how an unattended run is going, and how it ended
+│   └── heartbeat.txt, last_exit.json
 └── external/                      data that did not come through `pull`
     └── {vendor}/…                 vendor-specific shape + its own inventory
 ```
@@ -237,6 +239,29 @@ these archive-wide and says so.
 
 Not an acquisition, so not in the manifest.
 
+## `telemetry/` — `heartbeat.txt`, `last_exit.json`
+
+How an unattended run is going while it runs, and how it ended once it is gone
+(D-0092). `heartbeat.txt` is overwritten in place every N records;
+`last_exit.json` is one JSON object replaced on every exit path.
+
+**Archive-wide, not per vendor.** A heartbeat answers "is the machine still
+working?", and that is not a question about whichever vendor happens to be
+running: the next Databento tranche wants the same file at the same path.
+Filing it under `external/thetadata/` was considered and rejected — it would
+mean a second copy of the same idea the first time anything else runs
+unattended, and an operator checking on a run would have to already know which
+vendor was running in order to find out whether anything was (D-0098).
+
+**Its real job is to remove a temptation.** A default Windows reader on a file
+a writer holds can deny the writer and end it, which is how a live pull was
+nearly lost. This directory exists so nobody ever needs to open
+`inventory.jsonl` to ask whether a run is still going.
+
+Not depth-checked, for the same reason `staging/` is not. Not an acquisition,
+so not in the manifest. Nothing downstream may read a number out of these into
+a result.
+
 ## `external/` — `{vendor}/…`
 
 Data that did not come through `pull`: manually downloaded, differently
@@ -281,7 +306,7 @@ hash correctly at the wrong path, and a file at the right path can be corrupt.
 | 4 | `.parquet` under `raw/`, `.dbn*` under `curated/` | invariant 2: one directory, one kind |
 | 5 | a curated file outside `kind/instrument/grain` | invariant 1, and `rm -rf` stops being safe |
 | 6 | a curated kind outside the known set | the same typo argument as row 2, on the research side |
-| 7 | anything unrecognized at the archive root | the tree grew something nobody decided on |
+| 7 | anything unrecognized at the archive root | the tree grew something nobody decided on — the known set is `raw/ curated/ staging/ delivery/ external/ telemetry/` and `manifest.jsonl jobs.jsonl pull.lock` |
 | 8 | a `curated/bars/` contract whose year is one digit | it can hold two contracts a decade apart, in perfect `ts_open` order, and every other check passes (D-0072) |
 
 Every finding is reported — filesystem findings in walk order, manifest

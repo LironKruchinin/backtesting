@@ -2,6 +2,10 @@
 
 **Date:** 2026-07-31. **Method:** read-only `crucible qa --timeframe 1m` over the
 curated archive; no data purchased, nothing written outside the scratchpad.
+**Revised 2026-07-31** after a full 863-contract sigma sweep: the *verdict* below
+stands unchanged and the *mechanism* originally given for it was wrong. The
+superseded text is not softened, it is struck — see "What the count is actually
+measuring".
 
 The archive-wide QA sweep produced one warning class this project could not
 classify, and CLAUDE.md's standing rule is that an unclassified warning class is
@@ -14,6 +18,30 @@ a finding rather than a footnote. This document classifies it.
 Counts ranged from 0 to 6,974 per contract, median ~249. ESH2020 was the worst
 and is not a thin contract (119,468 bars), so "thin data makes sigma tiny" did
 not explain it.
+
+### Those counts are drawn from an undeclared subsample
+
+**91 of 863 contracts produce no sigma at all**, and when that happens `qa`
+prints **no `spikes` line whatsoever** — not "0 spikes", nothing. An automated
+extraction records the missing field as zero, so a contract whose spike check
+never ran is indistinguishable from one that ran and found nothing. That is how
+this escaped every prior sweep, including the one that produced the range and
+median above.
+
+Two different `return`s produce it, and only one is substantive:
+
+| cause | contracts | what they are |
+|---|---|---|
+| `mad <= 0.0` — over half the bars did not move | **47** | 44 ZN (67k–102k bars each) + CLZ2029/2030/2031 |
+| `moves.len() < 3` — too few adjacent pairs | 16 | ≤3 bars, deep-deferred 2027–2036 |
+| either, indistinguishable from outside | 28 | 4–999 bars, all deep-deferred |
+
+**44 of 68 ZN contracts — 65 % of the root — have no spike check**, because a
+1/64 tick and a quiet 1-minute bar mean the *median* absolute move is exactly
+zero. In total **4,002,334 of 70,641,676 curated bars (5.7 %)** sit under a
+detector that never ran and never said so. An absent detector rendering as a
+clean result is the failure §9 exists to name, and it is the most actionable
+thing in this document.
 
 ## Verdict: REAL VOLATILITY, in every cluster examined
 
@@ -60,43 +88,71 @@ of lots moves it. Those prints are almost certainly real too, but "almost
 certainly" is not the standard used for the other five, so it is recorded as
 **consistent with thin-book trading, not independently corroborated**.
 
-## What the count is actually measuring — and the §9-flagged proposal
+## What the count is actually measuring
 
-The spike count is high not because the archive is bad but because **the
-statistic answers a different question than `qa` asks.**
+**The mechanism this document originally gave was wrong.** Three claims are
+struck outright rather than softened, because each was load-bearing and each is
+refuted by measurement:
 
-`qa`'s spike check exists to find **bad prints** — a price the market did not
-trade. A bad print is implausible *relative to its neighbours*: a data error
-does not know what the volatility regime is. The current statistic asks instead:
-*is this bar's move large relative to the average of this contract's entire
-life?* For a contract whose span contains both a crisis and years of calm, those
-are very different questions:
+1. ~~"Every CL contract shares a sigma of 0.0148 pt."~~ **Refuted.** CL takes at
+   least eight values across 221 contracts; only 42 read 0.0148. CLM2020 reads
+   0.0297.
+2. ~~"ESH2020's sigma is 0.3707 pt, computed over Jan-2019 → Mar-2020 and
+   therefore dominated by calm 2019."~~ **Refuted.** 0.3707 is *identical* on
+   ESH2011, ESM2013, ESU2016, ESZ2018, ESH2020, ESM2021 and ESU2023. It carries
+   no information about 2019 or about any other year. Nothing is "dominated by"
+   anything.
+3. ~~The framing that the defect is **staleness** — one sigma over a whole life
+   conflating regimes.~~ **Refuted.** The defect is **RESOLUTION.**
 
-- `ESH2020`'s sigma is **0.3707 pt**, computed over Jan-2019 → Mar-2020 and
-  therefore dominated by calm 2019. Applying it to March 2020 flags the whole
-  crisis.
-- Every CL contract shares a sigma of **0.0148 pt** (≈1.5 ticks). An 8σ move is
-  ~12 ticks. On 2020-04-21 crude moved dollars a minute.
+### The measured mechanism
 
-### The proposal
+`sigma = 1.4826 × median(|Δclose|)` over adjacent same-interval bars. Every price
+is an integer multiple of the tick, so every `Δclose` is too — and the median of
+a set of integer multiples is itself an **exact integer multiple of the tick**.
+The estimator cannot return anything else. Measured over **all 863 curated
+contracts**: **43 distinct sigma values in the entire archive**, every one an
+integer number of ticks.
 
-Replace the full-span robust sigma with a **rolling (or era-aware) volatility
-estimate**, so the null becomes *"given how this market has been moving lately,
-is this move implausible?"* — which is the null the check was written for.
+| root | MAD in ticks (distinct values observed) | tick |
+|---|---|---|
+| **ES** | **1** (×44), 2 (×13), 3 (×9), 7 (×1) | 0.25 |
+| NQ | 1 … 14, 17, 23, 43 | 0.25 |
+| CL | 1 (×42), **2** (×128), 3 (×34), 4, 5, 6, 10, 11 | 0.01 |
+| GC | 1 (×24), **2** (×68), 3 (×50), … up to 20 | 0.10 |
+| RTY | 2 (×14), 3 (×12), 4, 5, 6, 12 — never 1 | 0.10 |
+| ZN | 1 (×23); the other 44 have **no sigma at all** | 1/64 |
+| 6E | 1, 2, 3, 4 (seen through 4-decimal print rounding) | 0.00005 |
 
-**The justification is not a smaller count, and this is the load-bearing part.**
-A rolling sigma changes which bars are flagged **in both directions**:
+So the statistic **is** a volatility estimate — GC spans 1→20 ticks, NQ 1→43 —
+but one quantised to integer ticks and floored at one. It has **no resolution
+between adjacent integers**: a 40 % change in volatility is invisible, and below
+one tick it cannot go at all.
 
-- It *removes* the crisis-wide flags above, which are real volatility.
-- It *adds* flags a full-span sigma currently **hides**: a bad print during a
-  calm stretch of a contract whose sigma has been inflated by a volatile stretch
-  elsewhere in its life. Today, ESH2020's 0.3707 pt sigma means a genuinely
-  impossible 2-point jump in quiet July 2019 sits at 5.4σ and never appears.
+For **ES the floor binds on 44 of 67 contracts, spanning 2011 → 2023 and
+including ESH2020 across COVID** — for every one of those the 8σ gate is a
+constant **2.9656 points**, whatever the market was doing. The other 23 ES
+contracts read 2, 3 or 7 ticks, so "constant across the whole archive" would
+overstate it; "constant across two thirds of it, including the crisis contract
+this document is about" is what was measured.
 
-That second effect is the reason to make the change. A change whose only
-argument was "the number goes down" would be refused, per this project's own
-rule — the argument here is that the current statistic is **blind in exactly the
-place a data defect is most likely to hide.**
+The arithmetic that made ESH2020 look regime-conflated still holds — a 2-point
+jump in quiet July 2019 sits at 5.4σ and never appears — but the **reason** is
+that 8σ is pinned to the tick grid, not that a calm year diluted a crisis.
+
+### Why this changes the proposal
+
+The originally proposed repair — "replace the full-span sigma with a rolling
+one" — **would not fix ES**, because a rolling median of ES 1-minute moves is
+one tick in essentially every window too. A rolling *median* saturates harder
+than a full-span one (fewer samples, more ties at the floor) and reaches the
+`mad <= 0.0` case far more often — a case that already fires at full span on 47
+contracts. Any estimator built from an **order statistic** of a lattice-valued
+variable inherits the lattice. The repair has to escape it, not re-enter it at a
+shorter window.
+
+That design is being planned separately and deliberately is **not** specified
+here, because this document's job is to record what was measured.
 
 ### Status: PROPOSED, NOT IMPLEMENTED — and the proposal is incomplete
 
@@ -118,8 +174,23 @@ plausible argument. Whoever implements it owes:
 
 1. Both counts, per contract, on the six above.
 2. A **planted control**: inject a known-impossible print into a calm stretch of
-   a contract whose full-span sigma is inflated, and show the rolling estimate
-   catches it while the full-span one does not. That is the claim this proposal
+   a contract whose sigma is pinned to the tick floor, and show the new estimate
+   catches it while the current one does not. That is the claim this proposal
    rests on, and §7 gives it no quality exemption.
-3. The window length declared and swept — the same demand D-0087 makes of the
+3. Every parameter declared and swept — the same demand D-0087 makes of the
    permutation null's block length, and for the same reason.
+4. **A converse control written first**: real crisis volatility must survive.
+   An estimator that flags nothing passes item 2 perfectly.
+5. **The zero-scale case answered explicitly**, because it is not hypothetical:
+   47 contracts, 44 of them ZN, already produce no sigma at full span. Whatever
+   replaces the median must either return a positive scale for them or say —
+   out loud, with a count — that it could not. Silence is what is being
+   repaired.
+
+### The separate, smaller repair that does not wait for any of this
+
+`qa` should print the spike line **even when it cannot compute a sigma**, saying
+so and counting the bars it skipped. Today the line is simply absent, which is
+why 5.7 % of the archive has been reported as clean without being examined.
+That is a reporting fix, not a statistical one, and it is independent of every
+open question above.

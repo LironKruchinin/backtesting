@@ -43,8 +43,24 @@ use crate::catalog::ManifestRecord;
 /// `raw` and `curated` hold data; `staging` and `delivery` are ingest's
 /// working areas; `external` holds data that did not come through `pull` and
 /// therefore is not in the manifest (D-0017's boundary, and `DATA_PLAN.md`'s
-/// Cboe section).
-pub const KNOWN_ROOT_DIRS: &[&str] = &["raw", "curated", "staging", "delivery", "external"];
+/// Cboe section). `telemetry` holds operational records of acquisition runs —
+/// how a run is going and how it ended — which are neither data nor
+/// acquisitions and never appear in the manifest (D-0098).
+///
+/// **`telemetry` is archive-wide on purpose, not per vendor.** A heartbeat
+/// answers "is the machine still working?", and that question does not belong
+/// to whichever vendor happens to be running: the next Databento tranche wants
+/// the same file at the same path, and burying it under `external/thetadata/`
+/// would mean a second copy of the same idea the first time anything else runs
+/// unattended.
+pub const KNOWN_ROOT_DIRS: &[&str] = &[
+    "raw",
+    "curated",
+    "staging",
+    "delivery",
+    "external",
+    "telemetry",
+];
 
 /// Files sanctioned at the top of the data dir.
 pub const KNOWN_ROOT_FILES: &[&str] = &["manifest.jsonl", "jobs.jsonl", "pull.lock"];
@@ -384,10 +400,13 @@ pub fn check(data_dir: &Path, records: &[ManifestRecord]) -> Result<LayoutReport
             match name.as_str() {
                 "raw" => check_raw(data_dir, &mut report, &mut schemas)?,
                 "curated" => check_curated(data_dir, &mut report, &mut kinds)?,
-                // `staging/`, `delivery/` and `external/` are working areas
-                // and foreign data. They have shapes, but not ones this
-                // project writes, so imposing one would be inventing a rule to
-                // enforce it.
+                // `staging/`, `delivery/`, `external/` and `telemetry/` are
+                // working areas, foreign data, and operational records. They
+                // have shapes, but not ones this project writes, so imposing
+                // one would be inventing a rule to enforce it. `telemetry/` is
+                // deliberately NOT depth-checked for the same reason
+                // `staging/` is not (D-0098): its contents are overwritten
+                // freely and nothing downstream reads a number out of them.
                 _ => {}
             }
         } else if !KNOWN_ROOT_FILES.contains(&name.as_str()) {

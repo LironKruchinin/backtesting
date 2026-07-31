@@ -63,16 +63,31 @@ pub struct Counts {
     pub refused: u64,
 }
 
-/// Path of the heartbeat file inside the tranche's data directory.
+/// The archive-wide directory both telemetry files live in.
+///
+/// **At the archive root, and not under `external/thetadata/`** (D-0098). A
+/// heartbeat answers "is the machine still working?", which is not a question
+/// about a vendor: the next Databento tranche wants the same file at the same
+/// path. Per-vendor placement was considered and rejected — it would mean a
+/// second copy of the same idea the first time anything else runs unattended,
+/// and an operator checking on a run would have to know which vendor was
+/// running in order to find out whether anything was.
+///
+/// It sits beside `staging/` and `delivery/`, which set the precedent for
+/// operational non-data at the root: not depth-checked, and never in
+/// `manifest.jsonl`, because none of the three is an acquisition.
+pub const TELEMETRY_DIR: &str = "telemetry";
+
+/// Path of the heartbeat file, under `{data_dir}/telemetry/`.
 #[must_use]
 pub fn heartbeat_path(data_dir: &Path) -> PathBuf {
-    data_dir.join("heartbeat.txt")
+    data_dir.join(TELEMETRY_DIR).join("heartbeat.txt")
 }
 
-/// Path of the exit record inside the tranche's data directory.
+/// Path of the exit record, under `{data_dir}/telemetry/`.
 #[must_use]
 pub fn last_exit_path(data_dir: &Path) -> PathBuf {
-    data_dir.join("last_exit.json")
+    data_dir.join(TELEMETRY_DIR).join("last_exit.json")
 }
 
 /// Overwrites the heartbeat with a timestamp and the counts so far.
@@ -94,7 +109,15 @@ pub fn write_heartbeat(data_dir: &Path, now_ts: i64, c: Counts) {
     let body = format!(
         "ts={now_ts}\nattempted={attempted}\nwritten={written}\nempty={empty}\nrefused={refused}\n"
     );
-    let _ = std::fs::write(heartbeat_path(data_dir), body);
+    let path = heartbeat_path(data_dir);
+    // The directory has to exist or the write silently does nothing — and
+    // "silently does nothing" is the failure this whole module was added to
+    // stop. Created here rather than assumed, because a fresh archive has no
+    // `telemetry/` until the first unattended run wants one.
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, body);
 }
 
 /// Why a run ended.
@@ -155,7 +178,11 @@ pub fn write_last_exit(
          \"attempted\":{attempted},\"written\":{written},\"empty\":{empty},\"refused\":{refused}}}\n",
         kind.as_str()
     );
-    match std::fs::File::create(last_exit_path(data_dir)) {
+    let path = last_exit_path(data_dir);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match std::fs::File::create(path) {
         Ok(mut f) => f.write_all(body.as_bytes()).is_ok(),
         Err(_) => false,
     }

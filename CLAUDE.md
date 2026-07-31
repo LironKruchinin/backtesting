@@ -689,18 +689,36 @@ reference; supersede the decision if you disagree — don't hotfix.
   cluster the same way on 2012-09-17, 2015-02, 2013-06-20 and 2020-04-21 — the
   day after WTI settled negative, which §9 already documents. Do not "fix" the
   archive over these.
-- **The spike sigma is a FULL-SPAN robust estimate, and that is a known
-  limitation with a proposal attached — not yet a decision.** One sigma over a
-  contract's whole life conflates volatility regimes: ESH2020's 0.3707 pt is
-  dominated by calm 2019 and flags the whole crash, while a genuinely impossible
-  2-point jump in quiet July 2019 sits at 5.4σ and never appears. The proposal
-  is a rolling/era-aware estimate, and its justification is **not** the smaller
-  count — it is that the present statistic is blind exactly where a bad print is
-  most likely to hide. **It is deliberately unimplemented**: the rule is that
-  old and new counts are reported together, only the old ones exist, and a
-  change argued from plausibility alone is the thing this section exists to
-  refuse. `docs/SPIKE_FORENSIC.md` lists what the implementer owes, including a
-  planted-print control.
+- **The spike sigma's defect is RESOLUTION, not staleness, and the earlier
+  "dominated by calm 2019" account was measured and refuted** (D-0099).
+  `sigma = 1.4826 × median(|Δclose|)`; every price is an integer multiple of the
+  tick, so every move is, so the median is — the estimator can only ever return
+  an integer number of ticks. Across all 863 curated contracts there are **43
+  distinct sigma values in the whole archive**. ESH2020's 0.3707 pt is *identical*
+  to ESH2011, ESM2013, ESU2016, ESZ2018, ESM2021 and ESU2023: it is one ES tick
+  and says nothing about 2019 or any other year. The floor binds on 44 of 67 ES
+  contracts, so for those the 8σ gate is a constant **2.9656 points** whatever
+  the market was doing — while GC ranges 1→20 ticks and NQ 1→43, so it is a
+  volatility estimate, just one with no resolution between adjacent integers.
+  **A rolling median would not repair this** — it saturates harder at a shorter
+  window. Any estimator built from an order statistic of a lattice-valued
+  variable inherits the lattice.
+- **`qa` prints NO spike line at all when it cannot compute a sigma, and 47
+  contracts hit that path** (D-0099). `if mad <= 0.0 { return; }` fires whenever
+  over half a contract's bars did not move: **44 of 68 ZN contracts** (a 1/64
+  tick and quiet minutes), plus three deep-deferred CL. The line is *absent*
+  rather than zero, so an automated read scores it as "checked, clean" —
+  **4,002,334 of 70,641,676 curated bars (5.7 %) have been reported clean
+  without being examined**, and every count in `docs/SPIKE_FORENSIC.md` is drawn
+  from that undeclared subsample. Printing the line with its reason and a
+  skipped-bar count is a reporting fix independent of any statistical one, and
+  it is owed first.
+- **The replacement estimator is still deliberately unimplemented**: old and new
+  counts must be reported together, only the old ones exist, and a change argued
+  from plausibility alone is the thing this section exists to refuse.
+  `docs/SPIKE_FORENSIC.md` lists what the implementer owes — including a
+  planted-print control, a converse control written first, and an explicit
+  answer for the zero-scale case.
 - **`AdjustedPrice` cannot be converted to `Price`, and that is the feature**
   (D-0042). Back-adjusted levels are for signals; PnL uses the tradeable price
   of the then-front contract. Adding a `From` impl reintroduces the classic

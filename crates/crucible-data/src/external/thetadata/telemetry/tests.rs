@@ -197,8 +197,14 @@ fn a_reason_containing_quotes_or_newlines_stays_one_valid_line() {
     assert!(!body.contains("\n\"reason\""), "{body}");
 }
 
+/// Both files live under `{data_dir}/telemetry/`, which `layout-check` knows
+/// as a root entry (D-0098).
+///
+/// The previous shape put them bare at the archive root, where `layout-check`
+/// correctly refused them and exited 4 on every run — training a reader to
+/// ignore a red check, which is worse than the thing the check was watching.
 #[test]
-fn the_files_live_beside_the_data_and_are_named_predictably() {
+fn the_files_live_under_the_telemetry_directory_and_are_named_predictably() {
     let d = tmp("paths");
     assert_eq!(
         heartbeat_path(&d).file_name().expect("name"),
@@ -208,5 +214,39 @@ fn the_files_live_beside_the_data_and_are_named_predictably() {
         last_exit_path(&d).file_name().expect("name"),
         "last_exit.json"
     );
-    assert_eq!(heartbeat_path(&d).parent(), Some(d.as_path()));
+    // One directory, archive-wide, and NOT the data dir root.
+    let dir = d.join(TELEMETRY_DIR);
+    assert_eq!(heartbeat_path(&d).parent(), Some(dir.as_path()));
+    assert_eq!(last_exit_path(&d).parent(), Some(dir.as_path()));
+    assert_ne!(
+        heartbeat_path(&d).parent(),
+        Some(d.as_path()),
+        "a bare file at the archive root is what layout-check refuses"
+    );
+}
+
+/// The writers create `telemetry/` themselves.
+///
+/// Both are best-effort and swallow their errors, so a missing parent would
+/// mean writing nothing at all — silently, which is the exact failure mode this
+/// module exists to end.
+#[test]
+fn the_writers_create_the_telemetry_directory_when_it_is_absent() {
+    let d = tmp("creates-dir");
+    assert!(
+        !d.join(TELEMETRY_DIR).exists(),
+        "the fixture must start without it"
+    );
+    write_heartbeat(&d, 1, Counts::default());
+    assert!(heartbeat_path(&d).exists(), "heartbeat must have landed");
+
+    let e = tmp("creates-dir-exit");
+    assert!(write_last_exit(
+        &e,
+        1,
+        ExitKind::Completed,
+        "",
+        Counts::default()
+    ));
+    assert!(last_exit_path(&e).exists());
 }
