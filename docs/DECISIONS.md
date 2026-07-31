@@ -2953,3 +2953,41 @@ propose a superseding entry — don't silently diverge.
   so what makes them differ is the *direction* of the correction and nothing
   else about the fixture, and the reason this archive is dangerous is that all
   four of its corrections point the same way.
+- **D-0091** (2026-07-31) — **`open_intervals` calls `session_open` and
+  `session_close` again: D-0077's one-definition invariant restored BY
+  CONSTRUCTION, not by monitoring.**
+  **What the invariant is.** A bucket grid anchored on the session open must
+  never disagree with the intervals a coverage check walks. D-0077 secured that
+  the only way it can be secured — by having one definition of the two instants
+  and calling it twice — with a comment saying so, per D-0071's argument that
+  two independent attributions of the same fact is how two reports come to
+  disagree about a date.
+  **How it was lost, which is worth recording because nothing was ever wrong.**
+  The D-0086 eras merge hit a real conflict at exactly this site: main's
+  two-line version read flat `Calendar` fields (`self.shape`, `self.open_local`,
+  `self.close_local`) that the eras branch had **deleted** in favour of per-era
+  templates, while the branch's version was era-aware but computed the bounds
+  inline. Taking the branch's side wholesale resolved the conflict and silently
+  replaced a *call* with a *copy*. Both copies were era-aware and produced
+  identical instants — no output ever differed — so the defect was not a wrong
+  number. It was that a wrong number had become **expressible**: an edit to
+  `session_close` and not to `open_intervals` would have desynchronised the
+  bucket grid from the coverage walk with nothing to catch it.
+  **The repair is the call, not a test.** Line-for-line the two computations
+  were already identical — `session_open`'s shape/open handling and
+  `session_close`'s `EarlyClose` handling are what the inline copy had
+  reproduced — so unwinding was mechanical and needed no structural
+  concession. A tripwire comparing the two implementations across era
+  boundaries was the sanctioned fallback and is **not** used, deliberately:
+  monitoring a divergence is strictly weaker than making it unsayable, and a
+  tripwire would have institutionalised the duplication it was watching.
+  `era_of` is still read inside `open_intervals`, for `halts_local` — halts
+  *inside* a session are that function's own concern, not the session bounds.
+  **Nothing moved.** All seven pinned hashes byte-identical (demo
+  `b55747513df596ed`, combo `0e1ab52d474b862b`, walk-forward
+  `711e1cb34a2ee2b4`, funnel `2f430893d2a79a8f`, S0 `91107aeb6e6802c0`,
+  permutation `9fe41f6f5b3653e7`, truncation `91b9ff5b9bbcdb25`); 772 tests
+  green on both clippy profiles; `qa ESH2024` still reads 27.755 % coverage and
+  the 15m resample still emits 2,012 bars from 30,167 source bars over 23
+  trading days. A refactor that changed a number here would have been the
+  invariant failing, not the repair succeeding.

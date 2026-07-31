@@ -614,24 +614,26 @@ impl Calendar {
         if !self.is_trading_day(date) {
             return Vec::new();
         }
-        let era = self.era_of(date);
-        let close = match self.day_effect(date) {
-            DayEffect::EarlyClose { close_local, .. } => {
-                // Validated at load, so this cannot fail; parsing again is
-                // cheaper than carrying a second representation around.
-                LocalTime::parse(&close_local, &self.id, "close_local").unwrap_or(era.close_local)
-            }
-            _ => era.close_local,
-        };
-        let open_date = match era.shape {
-            SessionShape::Overnight => add_days(date, -1),
-            SessionShape::SameDay => date,
-        };
-        let start = self.instant(open_date, era.open_local);
-        let end = self.instant(date, close);
+        // The same two instants [`Calendar::session_open`] and
+        // [`Calendar::session_close`] answer with, so a bucket grid anchored on
+        // the open can never disagree with the intervals a coverage check walks
+        // (D-0077 — one definition, per D-0071's argument).
+        //
+        // This call was briefly replaced by an inline copy of the same
+        // arithmetic. The D-0086 merge hit a genuine conflict here — main's
+        // two-line version read flat `Calendar` fields that the eras branch had
+        // deleted, while the branch's version was era-aware — and the
+        // resolution took the branch's side wholesale, which happened to
+        // duplicate the computation instead of routing it. Both copies were
+        // era-aware and agreed, so nothing was wrong; what was lost is that
+        // disagreement had become *expressible*. Restored to a call, so it is
+        // not (D-0091).
+        let start = self.session_open(date);
+        let end = self.session_close(date);
         if end <= start {
             return Vec::new();
         }
+        let era = self.era_of(date);
 
         let mut intervals = Vec::with_capacity(era.halts_local.len() + 1);
         let mut cursor = start;
