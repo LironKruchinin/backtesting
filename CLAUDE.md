@@ -1012,6 +1012,17 @@ reference; supersede the decision if you disagree — don't hotfix.
 - **`funnel` exits 5 when every combo is killed.** Not a failure and not
   success: most ideas must die, and a scheduled job that reads "everything was
   killed" as exit 0 learns nothing — the same argument `qa`'s exit 4 makes.
+- **A hypothesis file's config block and `configs/hypotheses/<id>.toml` are the
+  same bytes, and the duplication is the point** (D-0101). A pre-registration
+  states before the run what will be tested; that is worth nothing if the block
+  was never runnable, because then the file that gets run is a different one,
+  written later, by someone who has already seen the data. Both H-007 and H-008
+  sat unrunnable from the day they were written — H-007 declared `s2` with no
+  `[walk_forward]`, H-008 declared neither `s0` nor `[s0]` while its own first
+  two gates are S0 measurements. `backlog_registration.rs` asserts byte-identity
+  rather than "both parse", because two valid configs can describe different
+  experiments and that difference is exactly what pre-registration exists to
+  prevent. Do not "de-duplicate" this by replacing the block with a link.
 - **`funnel` refuses `fill_model = "free_fills"`** although `combo` and
   `walk-forward` accept it (D-0006, D-0075). The funnel runs the free-fill
   screen itself at S1 and then asks S2 whether the edge survives honest costs;
@@ -1243,6 +1254,15 @@ cargo run -p crucible-cli -- walk-forward --config configs/combo-smoke.toml \
 cargo run -p crucible-cli -- funnel --config configs/combo-smoke.toml
 cargo run -p crucible-cli -- funnel --config configs/combo-smoke.toml \
   --out results --hash-only                    # the funnel determinism gate
+
+# Judge a config and stop: every refusal the funnel makes before it reads a bar,
+# and none of the work after. Touches no archive, charges no trial, writes
+# nothing. It is what `crucible-cli/tests/backlog_registration.rs` points at
+# every embedded config block in `research/backlog/`, so a registration that
+# declares a stage without that stage's section is caught the day it is written
+# rather than the day someone tries to run it (D-0101).
+cargo run -p crucible-cli -- funnel \
+  --config configs/hypotheses/H-008-short-horizon-overreaction.toml --check-config
 
 # The research memory is a text file. The graveyard is a query over it:
 grep '"kind":"verdict"' results/registry.jsonl | grep '"verdict":"kill"'

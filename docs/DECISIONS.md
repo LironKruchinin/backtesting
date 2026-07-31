@@ -3389,3 +3389,63 @@ propose a superseding entry — don't silently diverge.
   `docs/MILESTONES.md` carries it as a blocker on M4's rates leg, since ZN is
   one of M4's calibration instruments and 65 % of it has never been spike
   checked.
+- **D-0101** (2026-07-31) — **A hypothesis registration in `research/backlog/`
+  must be a config this build can run, and the runnable config is the SAME
+  BYTES as the registration.** Enforced by
+  `crucible-cli/tests/backlog_registration.rs`, which reads the requirements
+  out of the build via a new `crucible funnel --check-config`.
+  **The defect.** A backlog file's embedded TOML is a pre-registration: it
+  states before the run what will be tested and what will kill it, and the whole
+  value of writing it first is that it cannot be adjusted after. That guarantee
+  is void if the block was never runnable, because then the file that actually
+  gets run is a *different* file, written later, by someone who has already seen
+  the data. Two of the two registrations in the directory were in that state and
+  had been since they were written:
+  **H-007** declared `stages = ["s1", "s2"]` with no `[walk_forward]` section —
+  S2 *is* a walk-forward under costs, so the funnel refuses the config outright.
+  **H-008** declared `stages = ["s1", "s2"]` while both its Gate 0 and Gate 0b
+  are S0 measurements, and carried a comment asserting `s0` "is REFUSED at
+  load", which had been true and stopped being true when the predictor seam
+  landed (D-0085). A registration describing a build that no longer existed.
+  **The requirements are read, never listed.** The lint runs
+  `crucible funnel --check-config`, which calls the funnel's own pre-flight —
+  the identical function the real run calls, refusing for the same reasons in
+  the same order. A lint carrying its own copy of "s2 needs `[walk_forward]`,
+  s0 needs `[s0]`" would be a second source of truth, and the day a third
+  requirement landed the copy is what would not learn about it. This is the
+  D-0015 / D-0060 / `FoldPlan` device again: one computation, two consumers.
+  **Byte-identity, not "both parse".** Two configs can each be valid and still
+  describe different experiments, and the registered grid differing from the run
+  grid is exactly what pre-registration exists to prevent. So the block and
+  `configs/hypotheses/<id>.toml` are asserted equal byte for byte, and each
+  names the other. They are one artifact that happens to appear twice; drift is
+  not detected, it is made impossible.
+  **`--check-config` charges nothing and writes nothing** — no archive read, no
+  trial, no registry row, no scorecard, no output directory. It is a question
+  about a file, and a question about a file must be free to ask, or the lint
+  would be too expensive to run on every `cargo test` and would be run on none.
+  The git sha is deliberately outside it: provenance is not configuration, and a
+  registration is well-formed regardless of whether the process can see a
+  checkout.
+  **The lint reports EVERY offender, never the first.** Stopping at the first
+  failure makes a backlog with two broken registrations look like a backlog with
+  one — the same argument D-0090 makes about naming every contract in a refusal
+  rather than returning on the earliest. It found 2 of 2.
+  **A new refusal came with it:** an `[s0].score` naming an indicator slot that
+  does not exist is now refused at config time rather than after the grid has
+  been replayed. Same argument `Criteria::new` already makes about the cost
+  sweep — a criterion that turns out to be unevaluable after an hour of replay
+  has already cost the hour.
+  **Controls, each watched firing before the fix landed:** the two real
+  registrations, failing 2 of 2 with their own reasons quoted; `stages` naming
+  `s0` with the `[s0]` block deleted; an `[s0]` block with `s0` absent from
+  `stages`; `[s0].score` naming a slot that does not exist; and `[walk_forward]`
+  removed from an otherwise-valid config. The converse is asserted too — the
+  shipped configs pass — because a checker that only ever passes is not a
+  checker.
+  **The escape hatch is closed.** A block is judged a registration when it
+  declares `schema_version`, which is the field the loader itself reads first.
+  A block that does not is an illustrative fragment (H-001 and H-012 write bare
+  rule lines with `<feature 1>` placeholders), and a third test asserts a
+  fragment carries no `[meta]`, `[funnel]`, `[universe]` or `[run]` — so a real
+  config cannot opt out of being checked by deleting one line.

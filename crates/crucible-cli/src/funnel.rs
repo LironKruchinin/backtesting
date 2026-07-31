@@ -43,8 +43,8 @@ use crucible_core::prelude::*;
 use crucible_engine::INTRABAR_CONVENTION;
 use crucible_funnel::registry::Registry;
 use crucible_funnel::scorecard::{self, Provenance};
-use crucible_funnel::stages::Verdict;
-use crucible_funnel::walkforward::{FoldPlan, RunIdentity};
+use crucible_funnel::stages::{Criteria, Verdict};
+use crucible_funnel::walkforward::{FoldPlan, FoldSpec, RunIdentity};
 use crucible_funnel::{ComboOutcome, Costs, FunnelInputs, FunnelReport, run_funnel};
 
 use crate::combo::{annualization, attach_sessions, collect_events, print_header, usd};
@@ -67,6 +67,99 @@ pub struct FunnelArgs {
     /// Print only the determinism hash of the verdicts. The funnel CI gate.
     #[arg(long)]
     pub hash_only: bool,
+    /// Judge the config and stop: every refusal this command makes before it
+    /// reads a bar, and none of the work after. Touches no archive, charges no
+    /// trial, writes nothing.
+    ///
+    /// It exists so a *registration* can be checked without being run —
+    /// `tests/backlog_registration.rs` points it at every embedded config
+    /// block in `research/backlog/`, which is how a hypothesis file that
+    /// declares a stage without the section that stage needs is caught the day
+    /// it is written rather than the day someone tries to run it.
+    #[arg(long)]
+    pub check_config: bool,
+}
+
+/// Everything this command can decide about a config **before** a bar exists.
+///
+/// One function, because two callers must get the identical answer: the run
+/// path below, and `--check-config`. A lint that re-listed these requirements
+/// would be a second copy of them, and the requirement the copy dropped would
+/// be the one nobody noticed — which is exactly the failure that let two
+/// backlog registrations sit unrunnable (D-TBD(backlog-registration-lint)).
+///
+/// The git sha is deliberately **not** checked here. It is provenance, not
+/// configuration: a registration is well-formed or not regardless of whether
+/// the process can see a checkout, and folding the two together would make the
+/// lint fail for a reason that has nothing to do with the file it is linting.
+struct Preflight<'a> {
+    /// The pre-registered criteria, judged coherent.
+    criteria: Criteria,
+    /// The fold layout `[walk_forward]` describes.
+    fold_spec: FoldSpec,
+    /// The section itself, for the report header.
+    walk_forward: &'a config::WalkForward,
+}
+
+/// Judges a loaded config against everything knowable without data.
+///
+/// Returns the message to print on refusal — already a whole explanation, so
+/// both callers print it the same way.
+fn preflight(loaded: &LoadedConfig) -> Result<Preflight<'_>, String> {
+    let Some(cfg) = loaded.file.funnel.as_ref() else {
+        return Err(format!(
+            "{} declares no [funnel] section, so there are no pre-registered criteria to\n\
+             \x20      judge against. Add one — stages, cost_sensitivity_ticks, min_oos_trades,\n\
+             \x20      min_oos_sessions, min_oos_return_pct_free_fills,\n\
+             \x20      min_oos_sharpe_after_costs, kill_if_dead_at_ticks,\n\
+             \x20      require_controls_beaten, max_pbo, require_plateau.\n\
+             \x20      Criteria written after seeing results are not criteria.",
+            loaded.path.display()
+        ));
+    };
+    // `Criteria::new` owns the stage rules, including the `s0` <-> `[s0]`
+    // biconditional (D-0085). Asking it is what makes this function report the
+    // loader's requirements rather than a remembered list of them.
+    let criteria = cfg
+        .to_criteria(loaded.file.s0.as_ref().map(|c| c.min_abs_ic))
+        .map_err(|e| e.to_string())?;
+    if loaded.file.execution.fill_model == "free_fills" {
+        return Err(
+            "execution.fill_model = \"free_fills\", which `funnel` refuses.\n\
+             \x20      The funnel runs the free-fill screen itself at S1 and then asks S2 whether\n\
+             \x20      the edge survives honest costs; with free_fills declared those are the\n\
+             \x20      same run and the mandatory cost sweep is one number repeated four times.\n\
+             \x20      FreeFills is a screening tool, never a result (D-0006)."
+                .to_owned(),
+        );
+    }
+    let Some(wf) = loaded.file.walk_forward.as_ref() else {
+        return Err(format!(
+            "{} declares no [walk_forward] section. The funnel's S2 gate is a\n\
+             \x20      walk-forward under costs, so there is nothing to gate without folds.",
+            loaded.path.display()
+        ));
+    };
+    let fold_spec = wf.to_fold_spec().map_err(|e| e.to_string())?;
+    // The `[s0]` block's `score` names an indicator slot, and a slot that does
+    // not resolve is an unevaluable criterion — the same class of config bug as
+    // a missing section, and one that would otherwise surface after the grid
+    // had already been replayed. Combo 0 answers it: every combo of a grid
+    // carries the same slots, differing only in their parameters.
+    if criteria.runs(crucible_funnel::stages::Stage::S0)
+        && let Some(s0) = loaded.file.s0.as_ref()
+        && let Some(first) = loaded.grid.iter().next()
+    {
+        crucible_strategies::combo::ComboScorer::build(loaded.grid.spec(), &first, &s0.score)
+            .map_err(|e| format!("s0.score: {e}"))?;
+    }
+    crucible_funnel::grid::check_size(loaded.grid.len(), &loaded.file.meta.hypothesis_family)
+        .map_err(|e| e.to_string())?;
+    Ok(Preflight {
+        criteria,
+        fold_spec,
+        walk_forward: wf,
+    })
 }
 
 /// Runs the command, returning the process exit code.
@@ -85,55 +178,32 @@ pub fn run_cmd(args: &FunnelArgs) -> i32 {
         }
     };
 
-    let Some(cfg) = loaded.file.funnel.as_ref() else {
-        eprintln!(
-            "error: {} declares no [funnel] section, so there are no pre-registered criteria to\n\
-             \x20      judge against. Add one — stages, cost_sensitivity_ticks, min_oos_trades,\n\
-             \x20      min_oos_sessions, min_oos_return_pct_free_fills,\n\
-             \x20      min_oos_sharpe_after_costs, kill_if_dead_at_ticks,\n\
-             \x20      require_controls_beaten, max_pbo, require_plateau.\n\
-             \x20      Criteria written after seeing results are not criteria.",
-            loaded.path.display()
-        );
-        return EXIT_USAGE;
-    };
-    let criteria = match cfg.to_criteria(loaded.file.s0.as_ref().map(|c| c.min_abs_ic)) {
-        Ok(criteria) => criteria,
-        Err(e) => {
-            eprintln!("error: {e}");
+    let (criteria, fold_spec, wf) = match preflight(&loaded) {
+        Ok(p) => (p.criteria, p.fold_spec, p.walk_forward),
+        Err(message) => {
+            eprintln!("error: {message}");
             return EXIT_USAGE;
         }
     };
-    if loaded.file.execution.fill_model == "free_fills" {
-        eprintln!(
-            "error: execution.fill_model = \"free_fills\", which `funnel` refuses.\n\
-             \x20      The funnel runs the free-fill screen itself at S1 and then asks S2 whether\n\
-             \x20      the edge survives honest costs; with free_fills declared those are the\n\
-             \x20      same run and the mandatory cost sweep is one number repeated four times.\n\
-             \x20      FreeFills is a screening tool, never a result (D-0006)."
+    if args.check_config {
+        println!(
+            "{} is a runnable funnel registration.\n  stages         {}\n  folds          \
+             {} train {}d / test {}d / step {}d\n  grid           {} combo(s)\n\nNothing was run: \
+             --check-config judges the config and stops.",
+            loaded.path.display(),
+            criteria
+                .stages
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", "),
+            wf.scheme,
+            wf.train_days,
+            wf.test_days,
+            wf.step_days.unwrap_or(wf.test_days),
+            loaded.grid.len(),
         );
-        return EXIT_USAGE;
-    }
-    let Some(wf) = loaded.file.walk_forward.as_ref() else {
-        eprintln!(
-            "error: {} declares no [walk_forward] section. The funnel's S2 gate is a\n\
-             \x20      walk-forward under costs, so there is nothing to gate without folds.",
-            loaded.path.display()
-        );
-        return EXIT_USAGE;
-    };
-    let fold_spec = match wf.to_fold_spec() {
-        Ok(spec) => spec,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return EXIT_USAGE;
-        }
-    };
-    if let Err(e) =
-        crucible_funnel::grid::check_size(loaded.grid.len(), &loaded.file.meta.hypothesis_family)
-    {
-        eprintln!("error: {e}");
-        return EXIT_USAGE;
+        return 0;
     }
     let git_sha = match resolve_git_sha() {
         Ok(sha) => sha,

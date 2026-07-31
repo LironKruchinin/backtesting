@@ -391,6 +391,88 @@ fn a_free_fills_config_is_refused() {
     assert!(text.contains("D-0006"), "{text}");
 }
 
+/// `--check-config` makes every pre-bar refusal reachable without a run.
+///
+/// It is the surface `tests/backlog_registration.rs` points at every embedded
+/// config block in `research/backlog/`, which is the only reason a registration
+/// that declares a stage without that stage's section is now caught the day it
+/// is written. Both halves are asserted here: it says yes to the shipped
+/// config, and it exits 2 rather than 0 on the same refusals the run path
+/// makes — a checker that only ever passes is not a checker.
+#[test]
+fn check_config_judges_the_config_and_runs_nothing() {
+    let dir = TempDir::new();
+    let good = dir.config(&template(CRITERIA));
+    let out = run(&[
+        "funnel",
+        "--config",
+        good.to_str().expect("utf-8 path"),
+        "--check-config",
+    ]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("runnable funnel registration"), "{text}");
+    assert!(text.contains("Nothing was run"), "{text}");
+    // Nothing was written: no registry, no scorecard, no directory.
+    assert!(
+        !dir.out().exists(),
+        "--check-config created {}",
+        dir.out().display()
+    );
+
+    // ...and it still refuses. Same config, `[walk_forward]` removed.
+    let body = template(CRITERIA);
+    let cut = body
+        .find("[walk_forward]")
+        .expect("the template carries a fold layout");
+    let end = body[cut..]
+        .find("\n\n")
+        .map_or(body.len(), |rel| cut + rel + 2);
+    let mut trimmed = body.clone();
+    trimmed.replace_range(cut..end, "");
+    let bad = dir.config(&trimmed);
+    let out = run(&[
+        "funnel",
+        "--config",
+        bad.to_str().expect("utf-8 path"),
+        "--check-config",
+    ]);
+    assert_eq!(code(&out), 2, "{}", stdout(&out));
+    assert!(stderr(&out).contains("[walk_forward]"), "{}", stderr(&out));
+}
+
+/// An `[s0].score` naming a slot that does not exist is refused **before** the
+/// grid is replayed, not after.
+///
+/// The slot is a criterion like any other: S0 cannot measure a score it cannot
+/// resolve, so a typo there is an unevaluable pre-registration. Catching it at
+/// config time is the same argument `Criteria::new` already makes about the
+/// cost sweep — a criterion that turns out to be unevaluable after an hour of
+/// replay has already cost the hour.
+#[test]
+fn an_s0_score_naming_an_unknown_slot_is_refused_before_any_replay() {
+    let dir = TempDir::new();
+    let body =
+        template(&CRITERIA.replace(r#"stages = ["s1", "s2"]"#, r#"stages = ["s0", "s1", "s2"]"#))
+            .replace(
+                "[run]",
+                "[s0]\nscore = \"nosuchslot\"\nhorizons_minutes = [1, 5]\nbuckets = 5\n\
+         bootstrap_draws = 500\nmin_abs_ic = 0.02\n\n[run]",
+            );
+    let config = dir.config(&body);
+    let out = run(&[
+        "funnel",
+        "--config",
+        config.to_str().expect("utf-8 path"),
+        "--check-config",
+    ]);
+    assert_eq!(code(&out), 2, "{}", stdout(&out));
+    let text = stderr(&out);
+    assert!(text.contains("nosuchslot"), "{text}");
+    // The message names what IS available, or the refusal is a wall.
+    assert!(text.contains("this config declares"), "{text}");
+}
+
 /// §2.5 is not negotiable: without a resolvable git sha there is no run.
 #[test]
 fn a_run_with_no_resolvable_git_sha_is_refused() {

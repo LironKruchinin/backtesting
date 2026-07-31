@@ -161,16 +161,42 @@ strictness working, but at the cost of a confusing failure at the worst moment.
 So: hypothesis files pre-register **threshold values and the reasoning behind
 them**, and any config block they carry is explicitly marked as a copy whose
 canonical source is `configs/example-combo.toml`. **If the two disagree, the
-shipped config wins and the backlog file is stale.** Before running a config
-from this directory, diff its `[funnel]` block against the shipped one.
+shipped config wins and the backlog file is stale.**
 
-This has already bitten once. The first draft of H-007 and H-008 carried
-`stages = ["s0", "s1", "s2", "s3"]` and only four criterion fields. Since then
-the funnel landed and the schema requires `min_oos_trades`,
-`min_oos_sessions`, `min_oos_return_pct_free_fills` and
-`require_controls_beaten`, and **`s0`/`s3` are refused at load rather than
-skipped**. Both configs would have failed to load. They are corrected; the
-lesson is the rule above.
+This has already bitten twice, and the second time is why the rule below
+exists. The first draft of H-007 and H-008 carried
+`stages = ["s0", "s1", "s2", "s3"]` and only four criterion fields, against a
+schema that requires `min_oos_trades`, `min_oos_sessions`,
+`min_oos_return_pct_free_fills` and `require_controls_beaten`. Both were
+corrected by hand — and both were still unrunnable afterwards, for *different*
+reasons nobody checked: H-007 declared `s2` with no `[walk_forward]` section,
+and H-008 declared neither `s0` nor `[s0]` while its own first two gates are S0
+measurements. They sat that way until 2026-07-31.
+
+#### The rule, since D-0101: a registration is a file, not a quotation
+
+"Diff it by hand before running" was the advice here, and it is the reason this
+bit twice — it is a check that depends on someone remembering to perform it.
+It is replaced by two mechanical ones:
+
+1. **Every block declaring `schema_version` must pass
+   `crucible funnel --check-config`**, which is the funnel's own pre-flight.
+   The requirements are therefore whatever the build enforces, including ones
+   added after this paragraph was written.
+2. **Every such block is extracted to `configs/hypotheses/<id>.toml` and
+   asserted BYTE-IDENTICAL to it.** The registration and the config that runs
+   are one artifact appearing twice, so they cannot disagree — there is no
+   "shipped config wins" case left to adjudicate for these files.
+
+`crucible-cli/tests/backlog_registration.rs` is both checks, on every
+`cargo test`. A block *without* a `schema_version` is an illustrative fragment
+(H-001 and H-012 write bare rule lines with `<feature 1>` in them) and is
+exempt — but it may not carry `[meta]`, `[funnel]`, `[universe]` or `[run]`,
+so a real config cannot dodge check 1 by dropping a line.
+
+**Writing a new hypothesis with a runnable config: write the config in
+`configs/hypotheses/` first, run `--check-config` on it, then paste it into the
+markdown.** In that order the lint is a formality rather than a discovery.
 
 ### 2.4 Registered gate order is binding, and S0 now runs
 

@@ -58,6 +58,12 @@ predictions**.
 Runnable today, as `configs/` material:
 
 ```toml
+# EXTRACTED: configs/hypotheses/H-007-trend-following-span.toml
+# This file and the ```toml block in research/backlog/H-007-trend-following-span.md
+# are asserted BYTE-IDENTICAL by crucible-cli/tests/backlog_registration.rs.
+# Edit one, edit both — the registration and the config that runs are one
+# artifact precisely so the registered grid and the run grid cannot differ.
+
 schema_version = 1
 
 [meta]
@@ -102,12 +108,33 @@ fill_model = "spread_cross"
 half_spread_ticks = 1
 fee_per_contract_usd = "1.25"
 
+# Fold geometry, in TRADING DAYS (D-0062). Every value below is taken verbatim
+# from `configs/combo-smoke.toml`, the canonical fold layout that pins the
+# walk-forward determinism hash 711e1cb34a2ee2b4 — this file registers no fold
+# parameter of its own invention, because a fold layout chosen per hypothesis is
+# a free parameter, and a free parameter chosen by the person who wants the
+# result is the thing pre-registration exists to remove.
+#
+# NOTE, because it is a real limitation and not a detail: those values were
+# calibrated for a ~14-day synthetic fixture. Against this file's ~60-session
+# contract they cut roughly 27 folds of a 2-session test window each, pooling to
+# ~54 out-of-sample sessions. That is far below the 250 registered below and the
+# run will be killed for sample adequacy — which is this file's stated design
+# (see "The sample floors are deliberately unsatisfiable"), not a surprise.
+[walk_forward]
+scheme = "rolling"
+train_days = 5
+test_days = 2
+step_days = 2
+
 # ---------------------------------------------------------------------------
 # COPY. Canonical source: `configs/example-combo.toml`, owned by the funnel
 # workstream (README §2.3). `deny_unknown_fields` makes a stale block a hard
 # load error — diff against the shipped config before running.
-# `s0` and `s3` are REFUSED at load, not skipped: S3's battery is still owed and
-# S0 needs a signal-extraction seam the combo grammar does not have.
+# `s3` is REFUSED at load, not skipped: its battery is still owed. `s0` was
+# refused too until the predictor seam landed (D-0085); this file does not
+# declare it, because its tests are structural rather than predictive and a
+# stage with no criteria is a stage with no pre-registration.
 # ---------------------------------------------------------------------------
 [funnel]
 stages = ["s1", "s2"]
@@ -208,13 +235,24 @@ cost model, not a property of the price process, and Test 1 is void.
 
 - **The grain is wrong and this is the biggest caveat.** The paper is about
   trend-following systems as practised — daily bars, spans of weeks to months.
-  We can only replay 1s and 1m (no resampler; `ohlcv-1d` was deliberately not
-  bought). A 480-period EMA on 1-minute bars is an eight-hour span, not an
+  This config replays 1m, so a 480-period EMA is an eight-hour span, not an
   eight-week one. The *structural* predictions (hump-shaped net Sharpe,
   cost-optimal span, positive skew) are stated in a form that does not depend on
   the grain, which is why this is testable today — but **the paper's
   calibration is not being tested**, and no result here may be described as
   confirming or refuting their empirical findings.
+
+  **Corrected 2026-07-31:** this bullet used to read "we can only replay 1s and
+  1m (no resampler)", which stopped being true when D-0077 landed. `5m`, `15m`,
+  `1h` and `1d` are aggregated on read, on the exchange's own sessions, and a
+  daily bar is a trading-day bar. So the grain objection is now a *choice* this
+  file makes rather than a limit the build imposes, and the honest thing is to
+  say which: a daily-grain variant is registrable today and is **not** this
+  file. It would be a second pre-registration with its own trial count against
+  the same family — not an edit to this one after seeing its result, and not a
+  timeframe swapped into the config above. The sample ceiling is what makes it a
+  separate question anyway: ~60 sessions is ~60 daily bars, which cannot carry a
+  120–480 period axis at all.
 - **Expect it to lose money.** ES at 1-minute with a one-tick half-spread is a
   hostile cost environment for a crossover, and the project's own reference run
   (SMA 20/50 on ESH2024, January 2024) lost 23.51 % under exactly this fill model.

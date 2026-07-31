@@ -87,6 +87,13 @@ contract that can actually be replayed.
 Runnable today:
 
 ```toml
+# EXTRACTED: configs/hypotheses/H-008-short-horizon-overreaction.toml
+# This file and the ```toml block in
+# research/backlog/H-008-short-horizon-overreaction.md are asserted
+# BYTE-IDENTICAL by crucible-cli/tests/backlog_registration.rs. Edit one, edit
+# both — the registration and the config that runs are one artifact precisely so
+# the registered grid and the run grid cannot differ.
+
 schema_version = 1
 
 [meta]
@@ -113,6 +120,27 @@ kind = "bollinger"
 period = { start = 5, end = 30, step = 5 }
 k = [1.5, 2.0, 2.5, 3.0]
 
+# The score S0 reads, verbatim from `configs/s0-smoke.toml` — D-0085's
+# registered default, a trailing 20-bar z-score of the close. It is the
+# continuous form of exactly what the rules below threshold: a close beyond a
+# Bollinger band of period n and width k IS |z| > k at that same period, and the
+# combo grammar has no arithmetic between operands, so a band cannot be turned
+# into a graded deviation (this file's own honesty note says so). No rule
+# references this slot, which is legal and intended — it exists to be measured,
+# not to trade. `period = 20` is a fixed axis, so the grid stays 6 x 4 = 24
+# combos and the warmup stays 30 bars, set by bb's longest period.
+#
+# CAVEAT, stated because it is a limitation of this registration and not of the
+# result: the score is fixed at period 20 while the grid trades six periods, so
+# every combo's S0 reading is the SAME series. S0 here is one measurement
+# charged 24 times, not 24 measurements. Making it track bb.period would add a
+# third grid axis (144 combos, most of them mismatched pairs) and has no
+# conventional source, so it is not done.
+[indicators.z]
+kind = "zscore"
+period = 20
+source = "close"
+
 [rules]
 enter_long = "close < bb.lower"
 exit_long = "close > bb.mid"
@@ -124,15 +152,48 @@ fill_model = "spread_cross"
 half_spread_ticks = 1
 fee_per_contract_usd = "1.25"
 
+# Fold geometry, in TRADING DAYS (D-0062), verbatim from
+# `configs/combo-smoke.toml` — the canonical layout that pins the walk-forward
+# determinism hash 711e1cb34a2ee2b4. Same reasoning and same caveat as H-007:
+# calibrated for a ~14-day fixture, and against this file's ~60-session contract
+# it pools to well under the 250 sessions registered below, so the run is killed
+# for sample adequacy by design.
+[walk_forward]
+scheme = "rolling"
+train_days = 5
+test_days = 2
+step_days = 2
+
+# Gate 0 and Gate 0b, pre-registered. Every value verbatim from
+# `configs/s0-smoke.toml` (D-0085's registered defaults) except the horizons,
+# which come from this file's own Gate 0 text — "the next 1, 5, 10 and 20
+# minutes" — and which the two sources agree on anyway. Horizons are minutes
+# rather than bars because `ohlcv` has no bar for an interval that did not trade
+# (D-0082).
+#
+# Gate 0b is NOT evaluated by this build. S0 measures forward returns as
+# FRACTIONS; Gate 0b registers its bar in ticks (one ES tick = 0.25 pt =
+# $12.50), and converting between them at a price level is arithmetic this build
+# does not do. The conversion must be done by hand and written down, or the
+# comparison against the spread — the gate this whole hypothesis was built
+# around — has not actually been made.
+[s0]
+score = "z"
+horizons_minutes = [1, 5, 10, 20]
+buckets = 5
+bootstrap_draws = 500
+min_abs_ic = 0.02
+
 # ---------------------------------------------------------------------------
 # COPY. Canonical source: `configs/example-combo.toml` (README §2.3).
-# NOTE the omission that matters: this file's Gate 0 is S0, and `s0` CANNOT be
-# declared here — it is refused at load. The config below therefore describes
-# only the gates this build can run, which is exactly why the file is blocked:
-# the config is legal and the hypothesis still is not runnable in order.
+# `s0` is declared and runs: the predictor seam landed 2026-07-31 (D-0085), so
+# this file's Gate 0 is evaluated in the registered order — before any equity
+# curve — which is what it was blocked on. `s3` is still refused at load rather
+# than skipped, so Gates 3 and 4 remain unevaluated and the ceiling is `Iterate`
+# (D-0075).
 # ---------------------------------------------------------------------------
 [funnel]
-stages = ["s1", "s2"]
+stages = ["s0", "s1", "s2"]
 cost_sensitivity_ticks = [0.0, 0.5, 1.0, 2.0]
 min_oos_trades = 200
 min_oos_sessions = 250
@@ -238,21 +299,29 @@ contract's tick size than of the mechanism.
 
 ## Triage grade
 
-**A, but `blocked`.** The strategy is expressible today with no new Rust, and —
-unusually for this directory — the grain we can replay is the grain the effect
-is claimed at. What blocks it is not expressibility but **order**: its first two
-gates are predictor measurements, and the S0 seam that performs them does not
-exist (see the banner at the top of this file).
+**A, and no longer `blocked`.** The strategy is expressible today with no new
+Rust, and — unusually for this directory — the grain we can replay is the grain
+the effect is claimed at. What used to block it was not expressibility but
+**order**: its first two gates are predictor measurements, and the S0 seam that
+performs them did not exist. It landed on 2026-07-31 (D-0085), and the `[s0]`
+block above is what this file now registers against it.
 
-That is a good problem rather than a bad one. Its most valuable property is
+**Gate 0b is still not evaluated by this build**, and that is the one caveat
+worth carrying forward rather than the blocked status: S0 reports forward
+returns as fractions, Gate 0b's bar is one tick, and nothing converts between
+them. The gate this hypothesis was built around is the gate a reader must still
+compute by hand.
+
+That was a good problem rather than a bad one. Its most valuable property is
 Gate 0b, which is designed to produce the answer *"the effect is real and
 smaller than our costs"* — the most common true answer in short-horizon research
 and the one a backtest-first approach is worst at reaching. Reaching it requires
 measuring forward returns **without** trading, so building the seam is not
 overhead for this hypothesis; it is the hypothesis. As the S0 predictor seam's
-first consumer (D-0081), this file specifies half of what that seam has to do:
+first consumer (D-0081), this file specified half of what that seam had to do:
 bucket forward returns at 1/5/10/20 minutes conditional on a signal, with a
 block bootstrap over sessions, and report the result in ticks so it can be
 compared against the spread. The other half is the quantile/IC contract in
-`crucible-funnel::stages`' module doc, and shipping only that half would answer
-the general question while leaving these gates unrunnable.
+`crucible-funnel::stages`' module doc. The seam shipped the first half and the
+bootstrap; the **report-in-ticks** half is the piece still owed, which is why
+Gate 0b remains a hand calculation.
