@@ -1034,30 +1034,32 @@ reference; supersede the decision if you disagree — don't hotfix.
   only way §9 permits: by building the harness. Nothing else moved — not the
   strategy, not its registration, not a threshold.
 
-  The shape of the catch is the lesson. Every gate before S3 **still passes** —
-  admission, S1, S2's Sharpe, the kill-level sweep, and both controls — and the
-  test asserts that, because if a future change made the leak die earlier the
-  verdict would still read `Kill` while the file had stopped measuring the
-  detector. The leak dies at S3 on `p = 0.2079` against a pre-registered `0.05`:
-  it **re-fits on every permutation**, so its observed run is an ordinary draw
-  from its own null. The historical text follows, because the reasoning is what
-  made the flip meaningful: **That test asserts a failure, and fixing it by tightening a
-  threshold is wrong**: a leaked edge is indistinguishable from a real one by
-  any statistic computed on the leaked run, so a threshold that killed it would
-  kill real strategies too. It is caught by asking a different question — does
-  the edge survive when the future is shuffled, or deleted — and that is the
-  permutation and truncation harnesses' job. The day the expectation flips to
-  `Kill` is the day a detector was watched firing on a defect planted before it
-  existed.
+  **Why tightening a threshold was never the repair.** For the months the test
+  asserted `Iterate`, it was asserting a *failure* — deliberately. A leaked edge
+  is indistinguishable from a real one by any statistic computed **on the leaked
+  run**, so a threshold low enough to kill this would have killed real
+  strategies at the same rate. The only way out was to ask a different question:
+  does the edge survive when the future is **shuffled**, or **deleted**? Those
+  are the permutation and truncation harnesses, and until they existed the
+  honest thing was to record the gap rather than paper over it.
 
-  **That flip IS M3's acceptance test**, not a step towards one:
+  **The shape of the catch is the lesson.** Every gate before S3 still passes —
+  admission, S1, S2's Sharpe, the kill-level sweep, and both controls — and the
+  test asserts that they do. If a future change made the leak die earlier, the
+  verdict would still read `Kill` while the file had quietly stopped measuring
+  the detector. The leak dies at S3 on `p = 0.2079` against a pre-registered
+  `0.05`: it **re-fits on every permutation**, so its observed run is an
+  ordinary draw from its own null.
+
+  **That flip WAS M3's acceptance test**, not a step towards one.
   `docs/MILESTONES.md` reads "a deliberately-leaky test strategy is caught by
-  the permutation/truncation harnesses (negative-control test)", and the
-  strategy already exists and is already registered as uncaught. So there is
-  nothing to *build* for that clause beyond the harnesses themselves — and
-  changing `Verdict::Iterate` to `Verdict::Kill` in that test by any route
-  other than a harness catching it would tick the milestone's last box with a
-  lie in it.
+  the permutation/truncation harnesses (negative-control test)"; the strategy
+  was already checked in and already registered as uncaught, so nothing had to
+  be *built* for that clause beyond the harnesses themselves. Changing
+  `Verdict::Iterate` to `Verdict::Kill` by any route other than a harness
+  catching it would have ticked the milestone's last box with a lie in it —
+  which is why the route matters as much as the result, and why that rule still
+  binds anything that later claims to catch a defect.
 - **The permutation null's block length `L` has two opposing jobs, and there is
   no correct value — only a declared one and a sweep** (D-0087). `L` preserves
   dependence *and* destroys the signal. Too long and the strategy's own horizon
