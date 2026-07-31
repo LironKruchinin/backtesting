@@ -635,6 +635,37 @@ reference; supersede the decision if you disagree — don't hotfix.
   Treasury **futures** on Globex traded a full session on every one of them in
   sixteen years (D-0086). Cash and futures are different markets; the prior was
   checked and refuted, not assumed.
+- **ZN bars at 16:00 CT are SETTLEMENT PRINTS, the era table's close is right,
+  and `qa` calling them out-of-session is correct** (measured 2026-07-31,
+  confirming D-0089). A report of out-of-session ZN bars at **21:00Z** on
+  2014-10-02 and 2014-10-10 asks whether the settlement window ends later than
+  `close_local = "16:00"` says. It does not, and the archive settles it in one
+  measurement: across **1,436 Mon–Fri dates in both eras** (era 1
+  2010-06-06..2011-09-26, era 2 2011-10-03..2015-12-31), the minutes **16:01
+  through 16:04 carry volume on ZERO dates** — not one bar, in five and a half
+  years. A session that ran later would print there. The 16:00 minute itself
+  trades on **47.34 %** of era-1 dates and **2.46 %** of era-2 dates, against
+  **92–95 %** for each of 15:55–15:59: an order of magnitude too rare to be a
+  session minute, and exactly the signature `session_profile`'s own module doc
+  names — *"a halt is a block of near-zeroes; a settlement print is one minute
+  at 5 %"*. The table already recorded this for era 1 in its `source` comment
+  ("carries a settlement print on 47 % of dates, which is why the close is read
+  off Friday") — the 2.46 % figure is the same behaviour, rarer, after the 2011
+  era change, which independently corroborates that era boundary.
+  **Moving the close to 16:01 to absorb them would be the D-0040 argument run
+  backwards**: it would declare a session minute that is silent on 97.5 % of
+  dates, so `qa` would report a missing bar at 16:00 on nearly every date in the
+  archive. An unmodelled early close blames the archive; a modelled minute
+  nobody trades blames it just as loudly and 40 times more often.
+  **The UTC time is a DST artefact and not a property of the print.** 16:00 CT
+  is 21:00Z in CDT and 22:00Z in CST, so the same settlement minute appears at
+  two UTC times depending on the season. An operator grepping a fixed UTC hour
+  sees half of them.
+  **What the same query DID find is a real hole**: ZN 2014-10-02 (Thursday) ends
+  at its 16:00 settlement print with **no evening session at all**, and
+  **2014-10-03 has no bars whatsoever** — not a holiday, not an early close. That
+  is a genuine absence and is the window `--refetch-window` targets, entirely
+  separate from the settlement-print question that prompted the look.
 - **Christmas landing on a Saturday closes the Friday before and New Year's Day
   landing on a Saturday does not**, so the two rules are written differently
   (D-0086). 2010-12-24 and 2021-12-24 have no session at all in the archive;
