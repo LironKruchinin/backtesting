@@ -22,9 +22,9 @@
 
 use crucible_core::prelude::*;
 use crucible_data::continuous::{
-    ContinuousError, ContractSymbol, DecadeAnchor, NO_EXPIRY_SOURCE, NOMINAL_EXPIRY_SOURCE,
-    RollRule, RollTable, RollTableInput, build_roll_table, gather_series, nominal_expiries,
-    roll_table_path, write_roll_table,
+    ContinuousError, DecadeAnchor, ExpiryHistory, NO_EXPIRY_SOURCE, NOMINAL_EXPIRY_SOURCE,
+    RollRule, RollTable, RollTableInput, build_roll_table, gather_series, late_expiry_corrections,
+    nominal_expiries, roll_table_path, write_roll_table,
 };
 use crucible_data::ingest::window::date_of;
 
@@ -83,37 +83,91 @@ fn archived_definitions(dir: &std::path::Path, root: &str) -> Option<std::path::
 const ARCHIVED_EXPIRY_SOURCE: &str = "databento-definition";
 
 /// A set of expiries and the name recorded beside them in the roll table.
-type Expiries = (std::collections::BTreeMap<ContractSymbol, Ts>, &'static str);
+type Expiries = (ExpiryHistory, &'static str);
+
+/// What `--expiries` asked for, once the spelling has been checked.
+///
+/// Parsed separately from being resolved so a typo is still a usage error on a
+/// run that will not read expiries at all: checking the spelling costs nothing,
+/// while *reading the archive* is what must be conditional (D-0090).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExpiryRequest {
+    /// Supply none at all.
+    None,
+    /// Force the nominal third-Friday rule.
+    Nominal,
+    /// Prefer an archived `definition` file, fall back to nominal.
+    Auto,
+}
+
+impl ExpiryRequest {
+    /// Parses the flag. `None` means the spelling is not one of the three.
+    fn parse(choice: &str) -> Option<ExpiryRequest> {
+        match choice {
+            "none" => Some(ExpiryRequest::None),
+            "nominal" => Some(ExpiryRequest::Nominal),
+            "auto" => Some(ExpiryRequest::Auto),
+            _ => None,
+        }
+    }
+}
+
+/// What this run must actually resolve — decided by the **rule**, not the flag.
+///
+/// `crucible rolls --root GC` defaults to `.v`, which reads no expiries
+/// ([`RollRule::reads_expiries`]), yet the old code resolved `--expiries auto`
+/// unconditionally and exited 4 on GC's `definition` file for an input it
+/// provably never read (D-0090). This is the seam that stops that, and it is a
+/// pure function so the control can be a unit test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExpiryPlan {
+    /// The rule reads no expiries: do not touch the archive.
+    NotConsulted,
+    /// The rule reads expiries: resolve this request.
+    Resolve(ExpiryRequest),
+}
+
+/// What a rule and a flag together require.
+const fn expiry_plan(rule: &RollRule, request: ExpiryRequest) -> ExpiryPlan {
+    if rule.reads_expiries() {
+        ExpiryPlan::Resolve(request)
+    } else {
+        ExpiryPlan::NotConsulted
+    }
+}
 
 /// What `--expiries` resolved to.
 enum ExpiryChoice {
-    /// Use exactly this map.
+    /// Use exactly this history.
     Resolved(Expiries),
     /// Fall back to the nominal third-Friday rule.
     Nominal,
     /// Refuse, with this exit code.
+    ///
+    /// Only reachable with the `databento` feature: a default build has no DBN
+    /// decoder, so `resolve_auto` cannot fail and quietly takes the nominal
+    /// route. Gated rather than `allow(dead_code)`-ed, because "this variant
+    /// does not exist in this build" is the true statement and the lint was
+    /// right to say so on the default target (§7's merge-blocking clippy is the
+    /// DEFAULT build, not `--all-features`).
+    #[cfg(feature = "databento")]
     Refused(i32),
 }
 
-/// Resolves `--expiries`.
+/// Resolves an [`ExpiryRequest`] against the archive.
 ///
 /// A default build has no DBN decoder, so `auto` quietly takes the nominal
-/// route and the table records that it did — expiries are a backstop for the
-/// volume rule, not its input, so failing the command would be wrong.
+/// route and the table records that it did.
 fn resolve_expiries(
-    choice: &str,
+    request: ExpiryRequest,
     dir: &std::path::Path,
     root: &str,
     anchor: DecadeAnchor,
 ) -> ExpiryChoice {
-    match choice {
-        "none" => ExpiryChoice::Resolved((std::collections::BTreeMap::new(), NO_EXPIRY_SOURCE)),
-        "nominal" => ExpiryChoice::Nominal,
-        "auto" => resolve_auto(dir, root, anchor),
-        other => {
-            eprintln!("error: --expiries {other:?} is not one of: auto, nominal, none");
-            ExpiryChoice::Refused(EXIT_USAGE)
-        }
+    match request {
+        ExpiryRequest::None => ExpiryChoice::Resolved((ExpiryHistory::default(), NO_EXPIRY_SOURCE)),
+        ExpiryRequest::Nominal => ExpiryChoice::Nominal,
+        ExpiryRequest::Auto => resolve_auto(dir, root, anchor),
     }
 }
 
@@ -123,9 +177,14 @@ fn resolve_auto(dir: &std::path::Path, root: &str, anchor: DecadeAnchor) -> Expi
         return ExpiryChoice::Nominal;
     };
     match crucible_data::continuous::expiries_from_definitions(&path, root, anchor) {
-        Ok(map) if !map.is_empty() => {
-            println!("  expiries read from {}", path.display());
-            ExpiryChoice::Resolved((map, ARCHIVED_EXPIRY_SOURCE))
+        Ok(history) if !history.is_empty() => {
+            println!(
+                "  expiries read from {} ({} contract(s))",
+                path.display(),
+                history.len()
+            );
+            report_restatements(&history);
+            ExpiryChoice::Resolved((history, ARCHIVED_EXPIRY_SOURCE))
         }
         // A definition file with nothing for this root is not an error — it
         // may simply predate the contract — but silently substituting nominal
@@ -150,6 +209,36 @@ fn resolve_auto(_dir: &std::path::Path, _root: &str, _anchor: DecadeAnchor) -> E
     ExpiryChoice::Nominal
 }
 
+/// Prints every contract the vendor restated, and what it said each time.
+///
+/// Four contracts of this archive's 1,002 have two expiry statements (D-0090),
+/// and which one a roll used is a research-relevant assumption — so it is shown
+/// rather than resolved silently. The list is bounded by construction: a
+/// restatement is rare, and a root with none prints nothing.
+#[cfg(feature = "databento")]
+fn report_restatements(history: &ExpiryHistory) {
+    let restated: Vec<_> = history.restated().collect();
+    if restated.is_empty() {
+        return;
+    }
+    println!(
+        "  {} contract(s) were RESTATED; the roll uses the latest statement \
+         available at its own decision instant (D-0090):",
+        restated.len()
+    );
+    for (symbol, revisions) in restated {
+        println!("    {symbol}");
+        for revision in revisions {
+            println!(
+                "      known {} -> expires {}  ({} record(s))",
+                date_of(revision.avail_ts),
+                date_of(revision.expiration),
+                revision.records
+            );
+        }
+    }
+}
+
 /// Runs the command, returning the process exit code.
 pub fn run(args: &RollsArgs) -> i32 {
     let tf: TimeFrame = match args.timeframe.parse() {
@@ -169,6 +258,14 @@ pub fn run(args: &RollsArgs) -> i32 {
         eprintln!("error: {e}");
         return EXIT_USAGE;
     }
+    // Checked whatever the rule will do with it: a typo is a typo.
+    let Some(request) = ExpiryRequest::parse(&args.expiries) else {
+        eprintln!(
+            "error: --expiries {:?} is not one of: auto, nominal, none",
+            args.expiries
+        );
+        return EXIT_USAGE;
+    };
     let anchor = args
         .decade_anchor
         .map_or(DecadeAnchor::DEFAULT, DecadeAnchor::new);
@@ -205,18 +302,29 @@ pub fn run(args: &RollsArgs) -> i32 {
     }
 
     // Where expiries came from is recorded in the table whichever route they
-    // took — a number nobody can trace is a rumour (§2.5). The volume rule
-    // does not consult them to decide *when* to roll, but the expiry backstop
-    // uses them to decide *that* one must (D-0046), so real ones beat the
-    // nominal third-Friday rule for both rules.
-    let (expiries, expiry_source) = match resolve_expiries(&args.expiries, &dir, &args.root, anchor)
-    {
-        ExpiryChoice::Resolved(pair) => pair,
-        ExpiryChoice::Nominal => (
-            nominal_expiries(gathered.series.keys()),
-            NOMINAL_EXPIRY_SOURCE,
-        ),
-        ExpiryChoice::Refused(code) => return code,
+    // took — a number nobody can trace is a rumour (§2.5). But the *rule*
+    // decides whether there is anything to record: the volume rule reads no
+    // expiries, and its backstop is a statement about which contract stops
+    // trading first, read off the bars. Resolving an input the run will not read
+    // is how `rolls --root GC` came to exit 4 on a `.v` build (D-0090).
+    let (expiries, expiry_source) = match expiry_plan(&rule, request) {
+        ExpiryPlan::NotConsulted => {
+            println!(
+                "  expiries       not consulted — {} reads none, and the table records \
+                 {NO_EXPIRY_SOURCE:?}",
+                rule.alias_letter()
+            );
+            (ExpiryHistory::default(), NO_EXPIRY_SOURCE)
+        }
+        ExpiryPlan::Resolve(request) => match resolve_expiries(request, &dir, &args.root, anchor) {
+            ExpiryChoice::Resolved(pair) => pair,
+            ExpiryChoice::Nominal => (
+                nominal_expiries(gathered.series.keys()),
+                NOMINAL_EXPIRY_SOURCE,
+            ),
+            #[cfg(feature = "databento")]
+            ExpiryChoice::Refused(code) => return code,
+        },
     };
 
     let table = match build_roll_table(&RollTableInput {
@@ -242,6 +350,37 @@ pub fn run(args: &RollsArgs) -> i32 {
     };
 
     print_table(&table);
+
+    // The lookahead the availability filter refused to absorb, counted. Zero is
+    // the expected answer on this archive and is printed as a number rather than
+    // as silence, because a detector nobody has seen report anything is
+    // decoration (CLAUDE.md §7).
+    if rule.reads_expiries() {
+        match late_expiry_corrections(&table, &expiries, anchor) {
+            Ok(late) if late.is_empty() => println!(
+                "\n  expiry corrections landing after their own roll: 0 \
+                 (none absorbed; D-0090)"
+            ),
+            Ok(late) => {
+                println!(
+                    "\n  expiry corrections landing after their own roll: {} — \
+                     NOT used, because a backtest could not have read them:",
+                    late.len()
+                );
+                for c in &late {
+                    println!(
+                        "    {} rolled {} on expiry {}; restated to {} only at {}",
+                        c.contract,
+                        date_of(c.roll_ts),
+                        date_of(c.used),
+                        date_of(c.latest),
+                        date_of(c.corrected_avail_ts)
+                    );
+                }
+            }
+            Err(e) => eprintln!("warning: {e}"),
+        }
+    }
 
     if args.write {
         match write_roll_table(&dir, &table) {
@@ -309,4 +448,64 @@ fn print_table(table: &RollTable) {
          \x20 comparison the engine makes when it fills an order. Back-adjusted prices\n\
          \x20 are for signals; PnL uses the tradeable prices of the then-front contract."
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ExpiryPlan, ExpiryRequest, expiry_plan};
+    use crucible_data::continuous::RollRule;
+
+    // The lazy-resolution control (D-0090). `rolls --root GC` defaults to `.v`,
+    // which reads no expiries, and resolving `--expiries auto` anyway is what
+    // made it exit 4 on an input it provably never read. The plan must be
+    // decided by the RULE and never by the flag.
+    #[test]
+    fn a_volume_rule_never_resolves_expiries_whatever_the_flag_says() {
+        let volume = RollRule::VolumeCrossover { confirm_days: 1 };
+        for request in [
+            ExpiryRequest::Auto,
+            ExpiryRequest::Nominal,
+            ExpiryRequest::None,
+        ] {
+            assert_eq!(
+                expiry_plan(&volume, request),
+                ExpiryPlan::NotConsulted,
+                "{request:?}"
+            );
+        }
+    }
+
+    // The other side, so the control above is not simply "nothing is ever
+    // resolved": a calendar rule reads expiries, so its request is carried
+    // through untouched.
+    #[test]
+    fn a_calendar_rule_resolves_exactly_what_was_asked_for() {
+        let calendar = RollRule::CalendarDaysBeforeExpiry { days: 8 };
+        for request in [
+            ExpiryRequest::Auto,
+            ExpiryRequest::Nominal,
+            ExpiryRequest::None,
+        ] {
+            assert_eq!(
+                expiry_plan(&calendar, request),
+                ExpiryPlan::Resolve(request),
+                "{request:?}"
+            );
+        }
+    }
+
+    // A typo is still a typo on a run that will not read the flag: checking the
+    // spelling costs nothing, while reading the archive is what must be
+    // conditional. Accepting one silently would be a config error absorbed.
+    #[test]
+    fn the_flag_spelling_is_checked_before_the_rule_is_consulted() {
+        assert_eq!(ExpiryRequest::parse("auto"), Some(ExpiryRequest::Auto));
+        assert_eq!(
+            ExpiryRequest::parse("nominal"),
+            Some(ExpiryRequest::Nominal)
+        );
+        assert_eq!(ExpiryRequest::parse("none"), Some(ExpiryRequest::None));
+        assert_eq!(ExpiryRequest::parse("definition"), None);
+        assert_eq!(ExpiryRequest::parse(""), None);
+    }
 }

@@ -410,7 +410,7 @@ The protocol:
 | number | claimants | resolution |
 |---|---|---|
 | **D-0077** | resampler · session eras · S0 predictor seam | resampler kept it; seam → D-0081; eras → D-0086 |
-| **D-0085** | S0 caller · expiry-availability rule | caller kept it; expiry renumbers at merge |
+| **D-0085** | S0 caller · expiry-availability rule | caller kept it; expiry → **D-0090** at merge |
 
 Three squatters on one number, then a fourth collision on a second number
 within two days. Each cost a renumber commit touching every reference — ten
@@ -746,6 +746,42 @@ reference; supersede the decision if you disagree — don't hotfix.
 - **`ContinuousFeed::open` refuses a replay window outside the roll table's
   build span** rather than returning a series quietly missing contracts
   (D-0045). Rebuild the table instead: it is curated data, and disposable.
+- **A contract's expiry is keyed on `max(ts_recv)`, and NEVER on
+  `max(expiration)`** (D-0090). The vendor restates 4 contracts of this
+  archive's 1,002, and in **4 of 4** the later record carries the *earlier*
+  expiry — the exchange pulled the settlement forward. So the `max(expiration)`
+  spelling, which D-0054's "dedup keeps `max(created)`" invites by analogy,
+  selects the stale record every single time and moves ZN's and 6E's rolls onto
+  the wrong session in silence. The two implementations differ by one word and
+  one of them is silent corruption. `the_key_is_max_ts_recv_and_never_max_
+  expiration` exists to fail on it.
+- **The expiry is filtered against the roll's own decision instant even though
+  plain "latest wins" would give the same table on 100 % of this archive**
+  (D-0090). Every correction here landed 14–18 months before its roll, so the
+  filter costs nothing today; what it buys is refusing to absorb a correction
+  that lands *after* the roll it would move, which is §2.1 lookahead and which
+  latest-wins cannot even detect, never having read `ts_recv`. `rolls` prints
+  the count — `0` on this archive — rather than staying silent about it.
+- **Two expiries for one contract are a REVISION, not a conflict**, and only
+  *overlapping* availability windows refuse (D-0090, superseding D-0046's
+  refusal). D-0046 refused the file, which is what stopped `crucible rolls` on
+  GC, ZN and 6E entirely. The refusal that remains names **every** offending
+  contract in the root: returning on the first is why `ZNM2012` sat unreported
+  behind `ZNZ2011`, and a refusal that reports one of two makes the archive look
+  better than it is.
+- **The `.c` rule resolves a fixed point without iterating**, and there is no
+  "did not converge" error to write (D-0090). `due` depends on the expiry and
+  the expiry depends on the decision instant, but the *candidate set* does not:
+  a candidate session's decision instant comes from the bars alone. So the
+  equation decomposes into one self-consistent test per session and the answer
+  is the earliest that passes — one ascending scan, bounded by the session
+  count.
+- **A `.v` roll table records `expiry_source = "none"` even on a root whose
+  `definition` file is archived** (D-0090). The volume rule reads no expiries —
+  proven by a control that builds it under an absurd history and gets a
+  byte-identical table — so resolving them is work whose only effect was to
+  make `rolls --root GC` exit 4 on an input it never read. The field says what
+  the table *used*, not what was lying around.
 - **Every combo's equity curve starts with a flat prefix as long as the
   *grid's* warmup, not its own**, so a 10-bar combo sits idle for 200 bars
   next to a 200-bar one. That is §2.6 working (D-0061): the alternative is a
@@ -1144,6 +1180,12 @@ cargo run -p crucible-cli -- backtest --instrument ESH2024 --timeframe 15m \
 cargo run -p crucible-cli -- rolls --root ES --timeframe 1m --write
 cargo run -p crucible-cli -- backtest --instrument ES.v.0 --timeframe 1m \
   --start 2010-06-06 --end 2026-07-28 --fast 20 --slow 50
+
+# The calendar rule needs expiries, so it needs the `definition` schema — and
+# `--features databento` to decode it. The volume rule above reads none and so
+# needs neither (D-0090); all seven roots build both rules today.
+cargo run -p crucible-cli --features databento -- \
+  rolls --root ZN --timeframe 1m --calendar-days 8 --write
 
 # The same run with protective levels, in ticks from each entry's fill price.
 # Both flags are optional and either alone is legal; the header names the

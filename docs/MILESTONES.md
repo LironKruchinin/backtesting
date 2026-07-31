@@ -119,6 +119,15 @@ deadline-driven (see `crucible-data::ingest` module docs).
             **Still owed to M2:** a roll is a position event; a position carried
             through one pays no spread and books the raw gap, bounded at $56,950
             on that run and printed with it
+      - [x] Expiries carry an availability (2026-07-31): D-0090 supersedes
+            D-0046's expiry refusal with
+            `expiry(contract, decision_ts) = max_by(ts_recv <= decision_ts)`.
+            The vendor restates 4 contracts of 1,002 and the later record
+            always carries the *earlier* expiry, so `max(expiration)` would
+            pick the stale one every time. GC, ZN and 6E had exited 4 on both
+            rules; **all seven roots now build `.v` and `.c`** (14 tables
+            written). `.v` rows unchanged everywhere; `.c` moves ZN by 2 rows
+            and 6E by 1, GC by none. All three determinism hashes unmoved
 - [x] Data QA report (2026-07-28): coverage against the calendar, gaps,
       out-of-session bars, zero-volume runs, robust spike detection, DST
       boundaries, and the vendor's own `condition.json` — `crucible qa`,

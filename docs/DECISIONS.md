@@ -2817,3 +2817,139 @@ propose a superseding entry — don't silently diverge.
   calendars. ESH2024 January 2024 is bit-identical (30,167 bars, −23.51 %, 665
   round trips, fees $1,663.75); `demo b55747513df596ed`,
   `combo 0e1ab52d474b862b`, `walk-forward 711e1cb34a2ee2b4` all unmoved.
+- **D-0090** (2026-07-31) — **A contract's expiry is a function of when you ask.
+  `expiry(contract, decision_ts)` is the latest `definition` record whose
+  `ts_recv` is not in that decision's future.** *Supersedes D-0046's expiry
+  clause — the refusal on a contract "defined twice with different expiries".
+  D-0046's contract-symbol year rule, its expiry backstop, and its
+  spread-skipping are untouched, as is D-0072's cycle reader.*
+
+  ```text
+  expiry(contract, decision_ts) =
+      records.filter(|r| r.ts_recv <= decision_ts)
+             .max_by_key(|r| r.ts_recv)
+             .expiration
+  ```
+
+  **THE TRAP, first, because it is one word wide.** **The key is
+  `max(ts_recv)`. It is never `max(expiration)`.** D-0054's "dedup keeps
+  `max(created)`" invites the second spelling by analogy, and it would be wrong
+  in **4 of 4** real cases: in every one of them the LATER record carries the
+  EARLIER expiry, because the exchange pulled the settlement forward and the
+  vendor restated the contract. A `max(expiration)` implementation therefore
+  selects the **stale** record *every single time* — not half the time — and
+  moves ZN's and 6E's rolls onto the wrong session with nothing visible in the
+  output. `the_key_is_max_ts_recv_and_never_max_expiration` (`continuous::
+  expiry`) and `a_restatement_moves_the_calendar_roll_and_the_key_is_ts_recv`
+  (`continuous::roll`) both fail on it; both were watched failing.
+
+  Do **not** import D-0052/D-0054's "conservative direction" justification
+  either. That argument is about *availability* — delay can only cost measured
+  performance, never fabricate knowledge. Here the later record moves the expiry
+  *earlier*, which is neither conservative nor aggressive: it is simply correct,
+  because the exchange amended its calendar and the vendor said so. What D-0054
+  does contribute is the shape of the **residual** refusal, below.
+
+  **The measurement.** All seven archived `definition` files, decoded through
+  the production decoder (`databento::dbn`, D-0031): **4 contracts of 1,002
+  (0.40 %)** carry two `expiration` values — `GCX2021` (1 h apart), `ZNZ2011`
+  (24 h), `ZNM2012` (24 h, previously hidden behind `ZNZ2011`), `6EM2023`
+  (72 h). ES, NQ, RTY and CL are genuinely clean. All four are **revisions of
+  one contract**: same `instrument_id`, same `raw_symbol`, disjoint and strictly
+  ordered `ts_recv`, exactly one flip in file order and never a flip back. The
+  vendor marks the transition `security_update_action = 'M'` on `GCX2021` only —
+  on the other three both groups carry `'A'` — so **that field does not
+  distinguish them; `ts_recv` does**. Our own bars corroborate independently:
+  the contract's last curated 1m bar lands 1–2 minutes before the *newer* expiry
+  and a full session or more before the older one, in all three cases where the
+  archive can speak. The `rolls` report now prints the statements, e.g.
+  `ZNZ2011  known 2010-09-05 -> expires 2011-12-21 (24 records) /
+  known 2010-10-03 -> expires 2011-12-20 (384 records)`.
+
+  **Why the availability filter and not plain "latest wins".** Verified to
+  coincide with plain latest-wins on **100 %** of this archive — every
+  correction landed between 14 and 18 months *before* its own roll — so it costs
+  nothing today. It is chosen anyway because it **refuses to absorb a correction
+  that lands after its own roll**, which is §2.1 lookahead exactly, and which
+  plain latest-wins cannot even detect: never reading `ts_recv`, it has no way
+  to know. `late_expiry_corrections` makes the refusal countable, and `rolls`
+  prints `expiry corrections landing after their own roll: 0` rather than
+  silence, because a detector nobody has seen report anything is decoration
+  (§7). The planted case is `a_correction_landing_after_its_own_roll_does_not_
+  move_it`.
+
+  **The residual refusal, which is D-0054's shape.** Two statements are a
+  *revision* when their availability windows are disjoint. They are a
+  **conflict** when the windows overlap — then the source asserts both at some
+  instant, there is no latest, and `ExpiryConflict` refuses. That is the direct
+  analogue of D-0054's "the same `(contract, created)` twice is a different bug
+  and refuses the file". The refusal now names **every** offending contract in
+  the root, never the first: `expiries_from_definitions` returned on the first
+  `BTreeMap` hit, which is precisely why `ZNM2012` sat unreported behind
+  `ZNZ2011` from the day the archive landed, and a refusal that reports one of
+  two makes the archive look better than it is. A record with no `ts_recv` at
+  all has no answer to "as known when?" and refuses too
+  (`UnavailableExpiry`) — on the roll path only; the cycle reader never asks.
+
+  **The `.c` fixed point, and why it needs no iteration.** `due` depends on the
+  expiry and the expiry now depends on the decision instant, so the calendar
+  rule reads as circular: `D = g(f(D))`. It is not, because **the candidate set
+  does not depend on the expiry**: a candidate is a session both contracts
+  traded, and its decision instant `max(front.avail_ts(day), next.avail_ts(day))`
+  comes from the bars alone. The equation therefore decomposes into one
+  independent test per candidate — *given what was knowable at this candidate's
+  own instant, was the roll due by this session?* — a candidate that passes is a
+  solution, and the answer is the earliest one, because a roll is the first time
+  a rule fires. `calendar_roll_day` resolves it in a single ascending scan,
+  bounded by the front contract's session count, with no iteration to diverge
+  and no ordering or float dependence (§2.2). There is consequently no "did not
+  converge" refusal to write: there is no loop that could fail to converge. A
+  session whose instant precedes every statement is simply not due — a rule
+  cannot fire on an expiry nobody had published — so the scan continues; a
+  contract the source never names at all is still `MissingExpiry`.
+
+  **Expiries are now resolved LAZILY, per rule** (`RollRule::reads_expiries`).
+  `build_roll_table` reads `input.expiries` only in the
+  `CalendarDaysBeforeExpiry` arm, so a `.v` table is byte-identical under any
+  history — including an absurd one, which is the control. But
+  `crucible-cli::rolls` resolved `--expiries auto` *unconditionally*, so
+  `crucible rolls --root GC` (which defaults to `.v`) exited 4 on an input it
+  provably never read. That is fixed by deciding from the rule rather than the
+  flag; the flag's *spelling* is still checked either way, because a typo costs
+  nothing to catch. This weakens no refusal — it stops one firing where the
+  refused input is unread. A `.v` table now records `expiry_source = "none"`,
+  which is the truth: it consulted none.
+
+  **Executed on the live archive.** All seven roots build both `.v` and `.c`
+  (`rolls --write`, 14 tables), where GC, ZN and 6E previously exited 4 on both.
+  Measured against the forensic's predictions, and reproducing them exactly:
+  `.v` — **0 roll rows differ** on every root; the four pre-existing tables are
+  byte-identical but for the `expiry_source` string. `.c` at 8 days — **GC 0
+  rows differ** (its two statements are 1 h apart and fall on the same date, so
+  `expiry_day − 8` is unchanged), **ZN 2 rows differ**
+  (`ZNZ2011 -> ZNH2012` 2011-12-12, gap −0.796875; `ZNM2012 -> ZNU2012`
+  2012-06-12, gap −0.8125), **6E 1 row differs**
+  (`6EM2023 -> 6EN2023` 2023-06-08, gap unchanged at 0.00195, date moved two
+  sessions). ES `.c` is byte-identical to the table built before this change.
+  All three determinism hashes unmoved (demo `b55747513df596ed`, combo
+  `0e1ab52d474b862b`, walk-forward `711e1cb34a2ee2b4`), and the 16-year
+  `ES.v.0` backtest is identical line for line under the old and rewritten roll
+  tables save the header's `expiries` label — ES has no restatements, so
+  nothing could move.
+
+  **Representation, and why it is allowed.** A 16-year `definition` file
+  restates every listed instrument every session — `6EM2023` alone is 1,580
+  records — so `ExpiryHistoryBuilder` keeps one entry per *distinct* expiry with
+  the first and last `ts_recv` that stated it, rather than one per record. That
+  collapse is lossless for `as_of` exactly when the windows are disjoint, which
+  is the same condition the conflict check enforces, so the check earns the
+  representation rather than the representation assuming the check.
+  `the_collapsed_history_answers_exactly_as_the_raw_records_would` proves it
+  against the rule written out verbatim over raw records, at every boundary.
+
+  **The third side (§7).** `max(ts_recv)` and `max(expiration)` disagree on the
+  real data's direction. `the_two_keys_agree_when_a_correction_moves_the_expiry_
+  later` shows they **agree** the moment the correction points the other way —
+  so what makes them differ is the *direction* of the correction and nothing
+  else about the fixture, and the reason this archive is dangerous is that all
+  four of its corrections point the same way.
