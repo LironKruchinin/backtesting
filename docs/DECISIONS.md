@@ -2991,3 +2991,63 @@ propose a superseding entry — don't silently diverge.
   the 15m resample still emits 2,012 bars from 30,167 source bars over 23
   trading days. A refactor that changed a number here would have been the
   invariant failing, not the repair succeeding.
+- **D-0092** (2026-07-31) — **The T0 pull's 794 missing greeks records were
+  REFUSALS, not vendor-absent data — and the reason died with the process.
+  Telemetry added so the next one cannot.**
+  **The verdict, reached from the code rather than from a relaunch.** The first
+  T0 run attempted 83,489 requests and inventoried 82,695. `eod` and
+  `open_interest` reconcile **exactly** to the dry run (31,851 each);
+  `greeks/eod` is 794 short, and the shortfall lands on four roots — SPX -267,
+  VIX -360, SPXW -84, RUT -83 — summing to precisely 794. Every root reaches the
+  plan's end date, so nothing was truncated.
+  **What settles it is `run_tranche`'s outcome handling, not a hypothesis.**
+  `Outcome::Written` appends an inventory line. `Outcome::Empty` appends one too
+  — `empty_record`, whose own comment says *resume keys on the request, so this
+  is enough to stop the same empty question being asked every run*. So a
+  genuinely vendor-absent date **would be in the inventory**, with an empty
+  `file_path`. `Outcome::Refused` appends **nothing**, by design: the halt
+  message says *Nothing refused was inventoried, so a fixed build resumes
+  cleanly*. A request missing from the inventory entirely was therefore
+  **refused**, and refusal has exactly three sources — a client error that is
+  neither `is_no_data()` nor `CircuitOpen`, a validation failure, or a Parquet
+  write failure.
+  **Corroborated by the expansion.** `measured_greeks_floor` gives SPY, IWM,
+  SPX, SPXW, VIX and DIA the same floor of 2017-01-03, and the observed first
+  greeks date for all six **is** 2017-01-03. Same floor, same end date, same
+  calendar means the same number of planned requests. DIA, IWM and SPY each have
+  2,385; SPX, SPXW and VIX have fewer. The requests were expanded and issued;
+  some did not come back.
+  **The design is right and is not changed.** Not inventorying a refusal is what
+  makes resume-by-diff correct: the next run re-requests exactly those 794. What
+  was wrong is that the *reason* lived only in `RunReport.refusals`, an
+  in-memory `Vec` printed to a console that no longer exists.
+  **The rate is the part worth pinning.** 794 / 83,489 = **0.951 %**, below
+  `REFUSAL_RATE_LIMIT` (2 %), so the systemic breaker correctly did **not** trip.
+  A sub-threshold refusal rate is precisely the case that needs a durable
+  record: too small to halt the run, too large to be nothing. The breaker
+  protects against a build misreading the feed; it was never meant to be the
+  only witness.
+  **`external::thetadata::telemetry`.** `heartbeat.txt`, overwritten every
+  `HEARTBEAT_EVERY = 25` records with a timestamp and the four counts; and
+  `last_exit.json`, one JSON object written on every exit path — completed,
+  halted, failed — carrying `kind`, `reason` and the same counts. Both are
+  **best-effort and never branched on**: a monitor that can break the thing it
+  monitors is worse than no monitor. Both are **operational telemetry, not
+  research records** — overwritten freely, carrying no provenance, and nothing
+  downstream may read a number out of them into a result. `inventory.jsonl`
+  remains the append-only archive (D-0074's shape), unchanged.
+  **The heartbeat's real job is to remove a temptation.** The reason this
+  project nearly lost a live pull is that a default Windows reader on a file a
+  writer holds can deny the writer. `heartbeat.txt` exists so nobody ever has a
+  reason to open `inventory.jsonl` to ask whether it is still going, and
+  `the_heartbeat_is_readable_while_a_writer_holds_it` pins exactly that: stat
+  and read both succeed while a writer holds the file, and the writer survives.
+  **The counts travel as one struct.** `refused` only means something beside
+  `attempted` — 794 is a catastrophe out of 800 and a rounding error out of
+  83,489 — so a signature that let a caller supply one without the other was an
+  invitation to the mistake this entry is about. Clippy's arity lint prompted
+  the change; the reason to keep it is not the lint.
+  **Still owed, and stated rather than implied**: the panic path.
+  `ExitKind::Panicked` exists and nothing writes it, because the CLI installs no
+  panic hook — verified, not assumed. A panic still leaves no exit record. That
+  is the one gap this entry does not close.

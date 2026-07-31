@@ -109,6 +109,7 @@ pub mod pacer;
 pub mod plan;
 pub mod run;
 pub mod schema;
+pub mod telemetry;
 pub mod transcode;
 pub mod validate;
 

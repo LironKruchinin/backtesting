@@ -68,6 +68,7 @@ use super::error::ThetaError;
 use super::inventory::{Inventory, InventoryRecord};
 use super::plan::{PlannedRequest, TranchePlan};
 use super::schema::Endpoint;
+use super::telemetry::{self, Counts, ExitKind, HEARTBEAT_EVERY};
 use super::transcode::{TranscodeSource, write_parquet};
 use super::validate::{ValidationReport, validate};
 use crate::calendar::CivilDate;
@@ -156,6 +157,26 @@ impl RunReport {
     }
 
     /// Whether the refusal rate has become a finding rather than noise.
+    /// This run's counts, for telemetry.
+    #[must_use]
+    pub fn counts(&self) -> Counts {
+        Counts {
+            attempted: self.attempted,
+            written: self.written,
+            empty: self.empty,
+            refused: self.refusals.len() as u64,
+        }
+    }
+
+    /// Writes the exit record for this run (D-0092).
+    ///
+    /// Every exit path calls it, because the exit that most needs explaining is
+    /// the one nobody planned for. Best-effort: the return value is discarded
+    /// here and asserted only in `telemetry`'s own tests.
+    pub fn write_exit(&self, data_dir: &Path, now_ts: i64, kind: ExitKind, reason: &str) {
+        let _ = telemetry::write_last_exit(data_dir, now_ts, kind, reason, self.counts());
+    }
+
     #[must_use]
     pub fn refusal_rate_is_systemic(&self) -> bool {
         self.attempted >= REFUSAL_MIN_SAMPLE && self.refusal_rate() > REFUSAL_RATE_LIMIT
@@ -349,6 +370,14 @@ pub fn run_tranche(
             let rendered = request.request.render();
             let outcome = process_one(body, request, data_dir, &golden, &rendered, &mut report);
 
+            // Operational heartbeat (D-0092). Best-effort and never branched
+            // on: a monitor that can break the thing it monitors is worse than
+            // no monitor. `refused` is the count the inventory deliberately
+            // does not carry, which is the whole reason this file exists.
+            if report.attempted.is_multiple_of(HEARTBEAT_EVERY) {
+                telemetry::write_heartbeat(data_dir, now_ts, report.counts());
+            }
+
             match outcome {
                 Err(e) => fatal = Some(e),
                 Ok(Outcome::Refused(reason)) => {
@@ -414,12 +443,15 @@ pub fn run_tranche(
         });
 
         if let Some(e) = fatal {
+            report.write_exit(data_dir, now_ts, ExitKind::Failed, &e.to_string());
             return Err(e);
         }
-        if report.halted.is_some() {
+        if let Some(reason) = report.halted.clone() {
+            report.write_exit(data_dir, now_ts, ExitKind::Halted, &reason);
             return Ok(report);
         }
     }
+    report.write_exit(data_dir, now_ts, ExitKind::Completed, "");
     Ok(report)
 }
 
