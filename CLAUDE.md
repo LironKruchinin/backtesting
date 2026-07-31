@@ -635,6 +635,24 @@ reference; supersede the decision if you disagree — don't hotfix.
   Treasury **futures** on Globex traded a full session on every one of them in
   sixteen years (D-0086). Cash and futures are different markets; the prior was
   checked and refuted, not assumed.
+- **RTY's archive begins in 2017 and every pre-2017 "gap" in it is the
+  instrument not existing** (measured 2026-07-31, `docs/ARCHIVE_HOLES.md` §3).
+  The E-mini Russell 2000 did not list on CME until then — it traded on ICE
+  before — so `session_profile` flags every pre-2017 weekday as absent, and a
+  hole survey that counts them inflates its totals by years. RTY is the one root
+  in this archive whose start date is a *listing* fact rather than an
+  acquisition one, which is why it is stated here rather than re-derived.
+- **Bar-count holes are invisible to `coverage`, by construction, and that is
+  not a bug in `coverage`** (`docs/ARCHIVE_HOLES.md` §1). A manifest record
+  credits every instant between its `start_ts` and `end_ts`; a monthly file
+  claiming 2012-09-01..2012-10-01 therefore reports full coverage whether or not
+  its bytes contain a bar for the 12th. Coverage answers "did we acquire this
+  window", which is the question it exists for and the one the re-buy bug needed
+  (D-0033). "Do the bytes contain the bars" is a different question, answered by
+  counting, and the two known single-day holes — GC trading day 2012-09-12 and ZN
+  trading day 2014-10-03 — sit inside files `coverage` calls complete. Do not
+  "fix" coverage to subtract them: a gap nothing was written for has no manifest
+  id, which is D-0014's whole mechanism.
 - **ZN bars at 16:00 CT are SETTLEMENT PRINTS, the era table's close is right,
   and `qa` calling them out-of-session is correct** (measured 2026-07-31,
   confirming D-0089). A report of out-of-session ZN bars at **21:00Z** on
