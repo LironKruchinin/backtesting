@@ -3185,3 +3185,80 @@ propose a superseding entry — don't silently diverge.
   halt every repair run at attempt 200 — the run that is *fixing* the 794. What
   the breaker still asks is the question it was written for: "am I misreading
   the feed?", where a refusal this build cannot name is the evidence.
+- **D-0097** (2026-07-31) — **Deflated Sharpe lands as an estimator with its
+  controls, and is NOT yet wired into a scorecard number.** Block B's first half;
+  PBO/CSCV is deliberately not in this commit.
+  **The estimator.** Bailey & López de Prado (2014), in
+  `crucible-funnel::stats::deflated`: an observed Sharpe is corrected for the
+  number of trials it was selected from, and for the skew and kurtosis of the
+  returns that produced it, giving `P(true Sharpe > 0)`.
+  **The trial count has exactly one door.** `trials_from_registry` is a one-line
+  wrapper over `Registry::trials_for`, and it exists so that "never trust a
+  hand-entered trial count" is enforced by there being no other way in.
+  `trials_for` excludes voided runs **by construction** (D-0083), and
+  `voiding_a_trial_raises_the_deflated_sharpe` is the proof that the exclusion is
+  real rather than cosmetic: 8 trials → 7, DSR **0.916187 → 0.926764**. It lives
+  here rather than in the registry because here is where the number is consumed.
+  **The converse control came first, and it caught a real bug — which is the
+  entire argument for writing it first.** `expected_max_z` is a **z-score**:
+  dimensionless, in units of the trial Sharpes' dispersion. The first
+  implementation compared it directly against an observed Sharpe — a z-score
+  against a ratio — and the planted real edge (2,000 observations, true Sharpe
+  0.12, ≈5.4σ) scored **DSR 0.000000** against a benchmark of 1.98. A statistic
+  that condemns everything passes every detector test ever written, and without
+  the converse the lucky-best-of-N control below would have "passed" on a
+  constant. The fix is that the benchmark is `dispersion × expected_max_z`, and
+  `expected_max_sharpe`'s old name is gone so the units cannot be confused again.
+  **The dispersion fallback is stated, not silent.** The paper's benchmark uses
+  the variance of the trial Sharpes; where only the winner is in hand,
+  `trial_sharpe_dispersion: None` substitutes the estimated standard error of
+  that one Sharpe. Where a grid's combos are near-duplicates — exactly the
+  account dimension's case — the true dispersion is smaller, so the fallback
+  deflates *harder* than the paper requires. Accepted, in the plan's declared
+  direction: the preferred error is against the strategy.
+  **Measured, on seeded fixtures, all printed by the tests:**
+  a planted real edge scores **DSR 0.999882** at 24 trials and **0.979154** at
+  3,840 (240 combos × 16 accounts, Block E's worst case) — so the correction is
+  not so aggressive that a real edge can never pass. The lucky best of **40
+  zero-edge** strategies scores a naive Sharpe of 0.1068 with **t = 2.39** — it
+  looks significant — and **DSR 0.567937**, which is what forty coin flips
+  produce. Trial-count sensitivity: the same run reads **0.584767** at one trial
+  and **0.038726** at twenty-four.
+  **One thing is deliberately NOT asserted**, and the reason is statistical
+  rather than convenient: the detector control does not require the zero-edge
+  winner to fall *below* the point benchmark. The expected maximum is a **mean**,
+  so the realised maximum of N zero-edge trials exceeds it roughly half the time
+  by construction — here 0.1068 against 0.0990. The verdict is the DSR, which
+  divides that gap by the Sharpe's standard error. An earlier draft asserted the
+  point comparison, it failed on this fixture, and the assertion was wrong rather
+  than the statistic.
+  **Pinned hash `dc7f94f25235df6c`**, blake3 over the seeded series' moments and
+  the (benchmark, standard error, DSR) triple at trial counts 1/24/240/3,840.
+  Inputs: `ChaCha8Rng::seed_from_u64(11)`, 2,000 Box–Muller draws at mean 0.12
+  and unit vol. The other seven hashes are byte-identical and unmoved.
+  **Mutation-verified, each watched failing and restored byte-exactly:** the
+  selection correction's **sign** (benchmark added rather than subtracted), the
+  **trial-count exponent** (benchmark computed at `n_trials = 1`), the **skew
+  sign** (negative skew narrowing rather than widening the error bar), the
+  **units regression** (benchmark unscaled by dispersion — the original bug), and
+  the **void** ceasing to reach the count. Each killed exactly its own control
+  and nothing else.
+  **The scorecard renders the trial count's COMPOSITION**, not a bare integer:
+  `N combos × N accounts × N folds × N seeds − voided = total`. §4 makes every
+  account a trial (D-0067), so Block E's sixteen accounts will multiply the count
+  and drop every deflated Sharpe — correct, and a *stated* consequence rather
+  than a surprise. Accounts, folds and seeds render as `1` in this build because
+  that is what this build does, and rendering the ones is the point: the line
+  changes visibly when the dimension lands.
+  **The scorecard does NOT claim a deflated number, and this was nearly got
+  wrong.** The honesty box was first rewritten to say the DSR is "computed per
+  combo" — while nothing feeds per-combo returns to the estimator. That is a page
+  claiming a number it does not show, which is the exact failure this module's
+  own doctrine names. It now reads "the estimator exists, the wiring does not",
+  says every Sharpe on the page is naive and an upper bound, and the scorecard
+  test asserts that phrase — so the prose cannot drift ahead of the arithmetic
+  again without a test failing.
+  **PBO/CSCV is not in this commit**, per the instruction that it waits until
+  deflated Sharpe lands complete with both controls. When it comes, its fold
+  structure must respect the existing `FoldPlan` machinery or be flagged under
+  §9 — no quiet fold redefinition.

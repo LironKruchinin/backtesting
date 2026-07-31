@@ -41,6 +41,7 @@ use crucible_engine::WorstDayDistribution;
 
 use crate::funnel::{ComboOutcome, FunnelReport};
 use crate::stages::{Criteria, Verdict};
+use crate::stats::deflated::TrialComposition;
 
 /// Everything the honesty box needs that a [`FunnelReport`] does not already
 /// carry.
@@ -73,6 +74,34 @@ pub struct Provenance {
     pub capital: String,
     /// Wall clock, supplied by the caller. This crate reads no clock.
     pub rendered_at: String,
+}
+
+/// How this run's trial count is composed, for the honesty box.
+///
+/// **Accounts, folds and seeds are 1 in this build, and that is a fact about
+/// the build rather than a placeholder.** There is no account dimension yet
+/// (it arrives with the account evaluator), a trial is
+/// `(config_hash, account_id, combo_index)` so folds of one combo are one
+/// trial, and one seed is declared per config. Rendering the ones anyway is
+/// the point: when the account dimension lands, this line changes from
+/// `× 1 accounts` to `× 16 accounts` and a reader sees *why* every deflated
+/// Sharpe on the page dropped, instead of discovering it as a surprise.
+///
+/// `voided` is the gap between the arithmetic and what the registry actually
+/// counts. It is derived rather than asserted, and a *negative* gap — the
+/// registry counting more trials than this run's grid explains — is left
+/// visible as zero voids against a total that disagrees, because that
+/// disagreement means the family has been charged by some other run and hiding
+/// it would be the opposite of the point.
+fn trial_composition_of(_p: &Provenance, report: &FunnelReport) -> TrialComposition {
+    let combos = report.combos.len();
+    TrialComposition {
+        combos,
+        accounts: 1,
+        folds: 1,
+        seeds: 1,
+        voided: combos.saturating_sub(report.trials_after),
+    }
 }
 
 /// A required honesty-box field was missing, so nothing was rendered.
@@ -246,11 +275,21 @@ fn write_honesty_box(h: &mut String, report: &FunnelReport, criteria: &Criteria,
          <dt>trials charged</dt><dd><strong>{after}</strong> (was {before} before this run) — \
          read from the registry, never from memory. A trial is one (config, account, combo); \
          folds of one combo are one trial</dd>\
+         <dt>trial-count composition</dt><dd class=\"mono\">{composition}</dd>\
+         <dd>Shown as arithmetic rather than as an integer because <strong>every account is a \
+         trial</strong> (§4, D-0067): an account dimension multiplies the count and deflates \
+         every Sharpe accordingly, and a bare total cannot tell a reader whether it is in \
+         there. Voided runs are netted out by construction (D-0083)</dd>\
          <dt>naive Sharpe</dt><dd>reported per combo below</dd>\
-         <dt>deflated Sharpe</dt><dd><strong>not computed by this build.</strong> Deflating \
-         requires the trial count (which is above) <em>and</em> the skew/kurtosis correction of \
-         Bailey &amp; López de Prado — `crucible-funnel::stats`, still a module-doc spec. Every \
-         Sharpe on this page is the naive one and must be read as an upper bound</dd>\
+         <dt>deflated Sharpe</dt><dd><strong>not computed by this build — the estimator exists, \
+         the wiring does not.</strong> `crucible-funnel::stats::deflated` implements Bailey &amp; \
+         López de Prado (2014) with its converse and lucky-best-of-N controls and a pinned hash, \
+         and the trial count it needs is the one above. What is missing is the per-combo return \
+         series reaching it, so <em>this page</em> carries no deflated number and every Sharpe on \
+         it is the naive one, to be read as an upper bound. When it lands the correction will be \
+         deliberately conservative where trials are not independent — sixteen accounts are one \
+         signal under sixteen risk overlays, so the raw product over-deflates, and the preferred \
+         error is against the strategy</dd>\
          <dt>config hash</dt><dd class=\"mono\">{config}</dd>\
          <dt>git sha</dt><dd class=\"mono\">{git}</dd>\
          <dt>data manifest ids</dt><dd class=\"mono\">{manifest}</dd>\
@@ -268,6 +307,7 @@ fn write_honesty_box(h: &mut String, report: &FunnelReport, criteria: &Criteria,
         family = esc(&p.hypothesis_family),
         after = report.trials_after,
         before = report.trials_before,
+        composition = esc(&trial_composition_of(p, report).render()),
         config = esc(&p.config_hash),
         git = esc(&p.git_sha),
         manifest = manifest,
@@ -760,8 +800,14 @@ mod tests {
         for required in [
             "Honesty box",
             "trials charged",
+            // The composition, not just the total: a bare integer cannot say
+            // whether the account dimension is inside it (D-0067).
+            "trial-count composition",
+            "combos ×",
             "deflated Sharpe",
-            "not computed by this build",
+            // The estimator landed before its wiring, and the page must say so
+            // in those words rather than claiming a number it does not show.
+            "the estimator exists, the wiring does not",
             "stop_first_intrabar",
             "git sha",
             "cost sweep",
