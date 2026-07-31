@@ -380,9 +380,16 @@ messages on both sides.
 The protocol:
 
 1. **A branch carries a placeholder**, spelled `D-TBD(short-topic-slug)` —
-   `D-0089`, `D-TBD(expiry-availability)`. It goes
-   everywhere the real number would: code comments, module docs, `DECISIONS.md`
-   entry heading, and the commit message.
+   for example `D-TBD(commodity-calendar-eras)` or
+   `D-TBD(expiry-availability)`. It goes everywhere the real number would: code
+   comments, module docs, `DECISIONS.md` entry heading, and the commit message.
+
+   > These two examples are **illustrative and must stay unresolved.** The
+   > commodity-calendar merge renumbered this very line to `D-0089` with a
+   > blanket `sed`, because the rule's own example looked exactly like a live
+   > placeholder — the protocol ate its own documentation. Step 3 below is
+   > therefore a *targeted* rewrite, never a whole-tree substitution: on a merge
+   > where both meanings of a number coexist, decide per occurrence.
 2. **The slug is required and must be distinctive.** `D-TBD` alone is not a
    placeholder, it is a collision waiting to happen the moment two branches use
    it; the slug is what makes the rewrite mechanical and greppable.
