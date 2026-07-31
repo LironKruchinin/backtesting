@@ -4,9 +4,20 @@ slug: short-horizon-overreaction
 topic: momentum-horizon
 grade: A
 hypothesis_family: es-short-horizon-reversal
-status: backlog
+status: run
 created: 2026-07-30
 ---
+
+> **RUN 2026-07-31 — verdict `Kill`, decided at `admission`.** 24 combos, 24
+> trials charged, determinism hash `a803247c25de44c7` reproduced across two runs.
+> **S0 independently killed all 24 as well**, and the two facts are worth keeping
+> apart: `|IC|` cleared the registered 0.02 bar at every horizon and the mean
+> forward return's interval contained zero at every horizon, so the score has
+> measurable *size* and no *significance* — exactly the failure mode D-0085's
+> two-part criterion exists to catch. The IC sign is **negative at all four
+> horizons**, which is the reversal direction this file predicted. **Gate 0b —
+> the gate this hypothesis was built around — remains UNEVALUATED.** Full result
+> at the end of this file.
 
 > **UNBLOCKED 2026-07-31.** The S0 predictor seam landed (D-0085), so Gate 0
 > and Gate 0b — no-trading measurements of forward returns conditional on the
@@ -325,3 +336,85 @@ compared against the spread. The other half is the quantile/IC contract in
 `crucible-funnel::stages`' module doc. The seam shipped the first half and the
 bootstrap; the **report-in-ticks** half is the piece still owed, which is why
 Gate 0b remains a hand calculation.
+
+## Result — 2026-07-31
+
+Run: `crucible funnel --config
+configs/hypotheses/H-008-short-horizon-overreaction.toml --out results`, twice.
+Exit 5 both times. Determinism hash `a803247c25de44c7` and all 24 verdict rows
+identical across the two runs; the scorecards differ only in the render
+timestamp, the trials-before figure, and the registry claim/dedupe counts.
+
+**Verdict: `Kill`, decided at `admission`, 24 of 24 combos.** Trials charged: 24.
+Config hash `43e43ca1748d…`. The recorded deciding gate is `admission` because
+admission precedes every stage (D-0084) — 58 pooled out-of-sample sessions
+against the registered 250. Round-trips were never binding: 551 to 10,569 against
+a floor of 200.
+
+### Gate 0 — predictor before system. Evaluated. KILL.
+
+Every combo, at all four registered horizons:
+
+| horizon | pairs | IC | mean fwd return, 95 % CI |
+|---|---|---|---|
+| 1m | 86,082 | **-0.0372** | +0.00009 % [-0.00005 %, +0.00021 %] |
+| 5m | 86,244 | **-0.0335** | +0.00043 % [-0.00016 %, +0.00101 %] |
+| 10m | 86,241 | **-0.0291** | +0.00086 % [-0.00018 %, +0.00201 %] |
+| 20m | 86,235 | **-0.0261** | +0.00168 % [-0.00063 %, +0.00379 %] |
+
+Two things, and they point opposite ways:
+
+- **The sign is right.** A negative information coefficient means a high z-score
+  is followed by a negative return — reversal, which is what this file
+  pre-registered. It is not a large effect and it is consistent across all four
+  horizons, decaying as the horizon lengthens, which is the shape the mechanism
+  predicts.
+- **The significance is absent.** `|IC|` clears the registered `min_abs_ic =
+  0.02` at every horizon, but the mean forward return's bootstrap interval
+  contains zero at every horizon, so no horizon clears **both** halves of
+  D-0085's criterion → `KILL at s0`. That is the criterion working as designed:
+  on 86,000 observations, an `|IC|` of 0.037 is what a large enough sample of
+  noise gives away for free.
+
+**Every combo's S0 reading is identical**, as this file's own config caveat
+predicted: the score slot is fixed at `zscore(20)` while the grid varies only the
+Bollinger parameters, so S0 here is *one* measurement charged 24 times. Only the
+bootstrap intervals differ, and only because each combo draws its own seed.
+
+### Gate 0b — the spread test. UNEVALUATED, and this is the run's biggest gap.
+
+Gate 0b asks whether the measured reversion exceeds one full tick (0.25 pt =
+$12.50) per round trip at the 10-minute horizon. **It could not be evaluated**,
+for two compounding reasons — neither of which is a property of the market:
+
+1. **The printed mean forward return is unconditional.** It is the same for all
+   24 combos and at +0.00086 % per 10 minutes it is the window's drift, not the
+   reversion conditional on a close beyond the band. (ES returned +17.60 % over
+   this window; the two are consistent.) Gate 0b needs the *conditional*
+   magnitude.
+2. **The quantile buckets that would supply it are computed and never shown.**
+   `[s0].buckets = 5` is declared and pre-registered, `crucible-funnel::s0`
+   computes `report.buckets` with a per-bucket `mean_return`, and
+   `crucible-cli::funnel::print_s0` prints none of it. Nothing in the registry
+   or the scorecard carries it either.
+
+Converting a fraction to ticks by hand was the known caveat (recorded in the
+banner above and in the config). **The bucket omission is new**, and it means
+the hand conversion has no input. Flagged rather than fixed here — see the
+session report; it is a reporting defect of the same family as D-0100, not a
+result.
+
+### Gates 1 and 2 — reached, and not the cause of death.
+
+Under `free_fills` several combos were profitable (up to +8.28 %), and all of
+them died as soon as the spread was charged: combo 21 goes +2.73 % at 0 ticks to
+-52.68 % at 1 tick to -108.09 % at 2. **That is the mechanism this file
+predicted** — the compensation being collected is the spread, and we are paying
+it to enter. It is the expected cause of death, and the sample gate means it is
+recorded as an observation rather than as a verdict. Every combo beat the matched
+random-entry control 16 of 16 draws; every combo lost to buy-and-hold (0 of 1).
+
+### Gates 3 and 4 — not run.
+
+`max_pbo` and `require_plateau` echoed, not evaluated (S3 is owed). CL was not
+run: Gate 4 is a second registration, not an extension of this one.

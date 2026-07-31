@@ -4,9 +4,17 @@ slug: trend-following-span
 topic: momentum-horizon
 grade: A
 hypothesis_family: es-trend-span-cost-optimal
-status: backlog
+status: run
 created: 2026-07-30
 ---
+
+> **RUN 2026-07-31 — verdict `Kill`, decided at `admission`.** 100 combos, 100
+> trials charged, determinism hash `4821d8831fd3c39a` reproduced across two
+> runs. Killed for **sample adequacy**: 58 pooled out-of-sample sessions against
+> the 250 this file registered. That is the designed triage outcome, not a
+> disappointment — no profitability verdict is attached and none may be quoted.
+> Full result at the end of this file, including what Tests 1 and 2 could and
+> could not be evaluated on.
 
 # H-007 — The cost-optimal trend-following span, and the structure around it
 
@@ -278,3 +286,73 @@ mandatory anyway. It is the strongest A in this sweep because its primary test
 is structural rather than profit-based, it comes with its own negative control
 on the existing random-walk harness, and it exercises the cost-sensitivity
 machinery the project already requires on every result.
+
+## Result — 2026-07-31
+
+Run: `crucible funnel --config configs/hypotheses/H-007-trend-following-span.toml
+--out results`, twice. Exit 5 both times (every combo killed). Determinism hash
+`4821d8831fd3c39a` and all 100 verdict rows identical across the two runs; the
+only differences between the two scorecards are the render timestamp, the
+trials-before-this-run figure, and the registry's own claim/dedupe counts —
+all statements about the *run*, none about the research.
+
+**Verdict: `Kill`, decided at `admission`, 100 of 100 combos.** Trials charged:
+100, read from the registry. Config hash `aa840e8b3abc…`.
+
+The deciding gate is **sample adequacy**, exactly as this file predicted:
+58 pooled out-of-sample sessions against `min_oos_sessions = 250`. Round-trips
+were never the binding constraint — combos produced 220 to 1,396 of them against
+a floor of 200. **No profitability verdict is attached to this run** and none may
+be quoted from it. The floors come down when registry pooling supplies the
+sessions, never to make this contract pass.
+
+### Test 1 — the cost-optimal span. NOT evaluated as registered.
+
+The registered test reads "record the span that maximizes **net Sharpe** at each
+cost point". **This build does not produce that number.** The mandatory cost
+sweep reports pooled out-of-sample **return** at 0 / 0.5 / 1 / 2 ticks; Sharpe is
+computed only under the config's own fill model, once. So the registered
+statistic does not exist in the output, and substituting return for it would be
+answering a different question in the shape of the registered one.
+
+What the return proxy shows, labelled as a proxy: the argmax is
+`fast=90, slow=480` at **all four** cost levels — flat, which is the branch this
+file registered as `Kill`.
+
+**But scoring that branch would be wrong, and this is the real finding.** The
+argmax sits on the **grid's longest span** in 20 of the 40 (fast × cost-level)
+slices, and along `fast=90` the return rises monotonically with the slow span all
+the way to the 480 boundary:
+
+| slow | 0t | 0.5t | 1t | 2t |
+|---|---|---|---|---|
+| 120 | -12.81 | -19.00 | -25.19 | -37.56 |
+| 280 | -7.05 | -10.94 | -14.83 | -22.60 |
+| 400 | -3.90 | -7.15 | -10.40 | -16.90 |
+| 480 | **+0.02** | **-2.79** | **-5.58** | **-11.19** |
+
+The hump's peak is **not bracketed by the grid** — it lies at or beyond 480. A
+test that asks "does the argmax move *right* as costs rise" cannot observe
+movement when the argmax is already pinned at the right edge at zero cost. So
+Test 1 is **structurally uninformative on this grid**, which is a different and
+more useful statement than "flat, therefore killed". The grid, not the paper, is
+what this run falsified. A re-registration would have to extend the slow axis
+well past 480 and confirm the peak is interior before the monotonicity question
+can be asked at all.
+
+### Test 2 — positive skewness. Not evaluated.
+
+Per-round-trip PnL skewness with a block-bootstrap CI is not computed by this
+build, and no field in the registry or the scorecard carries it. Unevaluated —
+not "failed".
+
+### Test 3 — profitability. Withheld by design.
+
+Every combo lost money at every cost level under the config's own fill model.
+Both mandatory controls rendered: every combo **beat the matched random-entry
+control 16 of 16 draws**, and every combo **lost to buy-and-hold (0 of 1)**,
+which returned +17.60 % over the window. Under `require_controls_beaten = true`
+that is a failed control regardless of the sample gate. `max_pbo` and
+`require_plateau` were echoed and not evaluated (S3 is owed); the scorecard
+renders both as named holes. Ceiling was `Iterate` and `Graduate` was
+unreachable (D-0075).
