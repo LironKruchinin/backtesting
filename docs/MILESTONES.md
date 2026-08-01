@@ -352,7 +352,10 @@ The quant-research payload. Specs live in `crucible-funnel` module docs.
             is separately labelled; the original H-008 Gate 0b remains
             explicitly UNEVALUATED because its beyond-band population is not
             proved equivalent to quantile buckets. Assessment, both renderers,
-            and determinism borrow one report-owned typed result.
+            and determinism borrow one report-owned typed result. The expanded
+            evidence repins S0 to **`825356c88295ce94`** in the separate
+            D-0103 commit; D-0085's old value remains
+            historical.
       - [ ] **Persist that typed S0 result.** Reader/model support must merge
             before the writer changes; successful production S0 runs still
             finish with legacy `metrics: null` at this checkpoint. The writer

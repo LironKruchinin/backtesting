@@ -3513,3 +3513,19 @@ propose a superseding entry — don't silently diverge.
   **This does not claim persistence.** Successful production S0 measurement
   still writes `metrics: null`. A reader-only persisted shape must deploy and
   merge before any writer emits it.
+- **D-0103** (2026-08-01) -- **The S0 determinism pin
+  moves from `91107aeb6e6802c0` to `825356c88295ce94`; the other seven pinned
+  gates do not move.** This is a deliberate semantic repin, isolated from the
+  evidence-product commit. The old D-0085 value remains a historical fact: it
+  hashed the pass-only summary available then. The new gate consumes the one
+  strict serialized typed product and therefore covers evidence scope, full
+  score identity and declaration, declared horizon order, pair/drop counts,
+  every IC and absence, every bucket bound/count/fraction/tick mean, the
+  separately labelled unconditional interval, and the derived criterion.
+  Omitting any of those fields from a consumer can no longer leave the S0 gate
+  unchanged. The new value was observed twice from
+  `crucible funnel --config configs/s0-smoke.toml --out <isolated> --hash-only`.
+  Observed unchanged in the same checkout: demo `b55747513df596ed`, combo
+  `0e1ab52d474b862b`, walk-forward `711e1cb34a2ee2b4`, funnel
+  `2f430893d2a79a8f`, permutation `9fe41f6f5b3653e7`, truncation
+  `91b9ff5b9bbcdb25`, and deflated-Sharpe `dc7f94f25235df6c`.
