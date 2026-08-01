@@ -48,7 +48,7 @@ use crucible_strategies::controls::{BuyAndHold, ControlError, MatchedEpisode, Ra
 
 use crate::registry::{Registry, RunKey, RunMetrics, RunRow, RunStatus, VerdictRow};
 use crate::scheduler::run_grid_parallel;
-use crate::stages::{Assessment, Criteria, Evidence, assess, render_half_ticks};
+use crate::stages::{Assessment, Criteria, Evidence, Stage, assess, render_half_ticks};
 use crate::walkforward::{
     ComboWalkForward, FoldPlan, RunIdentity, RunTrace, WalkForwardError, derive_control_seed,
 };
@@ -104,6 +104,8 @@ pub struct FunnelInputs<'a> {
     pub identity: &'a RunIdentity,
     /// The criteria, written before the run.
     pub criteria: &'a Criteria,
+    /// The exact S0 declaration, present exactly when `criteria` declares S0.
+    pub s0_spec: Option<&'a crate::s0::S0Spec>,
     /// The declared execution assumption.
     pub costs: Costs,
     /// Position size, needed by the controls so they trade what the strategy
@@ -117,10 +119,6 @@ pub struct FunnelInputs<'a> {
     pub data_manifest_ids: &'a [String],
     /// Wall clock, supplied by the caller. This crate reads no clock.
     pub now: &'a str,
-    /// Per-combo `|IC|` from the S0 pass, keyed by grid index. Empty when the
-    /// config did not declare `s0`. A `BTreeMap` rather than a `HashMap`
-    /// because anything that can reach a result is ordered here (§2.2).
-    pub s0_best_abs_ic: &'a std::collections::BTreeMap<usize, f64>,
 }
 
 /// One level of the mandatory cost-sensitivity sweep.
@@ -209,7 +207,6 @@ pub struct ComboOutcome {
     /// Pooled out-of-sample trading days.
     pub oos_sessions: usize,
     /// What the verdict was computed from.
-    pub evidence: Evidence,
     /// The verdict and every criterion behind it.
     pub assessment: Assessment,
     /// What the registry said when this combo's rows were claimed.
@@ -219,6 +216,8 @@ pub struct ComboOutcome {
 /// A whole funnel run.
 #[derive(Clone, Debug)]
 pub struct FunnelReport {
+    /// Owned predictor evidence, when S0 was declared.
+    pub s0: Option<crate::s0::S0Report>,
     /// One entry per combo, in grid-index order — never rank order.
     pub combos: Vec<ComboOutcome>,
     /// Trials charged to the family before this run.
@@ -236,6 +235,8 @@ pub struct FunnelReport {
 /// Anything that stops a funnel run.
 #[derive(Debug)]
 pub enum FunnelError {
+    /// S0 evidence did not exactly match this run's declared grid and contract.
+    InvalidS0(String),
     /// The grid could not be replayed.
     WalkForward(WalkForwardError),
     /// The registry could not be read or written. Fatal by design: a result
@@ -246,6 +247,7 @@ pub enum FunnelError {
 impl std::fmt::Display for FunnelError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            FunnelError::InvalidS0(e) => write!(f, "invalid S0 evidence: {e}"),
             FunnelError::WalkForward(e) => write!(f, "{e}"),
             FunnelError::Registry(e) => write!(f, "{e}"),
         }
@@ -266,6 +268,57 @@ impl From<crate::registry::RegistryError> for FunnelError {
     }
 }
 
+fn validate_s0_report(
+    inputs: &FunnelInputs<'_>,
+    report: Option<&crate::s0::S0Report>,
+) -> Result<(), FunnelError> {
+    let declared = inputs.criteria.runs(Stage::S0);
+    match (declared, inputs.s0_spec, report) {
+        (false, None, None) => return Ok(()),
+        (false, _, Some(_)) => {
+            return Err(FunnelError::InvalidS0(
+                "evidence was supplied although S0 was not declared".to_owned(),
+            ));
+        }
+        (true, None, _) => {
+            return Err(FunnelError::InvalidS0(
+                "criteria declare S0 but the declaration is absent".to_owned(),
+            ));
+        }
+        (true, Some(_), None) => {
+            return Err(FunnelError::InvalidS0(
+                "criteria declare S0 but its measured report is absent".to_owned(),
+            ));
+        }
+        (false, Some(_), None) => {
+            return Err(FunnelError::InvalidS0(
+                "an S0 declaration exists although the stage is not declared".to_owned(),
+            ));
+        }
+        (true, Some(spec), Some(report)) => {
+            report.validate().map_err(FunnelError::InvalidS0)?;
+            if report.combos.len() != inputs.grid.len() {
+                return Err(FunnelError::InvalidS0(
+                    "report and grid must contain the same number of combos".to_owned(),
+                ));
+            }
+            for (measured, combo) in report.combos.iter().zip(inputs.grid.iter()) {
+                if measured.combo_index != combo.index
+                    || measured.label != combo.label()
+                    || measured.spec != *spec
+                    || measured.tick_size_nanopoints != inputs.spec.tick.as_nanos()
+                {
+                    return Err(FunnelError::InvalidS0(
+                        "combo index, label, declaration, and contract tick must match the run"
+                            .to_owned(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Runs the funnel: claim, replay, screen, sweep, control, judge, record.
 ///
 /// # Errors
@@ -274,7 +327,9 @@ impl From<crate::registry::RegistryError> for FunnelError {
 pub fn run_funnel(
     inputs: &FunnelInputs<'_>,
     registry: &mut Registry,
+    s0: Option<crate::s0::S0Report>,
 ) -> Result<FunnelReport, FunnelError> {
+    validate_s0_report(inputs, s0.as_ref())?;
     let trials_before = registry.trials_for(inputs.hypothesis_family);
     let claims = claim_runs(inputs, registry)?;
 
@@ -347,16 +402,16 @@ pub fn run_funnel(
                 .and_then(|l| l.oos_pooled.sharpe_naive),
             random_entry_return_pct: controls[0].return_pct(),
             buy_and_hold_return_pct: controls[1].return_pct(),
-            // Handed in by the caller: S0 is a separate pass over the same
-            // bars (it takes no position, so it has no replay), and its reading
-            // gates this assessment. `None` when the config declared no `s0`.
-            s0_best_abs_ic: inputs.s0_best_abs_ic.get(&index).copied(),
             // The permutation harness is not wired into the run path yet:
             // block A ships the harness and its acceptance test first
             // (docs/plans/m3-full.md).
             permutation_p_value: None,
         };
-        let assessment = assess(inputs.criteria, &evidence);
+        // `validate_s0_report` established exact contiguous grid identity
+        // before any run was claimed, so assessment and rendering cannot pick
+        // different copies of a duplicate or silently miss one.
+        let s0_combo = s0.as_ref().and_then(|report| report.combos.get(index));
+        let assessment = assess(inputs.criteria, &evidence, s0_combo);
 
         combos.push(ComboOutcome {
             id: costed.id,
@@ -367,7 +422,6 @@ pub fn run_funnel(
             sweep,
             controls,
             oos_sessions,
-            evidence,
             assessment,
         });
     }
@@ -376,6 +430,7 @@ pub fn run_funnel(
     record_verdicts(inputs, registry, &combos)?;
 
     Ok(FunnelReport {
+        s0,
         trials_before,
         trials_after: registry.trials_for(inputs.hypothesis_family),
         runs_claimed: claims.claimed,

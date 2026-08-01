@@ -501,10 +501,6 @@ pub struct Evidence {
     pub random_entry_return_pct: Option<f64>,
     /// Pooled out-of-sample return of the buy-and-hold control.
     pub buy_and_hold_return_pct: Option<f64>,
-    /// The largest `|IC|` S0 measured across its declared horizons, or `None`
-    /// when S0 did not run. `None` is not a failure — it is the absence of a
-    /// measurement, and the criterion is only applied when S0 was asked for.
-    pub s0_best_abs_ic: Option<f64>,
     /// The permutation null's empirical p-value for this combo's out-of-sample
     /// result, or `None` when the harness did not run
     /// ([`crate::stats::permutation`]). `None` is not a pass — the criterion
@@ -556,6 +552,26 @@ impl Assessment {
     }
 }
 
+fn s0_detail(s0: Option<&crate::s0::S0ComboReport>, threshold: f64) -> String {
+    let Some(result) = s0 else {
+        return format!("S0 result unavailable, |IC| threshold {threshold:.4}");
+    };
+    match result.criterion() {
+        crate::s0::S0CriterionOutcome::Passed { horizon_ns } => format!(
+            "generic S0 criterion passed at {horizon_ns}ns; |IC| threshold {threshold:.4}"
+        ),
+        crate::s0::S0CriterionOutcome::Failed => result.best_abs_ic().map_or_else(
+            || "S0 criterion says measured failure, but every horizon IC is unavailable".to_owned(),
+            |best| format!(
+                "best measurable |IC| {best:.4}, but no horizon cleared both |IC| {threshold:.4} and its unconditional mean interval"
+            ),
+        ),
+        crate::s0::S0CriterionOutcome::Unavailable { reason } => format!(
+            "required S0 evidence unavailable ({reason}); |IC| threshold {threshold:.4}; the criterion remains unevaluated"
+        ),
+    }
+}
+
 /// Judges one combo's evidence against the criteria it was pre-registered
 /// under.
 ///
@@ -565,7 +581,11 @@ impl Assessment {
 /// failed the trade count *and* the session count" rather than making a reader
 /// re-run to discover the second one.
 #[must_use]
-pub fn assess(criteria: &Criteria, evidence: &Evidence) -> Assessment {
+pub fn assess(
+    criteria: &Criteria,
+    evidence: &Evidence,
+    s0: Option<&crate::s0::S0ComboReport>,
+) -> Assessment {
     let mut reasons: Vec<Reason> = Vec::new();
     let mut decided_at = Stage::Admission;
 
@@ -601,15 +621,8 @@ pub fn assess(criteria: &Criteria, evidence: &Evidence) -> Assessment {
         let threshold = criteria.s0_min_abs_ic.unwrap_or(0.0);
         let s0 = vec![check(
             Stage::S0,
-            evidence.s0_best_abs_ic.is_some_and(|ic| ic >= threshold),
-            match evidence.s0_best_abs_ic {
-                Some(ic) => format!(
-                    "|IC| {ic:.4} at its best declared horizon, {threshold:.4} required — a score                      that does not predict the return after it is dead before any equity curve"
-                ),
-                None => format!(
-                    "no information coefficient could be measured, {threshold:.4} required — an                      absent measurement is not a cleared bar (D-0075)"
-                ),
-            },
+            s0.is_some_and(crate::s0::S0ComboReport::passed),
+            s0_detail(s0, threshold),
         )];
         failed = s0.iter().any(|r| !r.passed);
         reasons.extend(s0);
@@ -762,6 +775,9 @@ fn show(value: Option<f64>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::s0::{
+        Availability, HorizonEvidence, Interval, S0ComboReport, S0Spec, UnavailableReason,
+    };
 
     fn names(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_owned()).collect()
@@ -789,6 +805,14 @@ mod tests {
         Criteria::new(&source(&stages, &[0.0, 0.5, 1.0, 2.0], 1.0)).expect("valid")
     }
 
+    fn s0_criteria() -> Criteria {
+        let stages = names(&["s0", "s1", "s2"]);
+        let sweep = [0.0, 0.5, 1.0, 2.0];
+        let mut declared = source(&stages, &sweep, 1.0);
+        declared.s0_min_abs_ic = Some(0.05);
+        Criteria::new(&declared).expect("valid S0 criteria")
+    }
+
     fn passing() -> Evidence {
         Evidence {
             oos_trades: 100,
@@ -799,8 +823,43 @@ mod tests {
             sharpe_at_kill_level: Some(0.9),
             random_entry_return_pct: Some(0.5),
             buy_and_hold_return_pct: Some(1.0),
-            s0_best_abs_ic: None,
             permutation_p_value: None,
+        }
+    }
+
+    fn measured_failed_s0() -> S0ComboReport {
+        S0ComboReport {
+            score_identity: "zscore close period=20".to_owned(),
+            tick_size_nanopoints: 250_000_000,
+            spec: S0Spec {
+                score_slot: "z".to_owned(),
+                horizons_ns: vec![60_000_000_000],
+                buckets: 5,
+                bootstrap_draws: 200,
+                min_abs_ic: 0.05,
+            },
+            combo_index: 0,
+            label: "z(period=20 source=close)".to_owned(),
+            warmup_bars: 20,
+            scores: 100,
+            horizons: vec![HorizonEvidence {
+                horizon_ns: 60_000_000_000,
+                n_pairs: 99,
+                dropped_no_partner: 1,
+                dropped_invalid_price: 0,
+                ic: Availability::Available { value: 0.08 },
+                buckets: Availability::Unavailable {
+                    reason: UnavailableReason::NoBucketsDeclared,
+                },
+                unconditional_mean_interval: Availability::Available {
+                    value: Interval {
+                        point: 0.0,
+                        lo: -0.01,
+                        hi: 0.01,
+                        draws: 200,
+                    },
+                },
+            }],
         }
     }
 
@@ -867,7 +926,7 @@ mod tests {
         let mut e = passing();
         e.oos_trades = 3;
         e.oos_sessions = 4;
-        let a = assess(&criteria(), &e);
+        let a = assess(&criteria(), &e, None);
         assert_eq!(a.verdict, Verdict::Kill);
         assert_eq!(a.decided_at, Stage::Admission);
         assert_eq!(a.reasons.len(), 2, "both adequacy criteria are evaluated");
@@ -878,6 +937,34 @@ mod tests {
         // config declaring a stage by that name is still refused, because
         // admission is a pre-trial check rather than a gate.
         assert_eq!(a.decided_at.to_string(), "admission");
+    }
+
+    #[test]
+    fn measured_s0_failure_is_not_relabelled_as_absent_ic() {
+        let s0 = measured_failed_s0();
+        let assessment = assess(&s0_criteria(), &passing(), Some(&s0));
+        assert_eq!(assessment.verdict, Verdict::Kill);
+        assert_eq!(assessment.decided_at, Stage::S0);
+        let reasons = assessment.rendered_reasons().join("\n");
+        assert!(reasons.contains("best measurable |IC| 0.0800"), "{reasons}");
+        assert!(!reasons.contains("IC unavailable"), "{reasons}");
+    }
+
+    #[test]
+    fn absent_s0_interval_remains_unevaluated_not_measured_failure() {
+        let mut s0 = measured_failed_s0();
+        s0.horizons[0].unconditional_mean_interval = Availability::Unavailable {
+            reason: UnavailableReason::NoBootstrapDraws,
+        };
+        let assessment = assess(&s0_criteria(), &passing(), Some(&s0));
+        assert_eq!(assessment.verdict, Verdict::Kill);
+        assert_eq!(assessment.decided_at, Stage::S0);
+        let reasons = assessment.rendered_reasons().join("\n");
+        assert!(
+            reasons.contains("criterion remains unevaluated"),
+            "{reasons}"
+        );
+        assert!(!reasons.contains("best measurable"), "{reasons}");
     }
 
     /// `admission` is not a declarable gate, and the refusal names it as an
@@ -912,7 +999,7 @@ mod tests {
     fn a_strategy_that_loses_with_free_fills_dies_at_s1() {
         let mut e = passing();
         e.free_fill_return_pct = -2.0;
-        let a = assess(&criteria(), &e);
+        let a = assess(&criteria(), &e, None);
         assert_eq!(a.verdict, Verdict::Kill);
         assert_eq!(a.decided_at, Stage::S1);
         assert!(a.reasons.iter().any(|r| r.stage == Stage::S1 && !r.passed));
@@ -928,7 +1015,7 @@ mod tests {
     fn an_edge_that_dies_at_the_kill_level_is_killed_at_s2() {
         let mut e = passing();
         e.sharpe_at_kill_level = Some(0.1);
-        let a = assess(&criteria(), &e);
+        let a = assess(&criteria(), &e, None);
         assert_eq!(a.verdict, Verdict::Kill);
         assert_eq!(a.decided_at, Stage::S2);
     }
@@ -940,14 +1027,14 @@ mod tests {
         let mut beaten_by_random = passing();
         beaten_by_random.random_entry_return_pct = Some(9.0);
         assert_eq!(
-            assess(&criteria(), &beaten_by_random).verdict,
+            assess(&criteria(), &beaten_by_random, None).verdict,
             Verdict::Kill
         );
 
         let mut beaten_by_market = passing();
         beaten_by_market.buy_and_hold_return_pct = Some(9.0);
         assert_eq!(
-            assess(&criteria(), &beaten_by_market).verdict,
+            assess(&criteria(), &beaten_by_market, None).verdict,
             Verdict::Kill
         );
     }
@@ -958,7 +1045,7 @@ mod tests {
     fn a_control_that_could_not_be_built_is_a_failure_not_a_pass() {
         let mut e = passing();
         e.random_entry_return_pct = None;
-        let a = assess(&criteria(), &e);
+        let a = assess(&criteria(), &e, None);
         assert_eq!(a.verdict, Verdict::Kill);
         assert!(
             a.rendered_reasons()
@@ -975,7 +1062,7 @@ mod tests {
     fn a_missing_sharpe_never_clears_the_bar() {
         let mut e = passing();
         e.costed_sharpe = None;
-        assert_eq!(assess(&criteria(), &e).verdict, Verdict::Kill);
+        assert_eq!(assess(&criteria(), &e, None).verdict, Verdict::Kill);
     }
 
     /// The ceiling this build imposes: everything passes, and the answer is
@@ -983,7 +1070,7 @@ mod tests {
     /// the battery is S3.
     #[test]
     fn passing_everything_this_build_runs_is_iterate_and_never_graduate() {
-        let a = assess(&criteria(), &passing());
+        let a = assess(&criteria(), &passing(), None);
         assert_eq!(a.verdict, Verdict::Iterate);
         assert_eq!(a.decided_at, Stage::S2);
         assert!(a.reasons.iter().all(|r| r.passed));

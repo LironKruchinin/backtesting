@@ -37,6 +37,7 @@
 //! because a scheduled job that reads "everything was killed" as success
 //! learns nothing, exactly as `qa` exits 4 on findings.
 
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use crucible_core::prelude::*;
@@ -282,14 +283,11 @@ pub fn run_cmd(args: &FunnelArgs) -> i32 {
     // dead before any equity curve exists (D-0081/D-0085). It takes no
     // position, so it has no fill model and no replay: one streaming pass per
     // combo over the same bars.
-    let mut s0_ic: std::collections::BTreeMap<usize, f64> = std::collections::BTreeMap::new();
-    let mut s0_report = None;
-    if criteria.runs(crucible_funnel::stages::Stage::S0) {
-        let Some(cfg_s0) = loaded.file.s0.as_ref() else {
-            eprintln!("error: `stages` declares s0 but there is no `[s0]` block");
-            return EXIT_USAGE;
-        };
-        let spec = crucible_funnel::s0::S0Spec {
+    let s0_spec = loaded
+        .file
+        .s0
+        .as_ref()
+        .map(|cfg_s0| crucible_funnel::s0::S0Spec {
             score_slot: cfg_s0.score.clone(),
             horizons_ns: cfg_s0
                 .horizons_minutes
@@ -299,13 +297,20 @@ pub fn run_cmd(args: &FunnelArgs) -> i32 {
             buckets: cfg_s0.buckets,
             bootstrap_draws: cfg_s0.bootstrap_draws,
             min_abs_ic: cfg_s0.min_abs_ic,
+        });
+    let mut s0_report = None;
+    if criteria.runs(crucible_funnel::stages::Stage::S0) {
+        let Some(spec) = s0_spec.as_ref() else {
+            eprintln!("error: `stages` declares s0 but there is no `[s0]` block");
+            return EXIT_USAGE;
         };
         let s0_inputs = crucible_funnel::s0::S0Inputs {
             events: &series.events,
             day_keys: &days.keys,
             grid: &loaded.grid,
             spec: loaded.grid.spec(),
-            s0: &spec,
+            s0: spec,
+            tick_size: loaded.spec.tick,
             identity: &identity,
             criteria: &criteria,
             hypothesis_family: &loaded.file.meta.hypothesis_family,
@@ -314,19 +319,7 @@ pub fn run_cmd(args: &FunnelArgs) -> i32 {
             now: &now,
         };
         match crucible_funnel::s0::run_s0(&s0_inputs, &mut registry) {
-            Ok(r) => {
-                for c in &r.combos {
-                    // Only a reading that cleared BOTH halves of the criterion
-                    // is handed on as evidence; a large but insignificant |IC|
-                    // must not clear the gate downstream either.
-                    if c.passed
-                        && let Some(ic) = c.best_abs_ic
-                    {
-                        s0_ic.insert(c.combo_index, ic);
-                    }
-                }
-                s0_report = Some(r);
-            }
+            Ok(r) => s0_report = Some(r),
             Err(e) => {
                 eprintln!("error: {e}");
                 return EXIT_USAGE;
@@ -343,6 +336,7 @@ pub fn run_cmd(args: &FunnelArgs) -> i32 {
         params: &params,
         identity: &identity,
         criteria: &criteria,
+        s0_spec: s0_spec.as_ref(),
         costs: Costs {
             half_spread_ticks: loaded.file.execution.half_spread_ticks,
             fee_per_contract_nano_usd: loaded.fee_per_contract_nano_usd,
@@ -352,16 +346,9 @@ pub fn run_cmd(args: &FunnelArgs) -> i32 {
         git_sha: &git_sha,
         data_manifest_ids: &series.data_manifest_ids,
         now: &now,
-        s0_best_abs_ic: &s0_ic,
     };
 
-    if let Some(r) = s0_report.as_ref()
-        && !args.hash_only
-    {
-        print_s0(r, loaded.file.s0.as_ref().map_or(0.0, |c| c.min_abs_ic));
-    }
-
-    let report = match run_funnel(&inputs, &mut registry) {
+    let report = match run_funnel(&inputs, &mut registry, s0_report) {
         Ok(report) => report,
         Err(e) => {
             eprintln!("error: {e}");
@@ -370,8 +357,12 @@ pub fn run_cmd(args: &FunnelArgs) -> i32 {
     };
 
     if args.hash_only {
-        println!("{:016x}", verdict_hash(&report, s0_report.as_ref()));
+        println!("{:016x}", verdict_hash(&report));
         return 0;
+    }
+
+    if let Some(s0) = report.s0.as_ref() {
+        print!("{}", format_s0(s0));
     }
 
     let provenance = Provenance {
@@ -420,10 +411,7 @@ pub fn run_cmd(args: &FunnelArgs) -> i32 {
     print_report(&loaded, &report, &criteria, &days, series.events.len());
     println!("  registry       {}", registry.path().display());
     println!("  scorecard      {}", card.display());
-    println!(
-        "  determinism    {:016x}",
-        verdict_hash(&report, s0_report.as_ref())
-    );
+    println!("  determinism    {:016x}", verdict_hash(&report));
     print_footer(&loaded, &report);
 
     if report
@@ -501,8 +489,8 @@ fn print_report(
     n_bars: usize,
 ) {
     println!(
-        "  stages         {} — S0's signal triage and S3's battery are not in this build and a\n\
-         \x20                config declaring either is refused, not silently skipped",
+        "  stages         {} — declared S0 signal triage runs before trading evidence; S3's\n\
+         \x20                remaining battery is refused, not silently skipped",
         criteria
             .stages
             .iter()
@@ -633,33 +621,17 @@ fn control_gap(c: &ComboOutcome, which: usize) -> String {
 /// result. What is inside is the verdict, the stage that decided it, and every
 /// pooled statistic it was decided on — so a change that moves a verdict fails
 /// the gate and a change that only moves a timestamp does not.
-fn verdict_hash(report: &FunnelReport, s0: Option<&crucible_funnel::s0::S0Report>) -> u64 {
+fn verdict_hash(report: &FunnelReport) -> u64 {
     let mut h = crate::Fnv64::new();
     let i64_of = |n: usize| i64::try_from(n).unwrap_or(i64::MAX);
     // S0 first, because it runs first. Absent when the config declared no
     // `s0`, in which case nothing is written and the hash is unmoved — which
     // is what keeps every pre-S0 config's pinned gate valid (D-0085).
-    if let Some(s0) = s0 {
-        for c in &s0.combos {
-            h.write_i64(i64_of(c.combo_index));
-            h.write_i64(i64_of(c.scores));
-            h.write_i64(i64::from(c.passed));
-            hash_f64(&mut h, c.best_abs_ic);
-            for hz in &c.horizons {
-                h.write_i64(hz.horizon_ns);
-                h.write_i64(i64_of(hz.n_pairs));
-                h.write_i64(i64_of(hz.dropped));
-                hash_f64(&mut h, hz.ic);
-                for b in &hz.buckets {
-                    h.write_i64(i64_of(b.n));
-                    hash_f64(&mut h, Some(b.mean_return));
-                }
-                if let Some(iv) = hz.interval {
-                    hash_f64(&mut h, Some(iv.point));
-                    hash_f64(&mut h, Some(iv.lo));
-                    hash_f64(&mut h, Some(iv.hi));
-                }
-            }
+    if let Some(s0) = report.s0.as_ref() {
+        let encoded = s0.determinism_bytes();
+        h.write_i64(i64_of(encoded.len()));
+        for byte in encoded {
+            h.write_i64(i64::from(byte));
         }
     }
     for c in &report.combos {
@@ -739,34 +711,82 @@ fn print_footer(loaded: &LoadedConfig, report: &FunnelReport) {
     }
 }
 
-/// Prints the S0 evidence: what the score predicted, at what horizon, and
+fn format_s0_buckets(
+    buckets: &crucible_funnel::s0::Availability<crucible_funnel::s0::BucketSet>,
+) -> String {
+    use crucible_funnel::s0::Availability;
+
+    let mut text = String::new();
+    match buckets {
+        Availability::Available { value } => {
+            let _ = writeln!(
+                text,
+                "      bucket  score bounds                 n  mean forward return (fraction)  mean move (ticks)"
+            );
+            for (index, bucket) in value.as_slice().iter().enumerate() {
+                let _ = writeln!(
+                    text,
+                    "      {:>6}  [{:+.6}, {:+.6}]  {:>8}  {:+.9}                    {:+.6}",
+                    index + 1,
+                    bucket.score_lo,
+                    bucket.score_hi,
+                    bucket.n,
+                    bucket.mean_return,
+                    bucket.mean_move_ticks
+                );
+            }
+        }
+        Availability::Unavailable { reason } => {
+            let _ = writeln!(text, "      buckets UNAVAILABLE — {reason}");
+        }
+    }
+    text
+}
+
+/// Formats the S0 evidence: what the score predicted, at what horizon, and
 /// whether it cleared the bar declared before the run.
-fn print_s0(report: &crucible_funnel::s0::S0Report, min_abs_ic: f64) {
-    println!();
-    println!(
+fn format_s0(report: &crucible_funnel::s0::S0Report) -> String {
+    use crucible_funnel::s0::Availability;
+
+    let mut text = String::new();
+    if let Err(reason) = report.validate() {
+        let _ = writeln!(text, "S0 — UNAVAILABLE: invalid typed evidence ({reason})");
+        return text;
+    }
+    let Some(first) = report.combos.first() else {
+        let _ = writeln!(text, "S0 — UNAVAILABLE: no grid combos were measured");
+        return text;
+    };
+    let min_abs_ic = first.spec.min_abs_ic;
+    let _ = writeln!(text);
+    let _ = writeln!(
+        text,
         "S0 — signal triage. Score = `{}`. No orders, no fills, no equity curve:
             this stage asks only whether the score predicts the return that follows it.
             Pre-registered: |IC| >= {min_abs_ic:.4} at some declared horizon.",
-        report.score_slot
+        first.spec.score_slot
     );
     for c in &report.combos {
-        println!();
-        println!(
+        let _ = writeln!(text);
+        let _ = writeln!(
+            text,
             "  combo {:>3}  {:<34}  {} scores, warmup {}",
             c.combo_index, c.label, c.scores, c.warmup_bars
         );
-        println!(
+        let _ = writeln!(
+            text,
             "    {:>9}  {:>8}  {:>9}  {:>10}  {:>24}",
-            "horizon", "pairs", "dropped", "IC", "mean fwd return 95% CI"
+            "horizon", "pairs", "dropped", "IC", "UNCONDITIONAL mean return 95% CI"
         );
         for hz in &c.horizons {
             let minutes = hz.horizon_ns / 60_000_000_000;
             let ic = hz
                 .ic
+                .value()
                 .map_or_else(|| "     n/a".to_owned(), |v| format!("{v:+8.4}"));
-            let ci = hz.interval.map_or_else(
-                || "                 ABSENT".to_owned(),
-                |iv| {
+            let ci = match &hz.unconditional_mean_interval {
+                Availability::Unavailable { reason } => format!("ABSENT — {reason}"),
+                Availability::Available { value: iv } => {
                     format!(
                         "{:+.5}% [{:+.5}%, {:+.5}%]{}",
                         iv.point * 100.0,
@@ -774,34 +794,244 @@ fn print_s0(report: &crucible_funnel::s0::S0Report, min_abs_ic: f64) {
                         iv.hi * 100.0,
                         if iv.excludes_zero() { " *" } else { "" }
                     )
-                },
-            );
-            println!(
+                }
+            };
+            let _ = writeln!(
+                text,
                 "    {:>7}m  {:>8}  {:>9}  {:>10}  {}",
-                minutes, hz.n_pairs, hz.dropped, ic, ci
+                minutes,
+                hz.n_pairs,
+                hz.dropped_no_partner + hz.dropped_invalid_price,
+                ic,
+                ci
             );
+            text.push_str(&format_s0_buckets(&hz.buckets));
         }
-        match (c.best_abs_ic, c.cleared_at_ns) {
-            (Some(b), Some(h)) => println!(
-                "    best |IC| {b:.4}; cleared at {}m (|IC| >= {min_abs_ic:.4} AND its interval                  excludes zero) — PASS",
-                h / 60_000_000_000
-            ),
-            (Some(b), None) => {
-                println!("    best |IC| {b:.4}, but no horizon clears BOTH halves — KILL at s0.");
-                println!(
+        match c.criterion() {
+            crucible_funnel::s0::S0CriterionOutcome::Passed { horizon_ns: h } => {
+                let b = c.best_abs_ic().expect("a passed criterion has an IC");
+                let _ = writeln!(
+                    text,
+                    "    best |IC| {b:.4}; cleared at {}m (|IC| >= {min_abs_ic:.4} AND its                  UNCONDITIONAL mean interval excludes zero) — PASS",
+                    h / 60_000_000_000
+                );
+            }
+            crucible_funnel::s0::S0CriterionOutcome::Failed => {
+                let b = c
+                    .best_abs_ic()
+                    .expect("a measured criterion failure has an IC");
+                let _ = writeln!(
+                    text,
+                    "    best |IC| {b:.4}, but no horizon clears BOTH |IC| and its UNCONDITIONAL mean interval — KILL at s0."
+                );
+                let _ = writeln!(
+                    text,
                     "      Size without significance is what a large enough sample of noise                      gives for free."
                 );
             }
-            (None, _) => println!(
-                "    no IC could be measured — KILL at s0 (an absent measurement is not a cleared                  bar)"
-            ),
+            crucible_funnel::s0::S0CriterionOutcome::Unavailable { reason } => {
+                let _ = writeln!(
+                    text,
+                    "    required S0 evidence UNAVAILABLE ({reason}) — criterion UNEVALUATED; the funnel cannot clear an absent bar"
+                );
+            }
         }
     }
-    println!();
-    println!(
+    let _ = writeln!(text);
+    let _ = writeln!(
+        text,
         "  {} of {} combo(s) cleared S0. A forward return is measurement-space only: it is
            joined to a score at the score's avail_ts and never reaches anything signal-side.",
-        report.survivors,
+        report.survivors(),
         report.combos.len()
     );
+    match report.evidence_scope {
+        crucible_funnel::s0::S0EvidenceScope::EqualCountScoreBuckets => {
+            let _ = writeln!(
+                text,
+                "  Capability limitation (not an H-008 run result): original H-008 Gate 0b remains UNEVALUATED — equal-count score buckets are not the registered population of closes beyond their Bollinger band."
+            );
+        }
+    }
+    text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_s0, format_s0_buckets};
+    use crucible_funnel::s0::{
+        Availability, Bucket, BucketSet, HorizonEvidence, Interval, S0ComboReport, S0EvidenceScope,
+        S0Report, S0Spec, UnavailableReason,
+    };
+
+    const MIN: i64 = 60_000_000_000;
+
+    fn five_bucket_set() -> BucketSet {
+        let ticks = [2.0, 1.0, 0.0, -1.0, -2.0];
+        let returns = [3.0, 1.0, 0.0, -1.0, -3.0];
+        BucketSet::from_nonempty(
+            ticks
+                .iter()
+                .zip(returns)
+                .enumerate()
+                .map(|(index, (&mean_move_ticks, mean_return))| {
+                    #[expect(clippy::cast_precision_loss, reason = "five hand-derived buckets")]
+                    let score_lo = index as f64 * 2.0 - 5.0;
+                    Bucket {
+                        score_lo,
+                        score_hi: score_lo + 1.0,
+                        n: 1,
+                        mean_return: mean_return / 1024.0,
+                        mean_move_ticks,
+                    }
+                })
+                .collect(),
+        )
+        .expect("valid five-bucket fixture")
+    }
+
+    fn ordered_report() -> S0Report {
+        let declared = [10 * MIN, MIN, 5 * MIN];
+        let horizons = declared
+            .iter()
+            .map(|&horizon_ns| HorizonEvidence {
+                horizon_ns,
+                n_pairs: 5,
+                dropped_no_partner: 0,
+                dropped_invalid_price: 0,
+                ic: Availability::Available { value: -0.8 },
+                buckets: Availability::Available {
+                    value: five_bucket_set(),
+                },
+                unconditional_mean_interval: Availability::Available {
+                    value: Interval {
+                        point: 0.0,
+                        lo: -0.01,
+                        hi: 0.01,
+                        draws: 200,
+                    },
+                },
+            })
+            .collect();
+        S0Report {
+            evidence_scope: S0EvidenceScope::EqualCountScoreBuckets,
+            combos: vec![S0ComboReport {
+                score_identity: "zscore close period=20".to_owned(),
+                tick_size_nanopoints: 250_000_000,
+                spec: S0Spec {
+                    score_slot: "z".to_owned(),
+                    horizons_ns: declared.to_vec(),
+                    buckets: 5,
+                    bootstrap_draws: 200,
+                    min_abs_ic: 0.05,
+                },
+                combo_index: 0,
+                label: "z(period=20 source=close)".to_owned(),
+                warmup_bars: 20,
+                scores: 5,
+                horizons,
+            }],
+        }
+    }
+
+    #[test]
+    fn stdout_bucket_absence_is_named_not_empty_or_zero() {
+        let text = format_s0_buckets(&Availability::Unavailable {
+            reason: UnavailableReason::TooFewObservations {
+                observed: 3,
+                required: 5,
+            },
+        });
+        assert!(text.contains("buckets UNAVAILABLE"));
+        assert!(text.contains("observed: 3"));
+        assert!(text.contains("required: 5"));
+        assert!(!text.contains("mean move (ticks)"));
+    }
+
+    #[test]
+    fn stdout_buckets_keep_low_score_first_and_tick_polarity() {
+        let buckets = BucketSet::from_nonempty(vec![
+            Bucket {
+                score_lo: -2.0,
+                score_hi: -1.0,
+                n: 2,
+                mean_return: 3.0 / 1024.0,
+                mean_move_ticks: 2.0,
+            },
+            Bucket {
+                score_lo: 1.0,
+                score_hi: 2.0,
+                n: 2,
+                mean_return: -3.0 / 1024.0,
+                mean_move_ticks: -2.0,
+            },
+        ])
+        .expect("nonempty buckets");
+        let text = format_s0_buckets(&Availability::Available { value: buckets });
+        let low = text.find("[-2.000000").expect("low bucket");
+        let high = text.find("[+1.000000").expect("high bucket");
+        assert!(low < high);
+        assert!(text.contains("+0.002929688                    +2.000000"));
+        assert!(text.contains("-0.002929688                    -2.000000"));
+    }
+
+    #[test]
+    fn stdout_renders_every_bucket_for_every_horizon_in_declaration_order() {
+        let text = format_s0(&ordered_report());
+        let ten = text.find("     10m").expect("10m horizon");
+        let one = text.find("      1m").expect("1m horizon");
+        let five = text.find("      5m").expect("5m horizon");
+        assert!(ten < one && one < five, "{text}");
+        assert_eq!(text.matches("bucket  score bounds").count(), 3, "{text}");
+        for bounds in [
+            "[-5.000000, -4.000000]",
+            "[-3.000000, -2.000000]",
+            "[-1.000000, +0.000000]",
+            "[+1.000000, +2.000000]",
+            "[+3.000000, +4.000000]",
+        ] {
+            assert_eq!(text.matches(bounds).count(), 3, "missing {bounds}: {text}");
+        }
+        assert!(text.contains("UNCONDITIONAL mean interval"), "{text}");
+        assert!(text.contains("not an H-008 run result"), "{text}");
+    }
+
+    #[test]
+    fn stdout_does_not_present_the_no_separation_converse_as_an_edge() {
+        let mut report = ordered_report();
+        for horizon in &mut report.combos[0].horizons {
+            horizon.ic = Availability::Unavailable {
+                reason: UnavailableReason::ConstantForwardReturn,
+            };
+            horizon.unconditional_mean_interval = Availability::Available {
+                value: Interval {
+                    point: 1.0 / 256.0,
+                    lo: 0.003,
+                    hi: 0.005,
+                    draws: 200,
+                },
+            };
+            horizon.buckets = Availability::Available {
+                value: BucketSet::from_nonempty(
+                    (0..5)
+                        .map(|index| {
+                            let score_lo = f64::from(index) * 2.0 - 5.0;
+                            Bucket {
+                                score_lo,
+                                score_hi: score_lo + 1.0,
+                                n: 1,
+                                mean_return: 1.0 / 256.0,
+                                mean_move_ticks: 3.0,
+                            }
+                        })
+                        .collect(),
+                )
+                .expect("converse buckets"),
+            };
+        }
+        let text = format_s0(&report);
+        assert_eq!(text.matches("+0.003906250").count(), 15, "{text}");
+        assert!(text.contains("criterion UNEVALUATED"), "{text}");
+        assert!(!text.contains("— PASS"), "{text}");
+    }
 }

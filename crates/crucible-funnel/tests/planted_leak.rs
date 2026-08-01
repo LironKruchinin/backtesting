@@ -334,9 +334,8 @@ fn the_planted_leak_is_caught_by_the_permutation_null() {
         buy_and_hold_return_pct: Some(bnh.total_return_pct),
         // S0 did not run in this fixture: the leak is an equity-curve
         // phenomenon and this test is about the S1/S2 gates seeing it.
-        s0_best_abs_ic: None,
     };
-    let assessment = assess(&criteria, &evidence);
+    let assessment = assess(&criteria, &evidence, None);
 
     assert_eq!(
         assessment.verdict,
@@ -415,12 +414,11 @@ fn the_same_criteria_kill_an_honest_strategy_on_the_same_data() {
         sharpe_at_kill_level: oos.sharpe_naive,
         random_entry_return_pct: Some(0.0),
         buy_and_hold_return_pct: Some(0.0),
-        s0_best_abs_ic: None,
         // The honest strategy is judged by the same criteria, so it needs a
         // p-value too; it is killed at S2 long before S3 is reached.
         permutation_p_value: Some(0.5),
     };
-    let assessment = assess(&criteria(), &evidence);
+    let assessment = assess(&criteria(), &evidence, None);
     assert_eq!(
         assessment.verdict,
         Verdict::Kill,

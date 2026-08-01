@@ -628,6 +628,30 @@ fn s0_runs_end_to_end_and_kills_the_null_harness_at_s0() {
     assert_eq!(code(&out), 5, "every combo dies: {}", stderr(&out));
     let text = stdout(&out);
 
+    for required in [
+        "bucket  score bounds",
+        "mean forward return (fraction)",
+        "mean move (ticks)",
+        "UNCONDITIONAL mean return",
+        "not an H-008 run result",
+        "original H-008 Gate 0b remains UNEVALUATED",
+    ] {
+        assert!(text.contains(required), "stdout missing {required}: {text}");
+    }
+    assert_eq!(
+        text.matches("bucket  score bounds").count(),
+        24,
+        "six combos times four declared horizons must each render buckets"
+    );
+    let bucket_rows = text
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            (1..=5).any(|index| trimmed.starts_with(&format!("{index}  [")))
+        })
+        .count();
+    assert_eq!(bucket_rows, 120, "every one of 24 tables needs five rows");
+
     assert!(text.contains("S0 — signal triage"), "{text}");
     assert!(text.contains("KILL at s0"), "{text}");
     assert!(
@@ -644,4 +668,31 @@ fn s0_runs_end_to_end_and_kills_the_null_harness_at_s0() {
     // And S0 charged its trials into the real registry, like any other stage.
     let lines = std::fs::read_to_string(out_dir.join("registry.jsonl")).expect("a registry");
     assert!(lines.contains(r#""kind":"run""#), "{lines}");
+    let card = std::fs::read_dir(&out_dir)
+        .expect("results dir")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "html"))
+        .expect("S0 scorecard");
+    let html = std::fs::read_to_string(card).expect("read S0 scorecard");
+    for required in [
+        "mean forward return (fraction)",
+        "mean move (ticks)",
+        "UNCONDITIONAL mean forward return",
+        "not an H-008 run result",
+        "original H-008 Gate 0b remains UNEVALUATED",
+        "tick 250000000 nanopoints",
+    ] {
+        assert!(html.contains(required), "scorecard missing {required}");
+    }
+    let s0_start = html.find("S0 — signal triage").expect("S0 section");
+    let verdicts = html[s0_start..]
+        .find("<h2>Verdicts</h2>")
+        .expect("verdicts")
+        + s0_start;
+    assert_eq!(
+        html[s0_start..verdicts].matches("<tr><td>").count(),
+        120,
+        "every one of 24 scorecard bucket tables needs five rows"
+    );
 }

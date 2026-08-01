@@ -3449,3 +3449,67 @@ propose a superseding entry — don't silently diverge.
   rule lines with `<feature 1>` placeholders), and a third test asserts a
   fragment carries no `[meta]`, `[funnel]`, `[universe]` or `[run]` — so a real
   config cannot opt out of being checked by deleting one line.
+- **D-0102** (2026-08-01) -- **S0 has one typed evidence
+  product, and every consumer renders that product without silently replacing
+  conditional evidence with unconditional drift.** The forward join retains
+  every tradeable bar while making the score optional: an entry needs a score,
+  but its horizon partner does not. Each retained pair owns its entry and exit
+  prices, so a bucket's mean tick move is the mean of each observation's
+  `(exit - entry) / contract_tick`; multiplying a fractional aggregate by a
+  representative price is forbidden.
+  **The result shape makes absence visible.** Horizons remain in configured
+  order, and `BucketSet` cannot represent an empty, non-finite, zero-count,
+  overlapping, or reversed available result. Every missing IC, interval, or
+  bucket set carries a closed typed reason. A missing required interval remains
+  UNEVALUATED rather than becoming a measured failure. Too few observations
+  therefore render as UNAVAILABLE in stdout and HTML instead of an empty table
+  or a fabricated zero. Duplicate availability timestamps are refused because
+  neither same-time close can honestly be called the forward observation.
+  **One owner, four consumers.** `FunnelReport` owns the `S0Report`; assessment,
+  stdout, the scorecard, and the determinism encoding borrow that same typed
+  value. The former pass-only side map is deleted, so a measured S0 criterion
+  failure cannot be reconstructed as absent IC. The full score identity,
+  declared S0 specification, pair/drop counts, IC, unconditional bootstrap
+  interval, bucket bounds/counts/returns/ticks, criterion outcome, and absence
+  reasons enter the canonical evidence bytes. The criterion is derived from
+  the evidence in memory, serialized with it, and rejected on read if the two
+  contradict. Before any trading run is claimed, the report must match the
+  exact grid cardinality/order/index/label, S0 declaration, and contract tick.
+  **H-008 Gate 0b remains UNEVALUATED.** The typed evidence scope says this is
+  a global capability limitation, not an H-008 run result. Its population is closes
+  beyond the Bollinger band. Equal-count z-score buckets are not proved to be
+  that population. The bootstrap interval remains useful but is labelled
+  UNCONDITIONAL everywhere and cannot stand in for a conditional bucket or for
+  Gate 0b.
+  **Controls were written before the output was trusted.** The hand-derived
+  separable fixture has low-score observations followed by +2-tick moves,
+  high-score observations followed by -2-tick moves, zero unconditional drift,
+  and IC -1. Its unequal entry prices also distinguish the required 2.0-tick
+  observation mean from the prohibited 2.25-tick aggregate conversion. The
+  converse has common drift but no separation and cannot clear the criterion;
+  a 3-observation/5-bucket case is explicitly unavailable; and a target bar
+  without a score still supplies the exit price. Presentation controls use
+  five distinct buckets at three deliberately non-sorted horizons and assert
+  every one of the 15 rows in both stdout and HTML. The converse is rendered
+  through both consumers and remains explicitly UNEVALUATED, never an edge.
+  **Five deliberate mutations were watched failing, then restored byte-exactly:**
+  omitting HTML bucket rendering was caught by
+  `s0_scorecard_renders_declared_horizon_and_low_score_bucket_order`; replacing
+  observation tick moves with aggregate conversion, reversing bucket order,
+  and substituting the unconditional mean for bucket evidence were each caught
+  by `separable_tails_are_visible_while_unconditional_drift_is_zero`; making
+  constant-return data report a perfect IC was caught by
+  `common_unconditional_drift_without_tail_separation_does_not_fire`.
+  `scorecard.rs` returned to SHA-256
+  `9668f80d41e2fe7e1837b0e7004f18c28b30ffc0a6d4b39d6846ead0ddb87b53`;
+  `s0.rs` returned after every mutation to
+  `4848902204bfdd8a5751bee5ee358d301fb3483cc561012f9800bed0608d651d`.
+  **Open §9 identity blocker.** The existing `config_hash` binds the combo
+  grammar, not the S0 horizons/buckets/draws/threshold, contract tick, or data
+  window, and `run_s0` currently recomputes after an `AlreadyDone` claim. This
+  entry does not invent a migration for historical run/trial identity. No S0
+  writer may deploy until an explicit identity ruling makes distinct
+  declarations incapable of aliasing one registry key.
+  **This does not claim persistence.** Successful production S0 measurement
+  still writes `metrics: null`. A reader-only persisted shape must deploy and
+  merge before any writer emits it.

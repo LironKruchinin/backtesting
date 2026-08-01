@@ -40,6 +40,7 @@ use std::fmt::Write as _;
 use crucible_engine::WorstDayDistribution;
 
 use crate::funnel::{ComboOutcome, FunnelReport};
+use crate::s0::{Availability, BucketSet, HorizonEvidence};
 use crate::stages::{Criteria, Verdict};
 use crate::stats::deflated::TrialComposition;
 
@@ -143,6 +144,7 @@ pub fn render(
     h.push_str(HEAD);
     write_header(&mut h, report, provenance);
     write_honesty_box(&mut h, report, criteria, provenance);
+    write_s0(&mut h, report);
     write_verdicts(&mut h, report);
     for combo in &report.combos {
         write_combo(&mut h, combo, criteria);
@@ -155,7 +157,7 @@ pub fn render(
 /// The rule the module docs describe, as code.
 fn check_honesty_box(report: &FunnelReport, provenance: &Provenance) -> Result<(), ScorecardError> {
     let mut missing = Vec::new();
-    let required: [(&'static str, bool); 9] = [
+    let required: [(&'static str, bool); 10] = [
         ("meta.name", provenance.idea_name.trim().is_empty()),
         (
             "meta.hypothesis_family",
@@ -176,6 +178,10 @@ fn check_honesty_box(report: &FunnelReport, provenance: &Provenance) -> Result<(
                 .combos
                 .iter()
                 .any(|c| c.controls.iter().any(|k| k.name.trim().is_empty())),
+        ),
+        (
+            "valid S0 evidence",
+            report.s0.as_ref().is_some_and(|s0| s0.validate().is_err()),
         ),
     ];
     for (name, is_missing) in required {
@@ -323,6 +329,122 @@ fn write_honesty_box(h: &mut String, report: &FunnelReport, criteria: &Criteria,
     );
 }
 
+fn write_s0_buckets(h: &mut String, buckets: &Availability<BucketSet>) {
+    match buckets {
+        Availability::Available { value } => {
+            h.push_str(
+                "<div class='wrap'><table><thead><tr><th>bucket</th><th>score low</th><th>score high</th><th>observations</th><th>mean forward return (fraction)</th><th>mean move (ticks)</th></tr></thead><tbody>",
+            );
+            for (index, bucket) in value.as_slice().iter().enumerate() {
+                let _ = write!(
+                    h,
+                    "<tr><td>{}</td><td>{:+.6}</td><td>{:+.6}</td><td>{}</td><td>{:+.9}</td><td>{:+.6}</td></tr>",
+                    index + 1,
+                    bucket.score_lo,
+                    bucket.score_hi,
+                    bucket.n,
+                    bucket.mean_return,
+                    bucket.mean_move_ticks,
+                );
+            }
+            h.push_str("</tbody></table></div>");
+        }
+        Availability::Unavailable { reason } => {
+            let _ = write!(
+                h,
+                "<p><strong>Buckets: UNAVAILABLE</strong> — {}.</p>",
+                esc(&reason.to_string())
+            );
+        }
+    }
+}
+
+fn write_s0_horizon(h: &mut String, horizon: &HorizonEvidence) {
+    let minutes = horizon.horizon_ns / 60_000_000_000;
+    let ic = match &horizon.ic {
+        Availability::Available { value } => format!("{value:+.6}"),
+        Availability::Unavailable { reason } => format!("UNAVAILABLE — {reason}"),
+    };
+    let _ = write!(
+        h,
+        "<h4>{minutes}m horizon</h4><p>pairs: {}; dropped without partner: {}; dropped invalid price: {}; IC: <span class='mono'>{}</span>.</p>",
+        horizon.n_pairs,
+        horizon.dropped_no_partner,
+        horizon.dropped_invalid_price,
+        esc(&ic),
+    );
+    match &horizon.unconditional_mean_interval {
+        Availability::Available { value } => {
+            let _ = write!(
+                h,
+                "<p><strong>UNCONDITIONAL mean forward return</strong>: {:+.9}; 95% interval [{:+.9}, {:+.9}], {} draws. This is not bucket-conditional evidence.</p>",
+                value.point, value.lo, value.hi, value.draws,
+            );
+        }
+        Availability::Unavailable { reason } => {
+            let _ = write!(
+                h,
+                "<p><strong>UNCONDITIONAL mean forward return: UNAVAILABLE</strong> — {}.</p>",
+                esc(&reason.to_string()),
+            );
+        }
+    }
+    write_s0_buckets(h, &horizon.buckets);
+}
+
+fn write_s0_criterion(h: &mut String, combo: &crate::s0::S0ComboReport) {
+    match combo.criterion() {
+        crate::s0::S0CriterionOutcome::Passed { horizon_ns } => {
+            let _ = write!(
+                h,
+                "<p><strong>Generic S0 criterion: PASS</strong> at {horizon_ns}ns: |IC| and its UNCONDITIONAL mean interval both cleared.</p>"
+            );
+        }
+        crate::s0::S0CriterionOutcome::Failed => {
+            h.push_str("<p><strong>Generic S0 criterion: FAILED</strong> — every required measurement exists, but no horizon cleared both |IC| and its UNCONDITIONAL mean interval.</p>");
+        }
+        crate::s0::S0CriterionOutcome::Unavailable { reason } => {
+            let _ = write!(
+                h,
+                "<p><strong>Generic S0 criterion: UNAVAILABLE</strong> — {}.</p>",
+                esc(&reason.to_string())
+            );
+        }
+    }
+}
+
+fn write_s0(h: &mut String, report: &FunnelReport) {
+    let Some(s0) = report.s0.as_ref() else {
+        return;
+    };
+    h.push_str("<section><h2>S0 — signal triage</h2>");
+    h.push_str(
+        "<p class='dim'>Every declared horizon and every equal-count score bucket is shown below. Bucket means are conditional on bucket membership; the bootstrap interval is separately labelled UNCONDITIONAL.</p>",
+    );
+    match s0.evidence_scope {
+        crate::s0::S0EvidenceScope::EqualCountScoreBuckets => h.push_str(
+            "<p><strong>Capability limitation (not an H-008 run result): original H-008 Gate 0b remains UNEVALUATED.</strong> Equal-count score buckets are not the registered population of closes beyond their Bollinger band. Visible buckets do not prove equivalence.</p>",
+        ),
+    }
+    for combo in &s0.combos {
+        let _ = write!(
+            h,
+            "<h3>Combo {} — <span class='mono'>{}</span></h3><p class='dim'>score identity: <span class='mono'>{}</span>; {} scores after {} warmup bars; tick {} nanopoints.</p>",
+            combo.combo_index,
+            esc(&combo.label),
+            esc(&combo.score_identity),
+            combo.scores,
+            combo.warmup_bars,
+            combo.tick_size_nanopoints,
+        );
+        for horizon in &combo.horizons {
+            write_s0_horizon(h, horizon);
+        }
+        write_s0_criterion(h, combo);
+    }
+    h.push_str("</section>");
+}
+
 fn verdict_class(v: Verdict) -> &'static str {
     match v {
         Verdict::Kill => "v-kill",
@@ -338,8 +460,8 @@ fn write_verdicts(h: &mut String, report: &FunnelReport) {
          selection step wearing a report's clothes.</p><p class=\"dim\"><b>decided at</b>: \
          <code>admission</code> is not a gate — it is the pre-trial sample-adequacy check, and a \
          combo killed there was never judged on its merits at all, only found too small to judge. \
-         <code>s1</code> and <code>s2</code> are the gates this build runs; a combo cannot be \
-         decided at <code>s0</code> or <code>s3</code>, which are refused at load.</p>\
+         <code>s0</code>, <code>s1</code> and <code>s2</code> are the gates this build runs; \
+         <code>s3</code> remains refused at load.</p>\
          <div class=\"wrap\"><table><thead><tr>\
          <th>combo</th><th>parameters</th><th>verdict</th><th>decided at</th><th>OOS return</th>\
          <th>OOS Sharpe</th><th>trades</th><th>sessions</th></tr></thead><tbody>",
@@ -725,6 +847,9 @@ fn write_gaps(h: &mut String, criteria: &Criteria) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::s0::{
+        Bucket, Interval, S0ComboReport, S0EvidenceScope, S0Report, S0Spec, UnavailableReason,
+    };
 
     fn provenance() -> Provenance {
         Provenance {
@@ -745,12 +870,78 @@ mod tests {
 
     fn empty_report() -> FunnelReport {
         FunnelReport {
+            s0: None,
             combos: vec![],
             trials_before: 0,
             trials_after: 3,
             runs_claimed: 3,
             runs_already_done: 0,
             runs_retried: 0,
+        }
+    }
+
+    fn bucket_set() -> BucketSet {
+        let ticks = [2.0, 1.0, 0.0, -1.0, -2.0];
+        let returns = [3.0, 1.0, 0.0, -1.0, -3.0];
+        BucketSet::from_nonempty(
+            ticks
+                .iter()
+                .zip(returns)
+                .enumerate()
+                .map(|(index, (&mean_move_ticks, mean_return))| {
+                    #[expect(clippy::cast_precision_loss, reason = "five hand-derived buckets")]
+                    let score_lo = index as f64 * 2.0 - 5.0;
+                    Bucket {
+                        score_lo,
+                        score_hi: score_lo + 1.0,
+                        n: 1,
+                        mean_return: mean_return / 1024.0,
+                        mean_move_ticks,
+                    }
+                })
+                .collect(),
+        )
+        .expect("nonempty fixture")
+    }
+
+    fn horizon(horizon_ns: i64, buckets: Availability<BucketSet>) -> HorizonEvidence {
+        HorizonEvidence {
+            horizon_ns,
+            n_pairs: 5,
+            dropped_no_partner: 0,
+            dropped_invalid_price: 0,
+            ic: Availability::Available { value: -1.0 },
+            buckets,
+            unconditional_mean_interval: Availability::Available {
+                value: Interval {
+                    point: 0.0,
+                    lo: -0.01,
+                    hi: 0.01,
+                    draws: 200,
+                },
+            },
+        }
+    }
+
+    fn s0_report(horizons: Vec<HorizonEvidence>) -> S0Report {
+        S0Report {
+            evidence_scope: S0EvidenceScope::EqualCountScoreBuckets,
+            combos: vec![S0ComboReport {
+                score_identity: "zscore close period=20 field=value".to_owned(),
+                tick_size_nanopoints: 250_000_000,
+                spec: S0Spec {
+                    score_slot: "z".to_owned(),
+                    horizons_ns: horizons.iter().map(|h| h.horizon_ns).collect(),
+                    buckets: 5,
+                    bootstrap_draws: 200,
+                    min_abs_ic: 0.05,
+                },
+                combo_index: 0,
+                label: "z(period=20 source=close)".to_owned(),
+                warmup_bars: 20,
+                scores: 5,
+                horizons,
+            }],
         }
     }
 
@@ -814,6 +1005,114 @@ mod tests {
         ] {
             assert!(html.contains(required), "missing {required}");
         }
+    }
+
+    #[test]
+    fn s0_scorecard_renders_declared_horizon_and_low_score_bucket_order() {
+        const MINUTE: i64 = 60_000_000_000;
+        let mut report = empty_report();
+        let available = || Availability::Available {
+            value: bucket_set(),
+        };
+        report.s0 = Some(s0_report(vec![
+            horizon(10 * MINUTE, available()),
+            horizon(MINUTE, available()),
+            horizon(5 * MINUTE, available()),
+        ]));
+        let html = render(&report, &Criteria::for_tests(), &provenance()).expect("renders");
+        assert!(html.contains("S0 — signal triage"));
+        let h10 = html.find("10m horizon").expect("10m");
+        let h1 = html.find("1m horizon").expect("1m");
+        let h5 = html.find("5m horizon").expect("5m");
+        assert!(h10 < h1 && h1 < h5, "declared horizon order changed");
+        let low = html.find("<td>-5.000000</td>").expect("low bucket");
+        let high = html.find("<td>+3.000000</td>").expect("high bucket");
+        assert!(low < high, "buckets must be lowest-score first");
+        for bound in [
+            "<tr><td>1</td><td>-5.000000</td>",
+            "<tr><td>2</td><td>-3.000000</td>",
+            "<tr><td>3</td><td>-1.000000</td>",
+            "<tr><td>4</td><td>+1.000000</td>",
+            "<tr><td>5</td><td>+3.000000</td>",
+        ] {
+            assert_eq!(html.matches(bound).count(), 3, "missing {bound}");
+        }
+        for required in [
+            "<td>1</td><td>+0.002929688</td><td>+2.000000</td>",
+            "<td>1</td><td>-0.002929688</td><td>-2.000000</td>",
+            "IC: <span class='mono'>-1.000000</span>",
+            "95% interval [-0.010000000, +0.010000000], 200 draws",
+            "UNCONDITIONAL mean forward return",
+            "This is not bucket-conditional evidence",
+            "Generic S0 criterion: FAILED",
+            "not an H-008 run result",
+            "original H-008 Gate 0b remains UNEVALUATED",
+        ] {
+            assert!(html.contains(required), "missing {required}");
+        }
+    }
+
+    #[test]
+    fn unavailable_s0_buckets_render_the_exact_reason() {
+        let mut html = String::new();
+        write_s0_buckets(
+            &mut html,
+            &Availability::Unavailable {
+                reason: UnavailableReason::TooFewObservations {
+                    observed: 3,
+                    required: 5,
+                },
+            },
+        );
+        assert!(html.contains("Buckets: UNAVAILABLE"));
+        assert!(html.contains("observed: 3"));
+        assert!(html.contains("required: 5"));
+        assert!(!html.contains("<tbody>"));
+    }
+
+    #[test]
+    fn s0_scorecard_does_not_present_the_no_separation_converse_as_an_edge() {
+        const MINUTE: i64 = 60_000_000_000;
+        let mut converse = horizon(
+            MINUTE,
+            Availability::Available {
+                value: bucket_set(),
+            },
+        );
+        converse.ic = Availability::Unavailable {
+            reason: UnavailableReason::ConstantForwardReturn,
+        };
+        converse.unconditional_mean_interval = Availability::Available {
+            value: Interval {
+                point: 1.0 / 256.0,
+                lo: 0.003,
+                hi: 0.005,
+                draws: 200,
+            },
+        };
+        converse.buckets = Availability::Available {
+            value: BucketSet::from_nonempty(
+                (0..5)
+                    .map(|index| {
+                        let score_lo = f64::from(index) * 2.0 - 5.0;
+                        Bucket {
+                            score_lo,
+                            score_hi: score_lo + 1.0,
+                            n: 1,
+                            mean_return: 1.0 / 256.0,
+                            mean_move_ticks: 3.0,
+                        }
+                    })
+                    .collect(),
+            )
+            .expect("converse buckets"),
+        };
+        let mut report = empty_report();
+        report.s0 = Some(s0_report(vec![converse]));
+        let html = render(&report, &Criteria::for_tests(), &provenance()).expect("renders");
+        assert_eq!(html.matches("+0.003906250").count(), 6, "{html}");
+        assert!(html.contains("Generic S0 criterion: UNAVAILABLE"), "{html}");
+        assert!(!html.contains("Generic S0 criterion: PASS"), "{html}");
     }
 
     /// A missing manifest list is legal for a generated series and must say

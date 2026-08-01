@@ -64,8 +64,9 @@
 
 use rand_chacha::ChaCha8Rng;
 use rand_chacha::rand_core::{RngCore, SeedableRng};
+use serde::{Deserialize, Serialize};
 
-/// One scored bar: what a signal said, and when that could have been known.
+/// One market bar on S0's price timeline, with an optional score.
 ///
 /// `price_points` is the **tradeable** close in points, not the signal-space
 /// one. The two coincide on every outright contract (`signal_offset` is zero —
@@ -79,19 +80,26 @@ pub struct ScoredBar {
     /// The trading day this bar belongs to, supplied by the caller as an
     /// `&[i64]` key — the D-0071 device, so the funnel never derives a day.
     pub session_key: i64,
-    /// The signal's continuous reading on this bar.
-    pub score: f64,
+    /// The signal's continuous reading, absent while the scorer has no
+    /// opinion. The bar remains in the price timeline either way.
+    pub score: Option<f64>,
     /// The tradeable close, in points.
     pub price_points: f64,
 }
 
 /// One score paired with the return that followed it.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Pair {
     /// The score, known at `avail_ts`.
     pub score: f64,
     /// The realized return over the horizon, as a fraction.
     pub fwd_return: f64,
+    /// Tradeable entry close, in points. Retained so ticks are computed for
+    /// this observation rather than reconstructed from an aggregate return.
+    pub entry_price_points: f64,
+    /// Tradeable exit close, in points. See [`Self::entry_price_points`].
+    pub exit_price_points: f64,
     /// The session the *score* belongs to — the bootstrap's block key.
     pub session_key: i64,
 }
@@ -110,23 +118,23 @@ pub struct JoinReport {
 
 /// Joins scores to the returns that followed them, `horizon_ns` later.
 ///
-/// `scored` must be in ascending `avail_ts` order — the order a [`Feed`] yields
-/// and the order the engine replays. The partner of a score at `t` is the last
-/// bar at or before `t + horizon_ns`, and must be strictly later than the scored
-/// bar.
+/// `scored` must contain every bar in strictly ascending `avail_ts` order — the order a
+/// [`Feed`] yields and the order the engine replays. A bar without a score is
+/// not an entry observation, but remains eligible as a tradeable exit. The
+/// partner of a score at `t` is the last bar at or before `t + horizon_ns`, and
+/// must be strictly later than the score-bearing bar.
 ///
 /// # Panics
-/// Panics if `scored` is not sorted by `avail_ts`, because an unsorted series
-/// silently produces a join that is neither forward nor backward, and a wrong
-/// number here is indistinguishable from a right one.
+/// Panics if `scored` is not strictly ordered by `avail_ts`. Duplicate
+/// availability timestamps cannot establish which close is forward.
 ///
 /// [`Feed`]: crucible_core::Feed
 #[must_use]
 pub fn join(scored: &[ScoredBar], horizon_ns: i64) -> JoinReport {
     assert!(
-        scored.windows(2).all(|w| w[0].avail_ts <= w[1].avail_ts),
-        "INVARIANT: S0 joins an availability-ordered series; \
-         an unsorted one produces a join that is neither forward nor backward"
+        scored.windows(2).all(|w| w[0].avail_ts < w[1].avail_ts),
+        "INVARIANT: S0 joins a strictly availability-ordered series; \
+         duplicate or decreasing timestamps cannot define a forward return"
     );
     assert!(
         horizon_ns > 0,
@@ -155,6 +163,9 @@ pub fn join(scored: &[ScoredBar], horizon_ns: i64) -> JoinReport {
     let mut j = 0usize;
 
     for (i, s) in scored.iter().enumerate() {
+        let Some(score) = s.score else {
+            continue;
+        };
         let target = s.avail_ts.saturating_add(horizon_ns);
         if target > series_end {
             // The window runs off the end of the data: we cannot tell "nothing
@@ -185,8 +196,10 @@ pub fn join(scored: &[ScoredBar], horizon_ns: i64) -> JoinReport {
             continue;
         }
         pairs.push(Pair {
-            score: s.score,
+            score,
             fwd_return: exit / s.price_points - 1.0,
+            entry_price_points: s.price_points,
+            exit_price_points: exit,
             session_key: s.session_key,
         });
     }
@@ -279,8 +292,44 @@ pub fn information_coefficient(pairs: &[Pair]) -> Option<f64> {
     pearson(&ranks(&scores), &ranks(&rets))
 }
 
+fn information_coefficient_evidence(pairs: &[Pair]) -> Availability<f64> {
+    if pairs.len() < 2 {
+        return Availability::Unavailable {
+            reason: UnavailableReason::TooFewObservations {
+                observed: pairs.len(),
+                required: 2,
+            },
+        };
+    }
+    if pairs
+        .iter()
+        .any(|p| !p.score.is_finite() || !p.fwd_return.is_finite())
+    {
+        return Availability::Unavailable {
+            reason: UnavailableReason::NonFiniteObservation,
+        };
+    }
+    if pairs.iter().all(|p| p.score == pairs[0].score) {
+        return Availability::Unavailable {
+            reason: UnavailableReason::ConstantScore,
+        };
+    }
+    if pairs.iter().all(|p| p.fwd_return == pairs[0].fwd_return) {
+        return Availability::Unavailable {
+            reason: UnavailableReason::ConstantForwardReturn,
+        };
+    }
+    match information_coefficient(pairs) {
+        Some(value) if value.is_finite() => Availability::Available { value },
+        _ => Availability::Unavailable {
+            reason: UnavailableReason::DegenerateCorrelation,
+        },
+    }
+}
+
 /// One quantile bucket of the score, and the returns that followed it.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Bucket {
     /// Lowest score in the bucket.
     pub score_lo: f64,
@@ -290,6 +339,150 @@ pub struct Bucket {
     pub n: usize,
     /// Mean forward return of the bucket, as a fraction.
     pub mean_return: f64,
+    /// Mean forward price move in contract ticks, computed observation by
+    /// observation from each retained tradeable entry/exit pair.
+    pub mean_move_ticks: f64,
+}
+
+/// A non-empty, lowest-score-first bucket sequence.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct BucketSet(Vec<Bucket>);
+
+fn validate_buckets(buckets: &[Bucket]) -> Result<(), &'static str> {
+    if buckets.is_empty() {
+        return Err("an available bucket set cannot be empty");
+    }
+    if buckets.iter().any(|bucket| {
+        bucket.n == 0
+            || !bucket.score_lo.is_finite()
+            || !bucket.score_hi.is_finite()
+            || !bucket.mean_return.is_finite()
+            || !bucket.mean_move_ticks.is_finite()
+            || bucket.score_lo > bucket.score_hi
+    }) {
+        return Err("every bucket must be finite, nonempty, and have ordered bounds");
+    }
+    if buckets
+        .windows(2)
+        .any(|pair| pair[0].score_hi > pair[1].score_lo)
+    {
+        return Err("buckets must be lowest-score first and non-overlapping");
+    }
+    Ok(())
+}
+
+impl BucketSet {
+    fn new(buckets: Vec<Bucket>) -> Self {
+        assert!(validate_buckets(&buckets).is_ok());
+        Self(buckets)
+    }
+
+    /// Constructs a bucket set, refusing an empty success.
+    #[must_use]
+    pub fn from_nonempty(buckets: Vec<Bucket>) -> Option<Self> {
+        validate_buckets(&buckets).ok().map(|()| Self(buckets))
+    }
+
+    /// Buckets in declared lowest-score-first order.
+    #[must_use]
+    pub fn as_slice(&self) -> &[Bucket] {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for BucketSet {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let buckets = Vec::<Bucket>::deserialize(deserializer)?;
+        validate_buckets(&buckets).map_err(serde::de::Error::custom)?;
+        Ok(Self(buckets))
+    }
+}
+
+/// Why a declared S0 measurement could not be formed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum UnavailableReason {
+    /// The sample did not contain the minimum number of usable observations.
+    TooFewObservations {
+        /// Usable observations found.
+        observed: usize,
+        /// Minimum required by this measurement.
+        required: usize,
+    },
+    /// All scores shared one value, so they had no rank order.
+    ConstantScore,
+    /// All forward returns shared one value, so they had no rank order.
+    ConstantForwardReturn,
+    /// The declaration requested no quantile buckets.
+    NoBucketsDeclared,
+    /// The declaration requested no bootstrap resamples.
+    NoBootstrapDraws,
+    /// A score or measured return was not finite.
+    NonFiniteObservation,
+    /// Rank covariance was degenerate despite non-constant inputs.
+    DegenerateCorrelation,
+    /// The unconditional bootstrap could not form a resample.
+    DegenerateBootstrap,
+}
+
+impl std::fmt::Display for UnavailableReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooFewObservations { observed, required } => {
+                write!(
+                    f,
+                    "too few observations (observed: {observed}, required: {required})"
+                )
+            }
+            Self::ConstantScore => write!(f, "all scores are equal"),
+            Self::ConstantForwardReturn => write!(f, "all forward returns are equal"),
+            Self::NoBucketsDeclared => write!(f, "zero buckets were declared"),
+            Self::NoBootstrapDraws => write!(f, "zero bootstrap draws were declared"),
+            Self::NonFiniteObservation => write!(f, "a score or return was non-finite"),
+            Self::DegenerateCorrelation => write!(f, "rank correlation was degenerate"),
+            Self::DegenerateBootstrap => write!(f, "bootstrap resampling was degenerate"),
+        }
+    }
+}
+
+/// A measured value or an explicit, persisted reason it was unavailable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Availability<T> {
+    /// The measurement exists.
+    Available {
+        /// Its typed value.
+        value: T,
+    },
+    /// The measurement does not exist and must not be read as zero.
+    Unavailable {
+        /// The exact reason measurement was impossible.
+        reason: UnavailableReason,
+    },
+}
+
+impl<T> Availability<T> {
+    /// Borrows the available value, if one exists.
+    #[must_use]
+    pub fn value(&self) -> Option<&T> {
+        match self {
+            Self::Available { value } => Some(value),
+            Self::Unavailable { .. } => None,
+        }
+    }
+
+    /// Borrows the absence reason, if unavailable.
+    #[must_use]
+    pub fn reason(&self) -> Option<&UnavailableReason> {
+        match self {
+            Self::Available { .. } => None,
+            Self::Unavailable { reason } => Some(reason),
+        }
+    }
 }
 
 /// Cuts `pairs` into `k` equal-count buckets by score and averages the forward
@@ -300,12 +493,35 @@ pub struct Bucket {
 /// nine as noise. Buckets are returned lowest-score first, which is the order a
 /// monotonicity check reads them in.
 ///
-/// Returns an empty vector when `k` is zero or there are fewer pairs than
-/// buckets — there is no honest way to cut 3 observations into 5 groups.
+/// Returns a typed unavailable result when `k` is zero or there are fewer
+/// pairs than buckets — there is no honest way to cut 3 observations into 5
+/// groups, and an empty table would conceal that fact.
 #[must_use]
-pub fn buckets(pairs: &[Pair], k: usize) -> Vec<Bucket> {
-    if k == 0 || pairs.len() < k {
-        return Vec::new();
+pub fn buckets(pairs: &[Pair], k: usize, tick_size_points: f64) -> Availability<BucketSet> {
+    assert!(tick_size_points.is_finite());
+    assert!(tick_size_points > 0.0);
+    if pairs.iter().any(|pair| {
+        !pair.score.is_finite()
+            || !pair.fwd_return.is_finite()
+            || !pair.entry_price_points.is_finite()
+            || !pair.exit_price_points.is_finite()
+    }) {
+        return Availability::Unavailable {
+            reason: UnavailableReason::NonFiniteObservation,
+        };
+    }
+    if k == 0 {
+        return Availability::Unavailable {
+            reason: UnavailableReason::NoBucketsDeclared,
+        };
+    }
+    if pairs.len() < k {
+        return Availability::Unavailable {
+            reason: UnavailableReason::TooFewObservations {
+                observed: pairs.len(),
+                required: k,
+            },
+        };
     }
     let mut idx: Vec<usize> = (0..pairs.len()).collect();
     idx.sort_by(|&a, &b| {
@@ -326,7 +542,11 @@ pub fn buckets(pairs: &[Pair], k: usize) -> Vec<Bucket> {
         if slice.is_empty() {
             continue;
         }
-        let sum: f64 = slice.iter().map(|&p| pairs[p].fwd_return).sum();
+        let return_sum: f64 = slice.iter().map(|&p| pairs[p].fwd_return).sum();
+        let tick_sum: f64 = slice
+            .iter()
+            .map(|&p| (pairs[p].exit_price_points - pairs[p].entry_price_points) / tick_size_points)
+            .sum();
         #[expect(
             clippy::cast_precision_loss,
             reason = "bucket sizes are far below 2^53"
@@ -336,14 +556,18 @@ pub fn buckets(pairs: &[Pair], k: usize) -> Vec<Bucket> {
             score_lo: pairs[slice[0]].score,
             score_hi: pairs[slice[slice.len() - 1]].score,
             n: slice.len(),
-            mean_return: sum / count,
+            mean_return: return_sum / count,
+            mean_move_ticks: tick_sum / count,
         });
     }
-    out
+    Availability::Available {
+        value: BucketSet::new(out),
+    }
 }
 
 /// A bootstrap interval for a mean.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Interval {
     /// The point estimate on the observed sample.
     pub point: f64,
@@ -356,7 +580,10 @@ pub struct Interval {
 }
 
 impl Interval {
-    /// Whether the interval excludes zero — the shape H-008's Gate 0 registers.
+    /// Whether this unconditional interval excludes zero.
+    ///
+    /// This is not H-008 Gate 0b, whose population is conditional on a close
+    /// beyond its Bollinger band.
     #[must_use]
     pub fn excludes_zero(&self) -> bool {
         (self.lo > 0.0 && self.hi > 0.0) || (self.lo < 0.0 && self.hi < 0.0)
@@ -439,6 +666,28 @@ pub fn block_bootstrap_mean(pairs: &[Pair], draws: usize, seed: u64) -> Option<I
     })
 }
 
+fn unconditional_mean_evidence(pairs: &[Pair], draws: usize, seed: u64) -> Availability<Interval> {
+    if pairs.is_empty() {
+        return Availability::Unavailable {
+            reason: UnavailableReason::TooFewObservations {
+                observed: 0,
+                required: 1,
+            },
+        };
+    }
+    if draws == 0 {
+        return Availability::Unavailable {
+            reason: UnavailableReason::NoBootstrapDraws,
+        };
+    }
+    match block_bootstrap_mean(pairs, draws, seed) {
+        Some(value) => Availability::Available { value },
+        None => Availability::Unavailable {
+            reason: UnavailableReason::DegenerateBootstrap,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -448,7 +697,8 @@ mod tests;
 
 /// What S0 was asked to measure, declared in the config's `[s0]` block before
 /// the run.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct S0Spec {
     /// The indicator slot the score is read from, e.g. `z` or `bb.upper`.
     pub score_slot: String,
@@ -473,26 +723,99 @@ pub struct S0Spec {
 }
 
 /// One horizon's evidence about one combo.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HorizonEvidence {
     /// The horizon, in nanoseconds.
     pub horizon_ns: i64,
     /// Score/return pairs that survived the join.
     pub n_pairs: usize,
     /// Scores whose window ran off the end of the series, or had no partner.
-    pub dropped: usize,
-    /// Spearman rank correlation, or `None` when there was nothing to
-    /// correlate.
-    pub ic: Option<f64>,
-    /// Equal-count buckets of the score, lowest first.
-    pub buckets: Vec<Bucket>,
-    /// Block-bootstrap interval for the mean forward return.
-    pub interval: Option<Interval>,
+    pub dropped_no_partner: usize,
+    /// Scores dropped because an entry or exit price was invalid.
+    pub dropped_invalid_price: usize,
+    /// Spearman rank correlation, or a typed absence reason.
+    pub ic: Availability<f64>,
+    /// Equal-count buckets of the score, lowest first, or typed absence.
+    pub buckets: Availability<BucketSet>,
+    /// Unconditional block-bootstrap interval over every joined observation.
+    pub unconditional_mean_interval: Availability<Interval>,
+}
+
+/// Outcome of D-0085's generic S0 criterion.
+///
+/// This is not H-008 Gate 0b: the latter is conditional on a close beyond its
+/// Bollinger band, while these measurements use equal-count score buckets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum S0CriterionOutcome {
+    /// Both declared halves cleared at the first such horizon.
+    Passed {
+        /// Horizon that cleared, in nanoseconds.
+        horizon_ns: i64,
+    },
+    /// Every declared horizon had both measurements, but none cleared both.
+    Failed,
+    /// At least one required measurement was absent and no horizon passed.
+    Unavailable {
+        /// Representative typed reason; each horizon retains its own reason.
+        reason: UnavailableReason,
+    },
+}
+
+fn evaluate_criterion(horizons: &[HorizonEvidence], min_abs_ic: f64) -> S0CriterionOutcome {
+    let mut first_absence = None;
+    for horizon in horizons {
+        match (&horizon.ic, &horizon.unconditional_mean_interval) {
+            (Availability::Available { value: ic }, Availability::Available { value: mean }) => {
+                if ic.abs() >= min_abs_ic && mean.excludes_zero() {
+                    return S0CriterionOutcome::Passed {
+                        horizon_ns: horizon.horizon_ns,
+                    };
+                }
+            }
+            (Availability::Unavailable { reason }, _) => {
+                first_absence.get_or_insert_with(|| reason.clone());
+            }
+            (_, Availability::Unavailable { reason }) => {
+                first_absence.get_or_insert_with(|| reason.clone());
+            }
+        }
+    }
+    if let Some(reason) = first_absence {
+        S0CriterionOutcome::Unavailable { reason }
+    } else if horizons.is_empty() {
+        S0CriterionOutcome::Unavailable {
+            reason: UnavailableReason::TooFewObservations {
+                observed: 0,
+                required: 1,
+            },
+        }
+    } else {
+        S0CriterionOutcome::Failed
+    }
+}
+
+/// Population this evidence product actually measures.
+///
+/// This is a typed capability boundary, not an H-008 experiment result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "population", rename_all = "snake_case", deny_unknown_fields)]
+pub enum S0EvidenceScope {
+    /// Equal-count buckets over every available score. This does not evaluate
+    /// a gate conditional on closes beyond a Bollinger band.
+    EqualCountScoreBuckets,
 }
 
 /// One combo's S0 evidence.
 #[derive(Debug, Clone, PartialEq)]
 pub struct S0ComboReport {
+    /// Fully resolved score identity: spec, slot expression, and combo label.
+    pub score_identity: String,
+    /// Declared contract tick in fixed-point nanopoints.
+    pub tick_size_nanopoints: i64,
+    /// The complete pre-run S0 declaration.
+    pub spec: S0Spec,
     /// Index into the expanded grid.
     pub combo_index: usize,
     /// Human-readable parameters.
@@ -503,25 +826,228 @@ pub struct S0ComboReport {
     pub scores: usize,
     /// One entry per declared horizon, in declaration order.
     pub horizons: Vec<HorizonEvidence>,
-    /// The largest `|IC|` across horizons, reported whether or not it was
-    /// significant.
-    pub best_abs_ic: Option<f64>,
-    /// The first horizon (in nanoseconds) that cleared BOTH halves of the
-    /// criterion, if any. `None` is the null-harness answer.
-    pub cleared_at_ns: Option<i64>,
-    /// Whether the pre-registered relationship criterion was met.
-    pub passed: bool,
+}
+
+#[derive(Serialize)]
+struct S0ComboWireRef<'a> {
+    score_identity: &'a str,
+    tick_size_nanopoints: i64,
+    spec: &'a S0Spec,
+    combo_index: usize,
+    label: &'a str,
+    warmup_bars: usize,
+    scores: usize,
+    horizons: &'a [HorizonEvidence],
+    criterion: S0CriterionOutcome,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct S0ComboWire {
+    score_identity: String,
+    tick_size_nanopoints: i64,
+    spec: S0Spec,
+    combo_index: usize,
+    label: String,
+    warmup_bars: usize,
+    scores: usize,
+    horizons: Vec<HorizonEvidence>,
+    criterion: S0CriterionOutcome,
+}
+
+impl Serialize for S0ComboReport {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        S0ComboWireRef {
+            score_identity: &self.score_identity,
+            tick_size_nanopoints: self.tick_size_nanopoints,
+            spec: &self.spec,
+            combo_index: self.combo_index,
+            label: &self.label,
+            warmup_bars: self.warmup_bars,
+            scores: self.scores,
+            horizons: &self.horizons,
+            criterion: self.criterion(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl S0ComboReport {
+    /// Validates the cross-field invariants every consumer relies on.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.score_identity.trim().is_empty() || self.label.trim().is_empty() {
+            return Err("score identity and combo label must be nonempty".to_owned());
+        }
+        if self.tick_size_nanopoints <= 0 {
+            return Err("contract tick must be positive".to_owned());
+        }
+        if self.spec.score_slot.trim().is_empty()
+            || self.spec.horizons_ns.is_empty()
+            || !self.spec.min_abs_ic.is_finite()
+            || self.spec.min_abs_ic < 0.0
+        {
+            return Err("S0 declaration is incomplete or non-finite".to_owned());
+        }
+        if self.horizons.len() != self.spec.horizons_ns.len() {
+            return Err("evidence must contain every declared horizon exactly once".to_owned());
+        }
+        for (declared, horizon) in self.spec.horizons_ns.iter().zip(&self.horizons) {
+            if *declared <= 0 || *declared != horizon.horizon_ns {
+                return Err("evidence horizons must retain positive declaration order".to_owned());
+            }
+            let classified = horizon
+                .n_pairs
+                .checked_add(horizon.dropped_no_partner)
+                .and_then(|n| n.checked_add(horizon.dropped_invalid_price))
+                .ok_or_else(|| "S0 observation counts overflowed".to_owned())?;
+            if classified != self.scores {
+                return Err("pair and drop counts must classify every emitted score".to_owned());
+            }
+            if let Availability::Available { value } = &horizon.ic
+                && (!value.is_finite() || value.abs() > 1.0 + 16.0 * f64::EPSILON)
+            {
+                return Err("available IC must be finite and within [-1, 1]".to_owned());
+            }
+            if let Availability::Available { value } = &horizon.buckets {
+                if value.as_slice().len() != self.spec.buckets {
+                    return Err("available bucket count must equal the declaration".to_owned());
+                }
+                let observations = value
+                    .as_slice()
+                    .iter()
+                    .try_fold(0usize, |sum, bucket| sum.checked_add(bucket.n))
+                    .ok_or_else(|| "bucket observation counts overflowed".to_owned())?;
+                if observations != horizon.n_pairs {
+                    return Err("bucket observations must equal the joined pair count".to_owned());
+                }
+            }
+            if let Availability::Available { value } = &horizon.unconditional_mean_interval
+                && (!value.point.is_finite()
+                    || !value.lo.is_finite()
+                    || !value.hi.is_finite()
+                    || value.lo > value.hi
+                    || value.draws != self.spec.bootstrap_draws)
+            {
+                return Err("available unconditional interval is inconsistent".to_owned());
+            }
+        }
+        Ok(())
+    }
+
+    /// Largest measurable absolute IC across declared horizons.
+    #[must_use]
+    pub fn best_abs_ic(&self) -> Option<f64> {
+        self.horizons
+            .iter()
+            .filter_map(|h| h.ic.value().copied())
+            .map(f64::abs)
+            .reduce(f64::max)
+    }
+
+    /// Whether the generic S0 criterion cleared.
+    #[must_use]
+    pub fn passed(&self) -> bool {
+        matches!(self.criterion(), S0CriterionOutcome::Passed { .. })
+    }
+
+    /// Outcome derived from this report's declaration and evidence.
+    #[must_use]
+    pub fn criterion(&self) -> S0CriterionOutcome {
+        evaluate_criterion(&self.horizons, self.spec.min_abs_ic)
+    }
+}
+
+impl<'de> Deserialize<'de> for S0ComboReport {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = S0ComboWire::deserialize(deserializer)?;
+        let stored_criterion = wire.criterion;
+        let report = Self {
+            score_identity: wire.score_identity,
+            tick_size_nanopoints: wire.tick_size_nanopoints,
+            spec: wire.spec,
+            combo_index: wire.combo_index,
+            label: wire.label,
+            warmup_bars: wire.warmup_bars,
+            scores: wire.scores,
+            horizons: wire.horizons,
+        };
+        report.validate().map_err(serde::de::Error::custom)?;
+        if report.criterion() != stored_criterion {
+            return Err(serde::de::Error::custom(
+                "stored S0 criterion contradicts its declaration or evidence",
+            ));
+        }
+        Ok(report)
+    }
 }
 
 /// The whole S0 stage over a grid.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct S0Report {
+    /// Exact population capability shared by every combo in this report.
+    pub evidence_scope: S0EvidenceScope,
     /// One entry per combo, in grid-index order.
     pub combos: Vec<S0ComboReport>,
-    /// The slot the score was read from.
-    pub score_slot: String,
-    /// Combos whose evidence cleared the criterion.
-    pub survivors: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct S0ReportWire {
+    evidence_scope: S0EvidenceScope,
+    combos: Vec<S0ComboReport>,
+}
+
+impl<'de> Deserialize<'de> for S0Report {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = S0ReportWire::deserialize(deserializer)?;
+        let report = Self {
+            evidence_scope: wire.evidence_scope,
+            combos: wire.combos,
+        };
+        report.validate().map_err(serde::de::Error::custom)?;
+        Ok(report)
+    }
+}
+
+impl S0Report {
+    /// Validates invariants shared by assessment, persistence, rendering, and hashing.
+    pub fn validate(&self) -> Result<(), String> {
+        for (position, combo) in self.combos.iter().enumerate() {
+            combo.validate()?;
+            if combo.combo_index != position {
+                return Err("S0 combos must appear once in contiguous grid-index order".to_owned());
+            }
+            if let Some(first) = self.combos.first()
+                && combo.spec != first.spec
+            {
+                return Err("every combo must share one S0 declaration".to_owned());
+            }
+        }
+        Ok(())
+    }
+
+    /// Combos whose generic S0 criterion cleared.
+    #[must_use]
+    pub fn survivors(&self) -> usize {
+        self.combos.iter().filter(|combo| combo.passed()).count()
+    }
+
+    /// Canonical bytes consumed by the determinism hash.
+    #[must_use]
+    pub fn determinism_bytes(&self) -> Vec<u8> {
+        self.validate().expect("invalid S0 report cannot be hashed");
+        serde_json::to_vec(self).expect("S0 measurements must be finite")
+    }
 }
 
 /// Anything that stops S0 from running.
@@ -562,6 +1088,8 @@ pub struct S0Inputs<'a> {
     pub spec: &'a crucible_strategies::combo::ComboSpec,
     /// What to measure, declared before the run.
     pub s0: &'a S0Spec,
+    /// Declared contract tick used for per-observation move conversion.
+    pub tick_size: crucible_core::prelude::Price,
     /// Config hash, root seed, account.
     pub identity: &'a crate::walkforward::RunIdentity,
     /// The pre-registered criteria, stored verbatim on the registry row.
@@ -598,6 +1126,8 @@ pub fn run_s0(
     use crate::registry::{RunKey, RunRow, RunStatus};
     use crucible_core::prelude::MarketEvent;
 
+    assert_eq!(inputs.events.len(), inputs.day_keys.len());
+    assert!(inputs.tick_size.as_nanos() > 0);
     let mut combos = Vec::with_capacity(inputs.grid.len());
 
     for combo in inputs.grid.iter() {
@@ -645,64 +1175,67 @@ pub fn run_s0(
         let mut scored: Vec<ScoredBar> = Vec::with_capacity(inputs.events.len());
         for (i, ev) in inputs.events.iter().enumerate() {
             let MarketEvent::Bar(bar) = ev;
-            if let Some(score) = scorer.update(bar) {
-                scored.push(ScoredBar {
-                    avail_ts: bar.avail_ts().0,
-                    session_key: inputs.day_keys.get(i).copied().unwrap_or(0),
-                    score,
-                    price_points: bar.close.as_points_f64(),
-                });
-            }
+            let score = scorer.update(bar);
+            scored.push(ScoredBar {
+                avail_ts: bar.avail_ts().0,
+                session_key: inputs.day_keys[i],
+                score,
+                price_points: bar.close.as_points_f64(),
+            });
         }
 
         let mut horizons = Vec::with_capacity(inputs.s0.horizons_ns.len());
-        let mut best_abs_ic: Option<f64> = None;
         for (h, &horizon_ns) in inputs.s0.horizons_ns.iter().enumerate() {
             let joined = join(&scored, horizon_ns);
-            let ic = information_coefficient(&joined.pairs);
-            if let Some(v) = ic {
-                best_abs_ic = Some(best_abs_ic.map_or(v.abs(), |b: f64| b.max(v.abs())));
-            }
+            let ic = information_coefficient_evidence(&joined.pairs);
             // The bootstrap's seed is derived from the run's, per horizon, so
             // two horizons of one combo do not share a resample (D-0064).
             let draw_seed = seed ^ ((h as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
             horizons.push(HorizonEvidence {
                 horizon_ns,
                 n_pairs: joined.pairs.len(),
-                dropped: joined.dropped_no_partner + joined.dropped_zero_price,
+                dropped_no_partner: joined.dropped_no_partner,
+                dropped_invalid_price: joined.dropped_zero_price,
                 ic,
-                buckets: buckets(&joined.pairs, inputs.s0.buckets),
-                interval: block_bootstrap_mean(&joined.pairs, inputs.s0.bootstrap_draws, draw_seed),
+                buckets: buckets(
+                    &joined.pairs,
+                    inputs.s0.buckets,
+                    inputs.tick_size.as_points_f64(),
+                ),
+                unconditional_mean_interval: unconditional_mean_evidence(
+                    &joined.pairs,
+                    inputs.s0.bootstrap_draws,
+                    draw_seed,
+                ),
             });
         }
 
-        // Both halves, at the same horizon.
-        let cleared_at_ns = horizons
-            .iter()
-            .find(|h| {
-                h.ic.is_some_and(|ic| ic.abs() >= inputs.s0.min_abs_ic)
-                    && h.interval.is_some_and(|iv| iv.excludes_zero())
-            })
-            .map(|h| h.horizon_ns);
-        let passed = cleared_at_ns.is_some();
         registry.finish(&key, RunStatus::Done, None, inputs.now)?;
 
+        let score_identity = format!(
+            "{} score={} combo={}",
+            inputs.spec.canonical_form(),
+            scorer.slot_name(),
+            combo.label()
+        );
         combos.push(S0ComboReport {
+            score_identity,
+            tick_size_nanopoints: inputs.tick_size.as_nanos(),
+            spec: inputs.s0.clone(),
             combo_index: combo.index,
             label: combo.label(),
             warmup_bars: scorer.warmup_bars(),
-            scores: scored.len(),
+            scores: scored.iter().filter(|bar| bar.score.is_some()).count(),
             horizons,
-            best_abs_ic,
-            cleared_at_ns,
-            passed,
         });
     }
 
-    let survivors = combos.iter().filter(|c| c.passed).count();
-    Ok(S0Report {
+    let report = S0Report {
+        evidence_scope: S0EvidenceScope::EqualCountScoreBuckets,
         combos,
-        score_slot: inputs.s0.score_slot.clone(),
-        survivors,
-    })
+    };
+    report
+        .validate()
+        .expect("run_s0 must construct a valid owned report");
+    Ok(report)
 }

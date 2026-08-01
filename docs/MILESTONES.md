@@ -344,6 +344,21 @@ The quant-research payload. Specs live in `crucible-funnel` module docs.
             the three engine hashes and the old funnel hash are unmoved.
             `Stage::S0::is_implemented()` is true, `s0` configs are accepted and
             H-008 is unblocked — all in that commit, as D-0075 asked
+      - [x] **The evidence product** (2026-08-01,
+            D-0102): every declared horizon and every
+            lowest-score-first bucket reaches stdout and HTML with bounds,
+            count, mean fractional return, and per-observation tick move.
+            Typed absence is never an empty table or zero; unconditional drift
+            is separately labelled; the original H-008 Gate 0b remains
+            explicitly UNEVALUATED because its beyond-band population is not
+            proved equivalent to quantile buckets. Assessment, both renderers,
+            and determinism borrow one report-owned typed result.
+      - [ ] **Persist that typed S0 result.** Reader/model support must merge
+            before the writer changes; successful production S0 runs still
+            finish with legacy `metrics: null` at this checkpoint. The writer
+            is additionally blocked on the §9 identity ruling recorded by
+            D-0102: today's run key does not bind the S0
+            declaration or contract tick.
 - [ ] Stats: deflated Sharpe, PBO/CSCV, block-permutation nulls, empirical
       p-values — cited implementations with property tests.
       - [x] **Block-permutation null + empirical p-values** (2026-07-31,
