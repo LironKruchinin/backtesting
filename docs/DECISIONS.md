@@ -3579,3 +3579,44 @@ propose a superseding entry — don't silently diverge.
   control rejects trading metrics on S0 while accepting an ordinary trading
   fold from an S0-enabled config. No production writer emits the new record in
   this commit.
+- **D-0105** (2026-08-01) -- **A `TrialKey` binds to exactly one
+  `hypothesis_family`, and a contradictory claim is refused before append.**
+  The first claim for `(config_hash, account_id, combo_index)` owns the family
+  for that trial permanently. Folds and seeds remain runs inside the one trial;
+  they cannot move its multiple-testing charge to another denominator.
+  **One canonical family replaces per-run family copies.**
+  `Registry::charged` now maps a `TrialKey` directly to its canonical family.
+  `run_trial` stores only the `TrialKey`, so voiding cannot consult a family
+  copied from an individual fold. The same
+  canonical value increments the trial count on the first claim and selects
+  the family decremented when the last standing member is voided. Claim
+  validation runs before the `AlreadyDone`/retry shortcuts and before JSONL
+  append; replay validates again, so a contradictory historical line refuses
+  rather than silently changing an in-memory denominator. The wire format does
+  not change.
+  **Controls.** `a_trial_key_refuses_a_different_family_before_append` plants a
+  second fold under another family, observes `TrialFamilyMismatch`, proves the
+  file is byte-identical, and repeats the refusal after reopening the real
+  reader. `void_decrements_the_family_that_owns_the_trial_charge` proves two
+  folds own one canonical family, the first void leaves its count at one, the
+  second moves that same family to zero, and replay preserves the binding. The
+  refusal control also exercises exact-key `AlreadyDone`, running, and failed
+  shortcuts and appends a planted conflicting historical row that the real
+  replay path refuses.
+  The local registry was inventoried read-only before tightening the reader:
+  3,644 run rows, 130 distinct TrialKeys, and zero cross-family keys.
+  **Mutation verification.** Reversing the family comparison (`!=` to `==`)
+  made the planted mismatch return `Inserted::New`; the named refusal control
+  failed at its `expect_err`. Restoring the comparison returned
+  `registry.rs` byte-exactly to SHA-256
+  `b2baa39bd28055783d896dfbd2197498aa64e17efca1ed2fd676017e09c9fc9f`,
+  and both controls passed again.
+  **Concurrency boundary.** This enforcement inherits the registry's existing
+  single-writer contract. Two independently opened writers are not serialized
+  by this change; adding cross-process locking would be a separate storage
+  decision, not an unreviewed extension of this claim-time ruling.
+  **Adjacent holes are not silently decided here.** A new same-family member
+  added after every prior member of its trial was voided currently does not
+  restore the standing-trial count, and verdict rows repeat a family label but
+  are not run claims. Their semantics require separate rulings; this entry
+  changes neither while enforcing the reviewer-issued claim-time boundary.

@@ -16,8 +16,9 @@
 //! 2. **Dedupe on the run key** — `(config_hash, account_id, combo_index,
 //!    fold, seed)`. Finished work is never recomputed; a grid resumes for
 //!    free.
-//! 3. **Trial counting is automatic** and per hypothesis family. Nothing asks
-//!    a human how many things they tried.
+//! 3. **Trial counting is automatic** and per hypothesis family. One trial key
+//!    binds to exactly one family: a later claim cannot move one trial between
+//!    denominators. Nothing asks a human how many things they tried.
 //! 4. **Pre-registered criteria are stored on the row**, verbatim. A criterion
 //!    that only exists in the config file at the moment of judging is not
 //!    pre-registered, it is remembered.
@@ -59,6 +60,8 @@
 //! the key because D-0067 puts it there: choosing the account size after
 //! seeing results is a maximum over sixteen draws reported as an expectation,
 //! and the only defence is to price it.
+//! The family is owned by that trial's charge (D-0105), never copied onto the
+//! void index; both increment and decrement therefore address the same family.
 //!
 //! # Why JSONL and not DuckDB (D-0074)
 //!
@@ -433,6 +436,19 @@ pub enum RegistryError {
         /// The exact identity field that contradicted the claim.
         message: String,
     },
+    /// A trial key was already charged to a different hypothesis family.
+    TrialFamilyMismatch {
+        /// Config identity in the conflicting trial key.
+        config_hash: String,
+        /// Account identity in the conflicting trial key.
+        account_id: Option<String>,
+        /// Combo identity in the conflicting trial key.
+        combo_index: usize,
+        /// Family that owns the existing charge.
+        established_family: String,
+        /// Family named by the refused claim.
+        claimed_family: String,
+    },
 }
 
 impl std::fmt::Display for RegistryError {
@@ -462,6 +478,17 @@ impl std::fmt::Display for RegistryError {
             RegistryError::ResultDoesNotMatchClaim { run_id, message } => write!(
                 f,
                 "run {run_id} has a result that contradicts its claimed row: {message}"
+            ),
+            RegistryError::TrialFamilyMismatch {
+                config_hash,
+                account_id,
+                combo_index,
+                established_family,
+                claimed_family,
+            } => write!(
+                f,
+                "trial ({config_hash}, {}, {combo_index}) is already charged to hypothesis_family {established_family:?}; claim names {claimed_family:?}",
+                account_id.as_deref().unwrap_or("-")
             ),
         }
     }
@@ -498,15 +525,15 @@ pub struct Registry {
     results: BTreeMap<String, PersistedRunResult>,
     /// Distinct trials charged, per family.
     trials: BTreeMap<String, usize>,
-    /// Which trials have already been charged, so a resumed fold does not
-    /// charge its combo twice.
+    /// Canonical family charged for each trial. Presence prevents a resumed
+    /// fold from charging twice; the value is the one owner used by voids.
     charged: BTreeMap<TrialKey, String>,
     /// Every run_id ever charged to each trial, so withdrawing one can tell
     /// whether the trial still has a surviving run behind it (D-0083).
     trial_members: BTreeMap<TrialKey, Vec<String>>,
-    /// Which trial and family each run was charged to, so a void can find them
-    /// from the `run_id` alone.
-    run_trial: BTreeMap<String, (TrialKey, String)>,
+    /// Which trial each run belongs to, so a void can find the canonical
+    /// charge from the `run_id` alone. Family is deliberately not duplicated.
+    run_trial: BTreeMap<String, TrialKey>,
     /// Runs withdrawn from the record.
     voided: std::collections::BTreeSet<String>,
     verdicts: Vec<VerdictRow>,
@@ -682,12 +709,29 @@ impl Registry {
         Ok(())
     }
 
+    fn validate_trial_family(&self, row: &RunRow) -> Result<(), RegistryError> {
+        let trial = row.key.trial();
+        if let Some(established_family) = self.charged.get(&trial)
+            && established_family != &row.hypothesis_family
+        {
+            return Err(RegistryError::TrialFamilyMismatch {
+                config_hash: row.key.config_hash.clone(),
+                account_id: row.key.account_id.clone(),
+                combo_index: row.key.combo_index,
+                established_family: established_family.clone(),
+                claimed_family: row.hypothesis_family.clone(),
+            });
+        }
+        Ok(())
+    }
+
     /// Folds one record into the index. Shared by [`Registry::open`] and every
     /// append, so a fresh reader and a live writer cannot disagree about what
     /// the file means.
     fn apply(&mut self, record: Line) -> Result<(), RegistryError> {
         match record {
             Line::Run(row) => {
+                self.validate_trial_family(&row)?;
                 let id = row.key.run_id();
                 let trial = row.key.trial();
                 if self.runs.insert(id.clone(), RunStatus::Running).is_none() {
@@ -702,13 +746,16 @@ impl Registry {
                             s0_min_abs_ic: row.criteria.s0_min_abs_ic,
                         },
                     );
-                    self.run_trial
-                        .insert(id.clone(), (trial.clone(), row.hypothesis_family.clone()));
+                    self.run_trial.insert(id.clone(), trial.clone());
                     self.trial_members
                         .entry(trial.clone())
                         .or_default()
                         .push(id.clone());
-                    if self.charged.insert(trial, id).is_none() {
+                    if self
+                        .charged
+                        .insert(trial, row.hypothesis_family.clone())
+                        .is_none()
+                    {
                         *self
                             .trials
                             .entry(row.hypothesis_family.clone())
@@ -737,7 +784,7 @@ impl Registry {
                     return Err(RegistryError::UnknownRun { run_id });
                 }
                 if self.voided.insert(run_id.clone())
-                    && let Some((trial, family)) = self.run_trial.get(&run_id).cloned()
+                    && let Some(trial) = self.run_trial.get(&run_id).cloned()
                 {
                     // The trial survives while ANY run charged to it is still
                     // standing: folds of one combo are one trial (rule 3), so
@@ -746,7 +793,10 @@ impl Registry {
                         .trial_members
                         .get(&trial)
                         .is_some_and(|m| m.iter().any(|r| !self.voided.contains(r)));
-                    if !survives && let Some(n) = self.trials.get_mut(&family) {
+                    if !survives
+                        && let Some(family) = self.charged.get(&trial)
+                        && let Some(n) = self.trials.get_mut(family)
+                    {
                         *n = n.saturating_sub(1);
                     }
                 }
@@ -789,10 +839,15 @@ impl Registry {
     /// combos that did not finish.
     ///
     /// # Errors
-    /// [`RegistryError::Io`] if the row cannot be appended. A run whose claim
-    /// could not be written is not started: a result with no row is a number
-    /// nobody can reproduce (§2.5).
+    /// [`RegistryError::TrialFamilyMismatch`] if the trial was already bound
+    /// to another family, or [`RegistryError::Io`] if the row cannot be
+    /// appended. A run whose claim could not be written is not started: a
+    /// result with no row is a number nobody can reproduce (§2.5).
     pub fn insert_running(&mut self, row: &RunRow) -> Result<Inserted, RegistryError> {
+        // Validate before the status shortcut and, critically, before append:
+        // an AlreadyDone spelling with another family is still a contradictory
+        // claim about the same trial, not a successful resume.
+        self.validate_trial_family(row)?;
         let id = row.key.run_id();
         match self.runs.get(&id) {
             Some(RunStatus::Done) => return Ok(Inserted::AlreadyDone),
@@ -1726,10 +1781,139 @@ mod tests {
         with_account.account_id = Some("apex_50k".to_owned());
         r.insert_running(&row(with_account, "fam")).expect("insert");
         assert_eq!(r.trials_for("fam"), 3, "the same combo, a second account");
+    }
 
-        r.insert_running(&row(key(0, Some(0), 100), "other"))
-            .expect("insert");
-        assert_eq!(r.trials_for("other"), 0, "already charged to `fam`");
+    #[test]
+    fn a_trial_key_refuses_a_different_family_before_append() {
+        let path = tmp("trial-family-mismatch");
+        let mut registry = Registry::open(&path).expect("opens");
+        let charged = key(0, Some(0), 100);
+        let conflicting_fold = key(0, Some(1), 101);
+
+        registry
+            .insert_running(&row(charged, "charged-family"))
+            .expect("first family owns the trial");
+        let before = std::fs::read(&path).expect("read before mismatch");
+
+        let error = registry
+            .insert_running(&row(conflicting_fold.clone(), "claimed-family"))
+            .expect_err("one TrialKey cannot move between families");
+        assert!(
+            matches!(
+                error,
+                RegistryError::TrialFamilyMismatch {
+                    ref established_family,
+                    ref claimed_family,
+                    ..
+                } if established_family == "charged-family" && claimed_family == "claimed-family"
+            ),
+            "{error:?}"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("read after mismatch"),
+            before,
+            "the contradictory claim must be refused before append"
+        );
+        assert_eq!(registry.status_of(&conflicting_fold), None);
+        assert_eq!(registry.trials_for("charged-family"), 1);
+        assert_eq!(registry.trials_for("claimed-family"), 0);
+
+        for (name, status) in [
+            ("already-running", None),
+            ("already-failed", Some(RunStatus::Failed)),
+            ("already-done", Some(RunStatus::Done)),
+        ] {
+            let path = tmp(name);
+            let exact_key = key(0, Some(0), 100);
+            let mut registry = Registry::open(&path).expect("opens");
+            registry
+                .insert_running(&row(exact_key.clone(), "charged-family"))
+                .expect("first family owns exact run");
+            if let Some(status) = status {
+                registry
+                    .finish(&exact_key, status, None, "finished")
+                    .expect("set shortcut status");
+            }
+            let before = std::fs::read(&path).expect("read before shortcut mismatch");
+            assert!(
+                matches!(
+                    registry.insert_running(&row(exact_key, "claimed-family")),
+                    Err(RegistryError::TrialFamilyMismatch { .. })
+                ),
+                "{name}: family validation must precede the status shortcut"
+            );
+            assert_eq!(
+                std::fs::read(&path).expect("read after shortcut mismatch"),
+                before,
+                "{name}: contradictory exact-run claim must not append"
+            );
+        }
+
+        let mut reread = Registry::open(&path).expect("real reader replays the binding");
+        assert!(matches!(
+            reread.insert_running(&row(conflicting_fold, "claimed-family")),
+            Err(RegistryError::TrialFamilyMismatch { .. })
+        ));
+
+        let poisoned = tmp("historical-trial-family-mismatch");
+        let mut writer = Registry::open(&poisoned).expect("opens");
+        let first = key(0, Some(0), 100);
+        let second = key(0, Some(1), 101);
+        writer
+            .insert_running(&row(first, "charged-family"))
+            .expect("write first family");
+        drop(writer);
+        append_json_line(
+            &poisoned,
+            &serde_json::to_value(Line::Run(Box::new(row(second, "claimed-family"))))
+                .expect("serialize conflicting historical row"),
+        );
+        assert!(
+            matches!(
+                Registry::open(&poisoned),
+                Err(RegistryError::TrialFamilyMismatch { .. })
+            ),
+            "the real replay path must refuse a conflicting persisted row"
+        );
+    }
+
+    #[test]
+    fn void_decrements_the_family_that_owns_the_trial_charge() {
+        let path = tmp("void-canonical-trial-family");
+        let mut registry = Registry::open(&path).expect("opens");
+        let fold_zero = key(0, Some(0), 100);
+        let fold_one = key(0, Some(1), 101);
+        let trial = fold_zero.trial();
+
+        registry
+            .insert_running(&row(fold_zero.clone(), "charged-family"))
+            .expect("insert fold zero");
+        registry
+            .insert_running(&row(fold_one.clone(), "charged-family"))
+            .expect("insert fold one");
+        assert_eq!(
+            registry.charged.get(&trial).map(String::as_str),
+            Some("charged-family"),
+            "the charge owns the one canonical family"
+        );
+
+        registry
+            .void(&fold_zero.run_id(), "control", "2026-08-01T00:00:00Z")
+            .expect("void fold zero");
+        assert_eq!(registry.trials_for("charged-family"), 1);
+        registry
+            .void(&fold_one.run_id(), "control", "2026-08-01T00:00:01Z")
+            .expect("void fold one");
+        assert_eq!(registry.trials_for("charged-family"), 0);
+        assert_eq!(registry.trials_for("some-other-family"), 0);
+
+        let reread = Registry::open(&path).expect("reopens");
+        assert_eq!(reread.trials_for("charged-family"), 0);
+        assert_eq!(
+            reread.charged.get(&trial).map(String::as_str),
+            Some("charged-family"),
+            "voiding does not erase or reassign the trial's family binding"
+        );
     }
 
     /// A config that differs only in its declared seed is a different run.
