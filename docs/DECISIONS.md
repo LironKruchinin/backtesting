@@ -3529,3 +3529,53 @@ propose a superseding entry — don't silently diverge.
   `0e1ab52d474b862b`, walk-forward `711e1cb34a2ee2b4`, funnel
   `2f430893d2a79a8f`, permutation `9fe41f6f5b3653e7`, truncation
   `91b9ff5b9bbcdb25`, and deflated-Sharpe `dc7f94f25235df6c`.
+- **D-0104** (2026-08-01) -- **The registry
+  reader learns the complete typed S0 aggregate before any production writer
+  may emit it.** A measured predictor run cannot honestly inhabit trading-only
+  `RunMetrics`: fabricated equity, trade, fee, and win-rate zeros would turn
+  absence into measurements. The new `S0RunMetrics` instead owns the evidence
+  population plus one validated `S0ComboReport`, which already contains score
+  identity, contract tick, the full S0 declaration and horizon order,
+  pair/drop counts, IC, unconditional interval, lowest-first bucket evidence
+  including per-observation tick means, the derived criterion, and every typed
+  absence reason.
+  **The old wire does not move.** Existing non-null trading objects retain their
+  byte shape. A successor object is explicitly tagged
+  `{"metric_kind":"s0","value":...}` inside the existing `metrics` field.
+  The real replay reader indexes both, while historical `metrics: null` becomes
+  the named `LegacyAbsent` result rather than a zero, a pass, or a missing map
+  entry. The compatibility union is closed: unknown metric kinds, extended S0
+  aggregates, unknown trading fields, omitted nullable trading fields, and an
+  omitted `metrics` member refuse instead of being partially accepted. Explicit
+  JSON null remains distinct from omission at both levels.
+  **A result cannot contradict its claim.** The reader retains the claimed
+  combo index, fold, parameter label, fill model, S0-stage declaration, and
+  pre-registered IC threshold. Typed S0 evidence must match all of them and must
+  belong to the non-fold, no-position S0 row; a trading fold in an S0-enabled
+  config cannot masquerade as predictor evidence. The converse is enforced too:
+  a no-position S0 row refuses trading metrics filled with invented zeros,
+  before append, while explicit legacy null remains readable. Horizons, bucket
+  geometry, tick, and data window still are not present in the current run
+  identity, so this check narrows but does not pretend to resolve the open
+  identity blocker.
+  **The deployment order is part of the record contract.** This commit exposes
+  no S0 finish API and the existing S0 CLI control asserts production still
+  writes `metrics: null` and no `metric_kind: s0`. After this reader commit has
+  merged to `main`, a later writer commit must make `S0Report` own the same
+  once-constructed `S0RunMetrics` values borrowed by persistence, stdout,
+  scorecard, and determinism; constructing a second persistence envelope is
+  forbidden. Its typed finish path must validate before appending, so a bad
+  result cannot durably poison the log. That writer remains
+  separately blocked by D-0102's run-identity defect;
+  reader-first does not authorize an identity migration.
+  **Compatibility controls use the actual JSONL reader.** One test pins the
+  exact legacy trading finish lines (including explicit nullable fields) and
+  reopens them; one reopens historical null as explicit legacy absence; one
+  appends a reader-only tagged S0 fixture,
+  reopens it, and compares every non-float field plus every floating field's
+  IEEE-754 bits and canonical JSON; strict-shape controls distinguish omitted
+  fields from null and reject legacy/typed hybrids; and claim controls reject
+  combo, label, threshold, fold, and fill-model disagreement. A two-sided claim
+  control rejects trading metrics on S0 while accepting an ordinary trading
+  fold from an S0-enabled config. No production writer emits the new record in
+  this commit.

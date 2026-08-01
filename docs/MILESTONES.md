@@ -356,7 +356,15 @@ The quant-research payload. Specs live in `crucible-funnel` module docs.
             evidence repins S0 to **`825356c88295ce94`** in the separate
             D-0103 commit; D-0085's old value remains
             historical.
-      - [ ] **Persist that typed S0 result.** Reader/model support must merge
+      - [ ] **Persist that typed S0 result.**
+            - [x] Reader/model half (2026-08-01,
+                  D-0104): the real JSONL
+                  reader accepts the closed, tagged S0 aggregate while retaining
+                  the original trading metrics bytes; historical `metrics: null`
+                  is explicit legacy absence, and unknown metric shapes refuse.
+            - [ ] Writer half, only after this reader commit is on `main` and
+                  after the open run-identity ruling is resolved.
+            Reader/model support must merge
             before the writer changes; successful production S0 runs still
             finish with legacy `metrics: null` at this checkpoint. The writer
             is additionally blocked on the §9 identity ruling recorded by

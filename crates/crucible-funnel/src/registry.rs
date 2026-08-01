@@ -24,6 +24,15 @@
 //! 5. **The graveyard is a query, not a document**: [`Registry::verdicts`]
 //!    replays every kill with its stage, its reasons and its date.
 //!
+//! ## Results evolve reader-first
+//!
+//! Historical trading metrics keep their original untagged object shape, and
+//! historical explicit `metrics: null` is indexed as named legacy absence. A
+//! predictor result is a separately tagged [`crate::s0::S0RunMetrics`], never a
+//! trading result filled with invented zeros. The reader refuses unknown,
+//! extended, omitted, or claim-contradicting result shapes. Production writers
+//! may emit a new typed result only after this reader contract is deployed.
+//!
 //! ## Correction is appended, never erased (D-0083)
 //!
 //! A row written in error is a fact: it happened. So the correction is a
@@ -164,12 +173,12 @@ pub enum RunStatus {
     Failed,
 }
 
-/// The numbers a finished run is remembered by.
+/// The trading numbers a finished replay is remembered by.
 ///
-/// Deliberately small: the registry is an index over results, not a copy of
-/// them. Equity curves stay in the scorecard artifacts, which name this
-/// `run_id`.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+/// Deliberately small: equity curves stay in the scorecard artifacts, which
+/// name this `run_id`. Predictor runs have a different typed result because
+/// forcing them into this shape would manufacture equity and trade zeros.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct RunMetrics {
     /// Final equity of the window this run covers.
     pub final_equity_nano_usd: i64,
@@ -185,6 +194,101 @@ pub struct RunMetrics {
     pub win_rate: Option<f64>,
     /// Commission paid inside the window.
     pub fees_nano_usd: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RequiredNullableF64 {
+    Null(()),
+    Value(f64),
+}
+
+impl RequiredNullableF64 {
+    fn into_option(self) -> Option<f64> {
+        match self {
+            Self::Null(()) => None,
+            Self::Value(value) => Some(value),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunMetricsReader {
+    final_equity_nano_usd: i64,
+    return_pct: f64,
+    max_dd_pct: f64,
+    sharpe_naive: RequiredNullableF64,
+    round_trips: usize,
+    win_rate: RequiredNullableF64,
+    fees_nano_usd: i64,
+}
+
+impl<'de> Deserialize<'de> for RunMetrics {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = RunMetricsReader::deserialize(deserializer)?;
+        Ok(Self {
+            final_equity_nano_usd: wire.final_equity_nano_usd,
+            return_pct: wire.return_pct,
+            max_dd_pct: wire.max_dd_pct,
+            sharpe_naive: wire.sharpe_naive.into_option(),
+            round_trips: wire.round_trips,
+            win_rate: wire.win_rate.into_option(),
+            fees_nano_usd: wire.fees_nano_usd,
+        })
+    }
+}
+
+/// A finished run's result as understood by this reader.
+///
+/// Historical `metrics: null` rows remain visible as [`Self::LegacyAbsent`];
+/// they are never reinterpreted as zero-valued trading results or as S0
+/// evidence. New result families are closed and typed, so a reader refuses a
+/// shape it does not know rather than silently discarding decision fields.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PersistedRunResult {
+    /// A historical finish row explicitly contained `metrics: null`.
+    LegacyAbsent,
+    /// The original trading/equity result shape.
+    Trading(RunMetrics),
+    /// A complete S0 measurement and its exact population scope.
+    S0(crate::s0::S0RunMetrics),
+}
+
+/// On-disk result compatibility union.
+///
+/// `Trading` is untagged so every pre-existing non-null metrics object retains
+/// its exact JSON shape. Typed successors carry an explicit discriminator.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum MetricsWire {
+    LegacyAbsent(()),
+    Trading(RunMetrics),
+    Typed(TypedMetricsWire),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "metric_kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum TypedMetricsWire {
+    S0(crate::s0::S0RunMetrics),
+}
+
+impl From<MetricsWire> for PersistedRunResult {
+    fn from(value: MetricsWire) -> Self {
+        match value {
+            MetricsWire::LegacyAbsent(()) => Self::LegacyAbsent,
+            MetricsWire::Trading(metrics) => Self::Trading(metrics),
+            MetricsWire::Typed(TypedMetricsWire::S0(metrics)) => Self::S0(metrics),
+        }
+    }
 }
 
 /// A run, as inserted before it runs.
@@ -250,7 +354,7 @@ enum Line {
     RunFinished {
         run_id: String,
         status: RunStatus,
-        metrics: Option<RunMetrics>,
+        metrics: MetricsWire,
         finished_at: String,
     },
     /// A verdict over a combo.
@@ -287,6 +391,16 @@ pub enum Inserted {
     Retrying,
 }
 
+#[derive(Clone, Debug)]
+struct RunClaim {
+    combo_index: usize,
+    fold: Option<usize>,
+    params: String,
+    fill_model: String,
+    declares_s0: bool,
+    s0_min_abs_ic: Option<f64>,
+}
+
 /// Anything that stops the registry from being read or written.
 #[derive(Debug)]
 pub enum RegistryError {
@@ -311,6 +425,13 @@ pub enum RegistryError {
     UnknownRun {
         /// The id that was finished.
         run_id: String,
+    },
+    /// Typed result identity disagrees with the run row that claimed it.
+    ResultDoesNotMatchClaim {
+        /// The claimed run.
+        run_id: String,
+        /// The exact identity field that contradicted the claim.
+        message: String,
     },
 }
 
@@ -337,6 +458,10 @@ impl std::fmt::Display for RegistryError {
                 "run {run_id} was finished but never inserted; the insert-before-run rule exists \
                  so that a crash leaves a corpse rather than a gap, and a finish with no insert \
                  means something wrote results without claiming them first"
+            ),
+            RegistryError::ResultDoesNotMatchClaim { run_id, message } => write!(
+                f,
+                "run {run_id} has a result that contradicts its claimed row: {message}"
             ),
         }
     }
@@ -367,6 +492,10 @@ pub struct Registry {
     sink: Option<File>,
     /// Every run seen, and how it ended.
     runs: BTreeMap<String, RunStatus>,
+    /// Identity fields retained from each run's insert-before-run claim.
+    claims: BTreeMap<String, RunClaim>,
+    /// Every finished run's typed result, including explicit legacy absence.
+    results: BTreeMap<String, PersistedRunResult>,
     /// Distinct trials charged, per family.
     trials: BTreeMap<String, usize>,
     /// Which trials have already been charged, so a resumed fold does not
@@ -418,6 +547,8 @@ impl Registry {
                     .map_err(io)?,
             ),
             runs: BTreeMap::new(),
+            claims: BTreeMap::new(),
+            results: BTreeMap::new(),
             trials: BTreeMap::new(),
             charged: BTreeMap::new(),
             trial_members: BTreeMap::new(),
@@ -462,6 +593,8 @@ impl Registry {
             path: path.to_owned(),
             sink: None,
             runs: BTreeMap::new(),
+            claims: BTreeMap::new(),
+            results: BTreeMap::new(),
             trials: BTreeMap::new(),
             charged: BTreeMap::new(),
             trial_members: BTreeMap::new(),
@@ -477,6 +610,78 @@ impl Registry {
         self.sink.is_none()
     }
 
+    fn validate_finished_result(
+        &self,
+        run_id: &str,
+        metrics: &MetricsWire,
+    ) -> Result<(), RegistryError> {
+        let claim = self
+            .claims
+            .get(run_id)
+            .ok_or_else(|| RegistryError::UnknownRun {
+                run_id: run_id.to_owned(),
+            })?;
+        let is_s0_measurement =
+            claim.fold.is_none() && claim.fill_model == crate::s0::S0_FILL_MODEL;
+        let metrics = match metrics {
+            MetricsWire::LegacyAbsent(()) => return Ok(()),
+            MetricsWire::Trading(_) => {
+                if is_s0_measurement {
+                    return Err(RegistryError::ResultDoesNotMatchClaim {
+                        run_id: run_id.to_owned(),
+                        message: "a no-position S0 claim cannot contain trading metrics".to_owned(),
+                    });
+                }
+                return Ok(());
+            }
+            MetricsWire::Typed(TypedMetricsWire::S0(metrics)) => metrics,
+        };
+        metrics
+            .validate()
+            .map_err(|message| RegistryError::ResultDoesNotMatchClaim {
+                run_id: run_id.to_owned(),
+                message,
+            })?;
+        if !claim.declares_s0 {
+            return Err(RegistryError::ResultDoesNotMatchClaim {
+                run_id: run_id.to_owned(),
+                message: "typed S0 metrics require an S0 criterion on the claimed row".to_owned(),
+            });
+        }
+        if !is_s0_measurement {
+            return Err(RegistryError::ResultDoesNotMatchClaim {
+                run_id: run_id.to_owned(),
+                message: "typed S0 metrics require the no-position, non-fold S0 claim".to_owned(),
+            });
+        }
+        if claim.combo_index != metrics.combo.combo_index {
+            return Err(RegistryError::ResultDoesNotMatchClaim {
+                run_id: run_id.to_owned(),
+                message: format!(
+                    "claimed combo index {} but metrics name {}",
+                    claim.combo_index, metrics.combo.combo_index
+                ),
+            });
+        }
+        if claim.params != metrics.combo.label {
+            return Err(RegistryError::ResultDoesNotMatchClaim {
+                run_id: run_id.to_owned(),
+                message: format!(
+                    "claimed params {:?} but metrics label is {:?}",
+                    claim.params, metrics.combo.label
+                ),
+            });
+        }
+        if claim.s0_min_abs_ic.map(f64::to_bits) != Some(metrics.combo.spec.min_abs_ic.to_bits()) {
+            return Err(RegistryError::ResultDoesNotMatchClaim {
+                run_id: run_id.to_owned(),
+                message: "persisted S0 threshold differs from the pre-registered criterion"
+                    .to_owned(),
+            });
+        }
+        Ok(())
+    }
+
     /// Folds one record into the index. Shared by [`Registry::open`] and every
     /// append, so a fresh reader and a live writer cannot disagree about what
     /// the file means.
@@ -486,6 +691,17 @@ impl Registry {
                 let id = row.key.run_id();
                 let trial = row.key.trial();
                 if self.runs.insert(id.clone(), RunStatus::Running).is_none() {
+                    self.claims.insert(
+                        id.clone(),
+                        RunClaim {
+                            combo_index: row.key.combo_index,
+                            fold: row.key.fold,
+                            params: row.params.clone(),
+                            fill_model: row.fill_model.clone(),
+                            declares_s0: row.criteria.stages.contains(&crate::stages::Stage::S0),
+                            s0_min_abs_ic: row.criteria.s0_min_abs_ic,
+                        },
+                    );
                     self.run_trial
                         .insert(id.clone(), (trial.clone(), row.hypothesis_family.clone()));
                     self.trial_members
@@ -500,12 +716,20 @@ impl Registry {
                     }
                 }
             }
-            Line::RunFinished { run_id, status, .. } => {
-                let entry = self
-                    .runs
-                    .get_mut(&run_id)
-                    .ok_or(RegistryError::UnknownRun { run_id })?;
+            Line::RunFinished {
+                run_id,
+                status,
+                metrics,
+                ..
+            } => {
+                if !self.runs.contains_key(&run_id) {
+                    return Err(RegistryError::UnknownRun { run_id });
+                }
+                self.validate_finished_result(&run_id, &metrics)?;
+                let entry = self.runs.get_mut(&run_id).expect("checked above");
                 *entry = status;
+                self.results
+                    .insert(run_id, PersistedRunResult::from(metrics));
             }
             Line::Verdict(row) => self.verdicts.push(*row),
             Line::Void { run_id, .. } => {
@@ -596,8 +820,13 @@ impl Registry {
         metrics: Option<RunMetrics>,
         finished_at: &str,
     ) -> Result<(), RegistryError> {
+        let run_id = key.run_id();
+        let metrics = metrics.map_or(MetricsWire::LegacyAbsent(()), MetricsWire::Trading);
+        if self.runs.contains_key(&run_id) {
+            self.validate_finished_result(&run_id, &metrics)?;
+        }
         let record = Line::RunFinished {
-            run_id: key.run_id(),
+            run_id,
             status,
             metrics,
             finished_at: finished_at.to_owned(),
@@ -679,6 +908,16 @@ impl Registry {
         self.runs.get(&key.run_id()).copied()
     }
 
+    /// Persisted result of one finished run, if a finish row exists.
+    ///
+    /// A historical null is returned as [`PersistedRunResult::LegacyAbsent`],
+    /// distinct from a run that has never finished and from every measured
+    /// value.
+    #[must_use]
+    pub fn result_of(&self, key: &RunKey) -> Option<&PersistedRunResult> {
+        self.results.get(&key.run_id())
+    }
+
     /// Runs claimed and never finished — the corpses insert-before-run exists
     /// to leave behind.
     #[must_use]
@@ -749,6 +988,10 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::s0::{
+        Availability, Bucket, BucketSet, HorizonEvidence, Interval, S0ComboReport, S0EvidenceScope,
+        S0RunMetrics, S0Spec, UnavailableReason,
+    };
     use crate::stages::Stage;
 
     fn key(combo: usize, fold: Option<usize>, seed: u64) -> RunKey {
@@ -774,12 +1017,502 @@ mod tests {
         }
     }
 
+    fn s0_row(key: RunKey, family: &str) -> RunRow {
+        let mut row = row(key, family);
+        row.params = "zscore(period=20)".to_owned();
+        row.fill_model = crate::s0::S0_FILL_MODEL.to_owned();
+        row.criteria.stages.push(Stage::S0);
+        row.criteria.s0_min_abs_ic = Some(0.5);
+        row
+    }
+
     fn tmp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join("crucible-registry-tests");
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join(format!("{name}.jsonl"));
         let _ = std::fs::remove_file(&path);
         path
+    }
+
+    fn measured_s0_metrics() -> S0RunMetrics {
+        S0RunMetrics {
+            evidence_scope: S0EvidenceScope::EqualCountScoreBuckets,
+            combo: S0ComboReport {
+                score_identity: "z = zscore(close, period=20)".to_owned(),
+                tick_size_nanopoints: 250_000_000,
+                spec: S0Spec {
+                    score_slot: "z".to_owned(),
+                    horizons_ns: vec![60_000_000_000, 120_000_000_000],
+                    buckets: 2,
+                    bootstrap_draws: 200,
+                    min_abs_ic: 0.5,
+                },
+                combo_index: 0,
+                label: "zscore(period=20)".to_owned(),
+                warmup_bars: 19,
+                scores: 4,
+                horizons: vec![
+                    HorizonEvidence {
+                        horizon_ns: 60_000_000_000,
+                        n_pairs: 4,
+                        dropped_no_partner: 0,
+                        dropped_invalid_price: 0,
+                        ic: Availability::Available { value: -1.0 },
+                        buckets: Availability::Available {
+                            value: BucketSet::from_nonempty(vec![
+                                Bucket {
+                                    score_lo: -2.0,
+                                    score_hi: -1.0,
+                                    n: 2,
+                                    mean_return: 0.002,
+                                    mean_move_ticks: 2.0,
+                                },
+                                Bucket {
+                                    score_lo: 1.0,
+                                    score_hi: 2.0,
+                                    n: 2,
+                                    mean_return: -0.002,
+                                    mean_move_ticks: -2.0,
+                                },
+                            ])
+                            .expect("ordered buckets"),
+                        },
+                        unconditional_mean_interval: Availability::Available {
+                            value: Interval {
+                                point: 0.0,
+                                lo: -0.001,
+                                hi: 0.001,
+                                draws: 200,
+                            },
+                        },
+                    },
+                    HorizonEvidence {
+                        horizon_ns: 120_000_000_000,
+                        n_pairs: 1,
+                        dropped_no_partner: 2,
+                        dropped_invalid_price: 1,
+                        ic: Availability::Unavailable {
+                            reason: UnavailableReason::TooFewObservations {
+                                observed: 1,
+                                required: 2,
+                            },
+                        },
+                        buckets: Availability::Unavailable {
+                            reason: UnavailableReason::TooFewObservations {
+                                observed: 1,
+                                required: 2,
+                            },
+                        },
+                        unconditional_mean_interval: Availability::Unavailable {
+                            reason: UnavailableReason::DegenerateBootstrap,
+                        },
+                    },
+                ],
+            },
+        }
+    }
+
+    fn s0_float_bits(metrics: &S0RunMetrics) -> Vec<u64> {
+        let mut bits = vec![metrics.combo.spec.min_abs_ic.to_bits()];
+        for horizon in &metrics.combo.horizons {
+            if let Availability::Available { value } = &horizon.ic {
+                bits.push(value.to_bits());
+            }
+            if let Availability::Available { value } = &horizon.buckets {
+                for bucket in value.as_slice() {
+                    bits.extend([
+                        bucket.score_lo.to_bits(),
+                        bucket.score_hi.to_bits(),
+                        bucket.mean_return.to_bits(),
+                        bucket.mean_move_ticks.to_bits(),
+                    ]);
+                }
+            }
+            if let Availability::Available { value } = &horizon.unconditional_mean_interval {
+                bits.extend([
+                    value.point.to_bits(),
+                    value.lo.to_bits(),
+                    value.hi.to_bits(),
+                ]);
+            }
+        }
+        bits
+    }
+
+    fn append_json_line(path: &Path, value: &serde_json::Value) {
+        let mut file = OpenOptions::new().append(true).open(path).expect("append");
+        serde_json::to_writer(&mut file, value).expect("serialize fixture");
+        writeln!(file).expect("terminate fixture line");
+    }
+
+    fn append_finished_json(path: &Path, key: &RunKey, metrics: serde_json::Value) {
+        append_json_line(
+            path,
+            &serde_json::json!({
+                "kind": "run_finished",
+                "run_id": key.run_id(),
+                "status": "done",
+                "metrics": metrics,
+                "finished_at": "2026-08-01T00:00:00Z"
+            }),
+        );
+    }
+
+    #[test]
+    fn legacy_trading_metrics_keep_their_wire_shape_and_round_trip() {
+        let path = tmp("legacy-trading-metrics");
+        let key = key(0, None, 7);
+        let metrics = RunMetrics {
+            final_equity_nano_usd: 123,
+            return_pct: 0.25,
+            max_dd_pct: 0.125,
+            sharpe_naive: Some(1.5),
+            round_trips: 9,
+            win_rate: Some(0.5),
+            fees_nano_usd: 17,
+        };
+        {
+            let mut registry = Registry::open(&path).expect("opens");
+            registry
+                .insert_running(&row(key.clone(), "fam"))
+                .expect("insert");
+            registry
+                .finish(&key, RunStatus::Done, Some(metrics), "finished")
+                .expect("finish");
+        }
+
+        let text = std::fs::read_to_string(&path).expect("read registry");
+        let finish = text.lines().nth(1).expect("finish line");
+        let expected = format!(
+            "{{'kind':'run_finished','run_id':'{}','status':'done','metrics':{{'final_equity_nano_usd':123,'return_pct':0.25,'max_dd_pct':0.125,'sharpe_naive':1.5,'round_trips':9,'win_rate':0.5,'fees_nano_usd':17}},'finished_at':'finished'}}",
+            key.run_id()
+        )
+        .replace('\'', &char::from(34).to_string());
+        assert_eq!(finish, expected, "the old writer's bytes must not move");
+
+        let reread = Registry::open(&path).expect("reopens");
+        assert_eq!(
+            reread.result_of(&key),
+            Some(&PersistedRunResult::Trading(metrics))
+        );
+    }
+
+    #[test]
+    fn explicit_legacy_nullable_metrics_remain_required_and_byte_exact() {
+        let path = tmp("legacy-nullable-fields");
+        let key = key(0, None, 7);
+        let metrics = RunMetrics {
+            final_equity_nano_usd: 123,
+            return_pct: 0.25,
+            max_dd_pct: 0.125,
+            sharpe_naive: None,
+            round_trips: 0,
+            win_rate: None,
+            fees_nano_usd: 17,
+        };
+        {
+            let mut registry = Registry::open(&path).expect("opens");
+            registry
+                .insert_running(&row(key.clone(), "fam"))
+                .expect("insert");
+            registry
+                .finish(&key, RunStatus::Done, Some(metrics), "finished")
+                .expect("finish");
+        }
+
+        let text = std::fs::read_to_string(&path).expect("read registry");
+        let finish = text.lines().nth(1).expect("finish line");
+        let expected = format!(
+            "{{'kind':'run_finished','run_id':'{}','status':'done','metrics':{{'final_equity_nano_usd':123,'return_pct':0.25,'max_dd_pct':0.125,'sharpe_naive':null,'round_trips':0,'win_rate':null,'fees_nano_usd':17}},'finished_at':'finished'}}",
+            key.run_id()
+        )
+        .replace('\'', &char::from(34).to_string());
+        assert_eq!(finish, expected, "explicit null fields must remain on wire");
+        let reread = Registry::open(&path).expect("reopens");
+        assert_eq!(
+            reread.result_of(&key),
+            Some(&PersistedRunResult::Trading(metrics))
+        );
+    }
+
+    #[test]
+    fn historical_null_metrics_are_explicit_legacy_absence() {
+        let path = tmp("legacy-null-metrics");
+        let key = key(0, None, 7);
+        {
+            let mut registry = Registry::open(&path).expect("opens");
+            registry
+                .insert_running(&row(key.clone(), "fam"))
+                .expect("insert");
+            registry
+                .finish(&key, RunStatus::Done, None, "finished")
+                .expect("finish");
+            assert_eq!(
+                registry.result_of(&key),
+                Some(&PersistedRunResult::LegacyAbsent)
+            );
+        }
+
+        let text = std::fs::read_to_string(&path).expect("read registry");
+        let finish = text.lines().nth(1).expect("finish line");
+        let expected = format!(
+            "{{'kind':'run_finished','run_id':'{}','status':'done','metrics':null,'finished_at':'finished'}}",
+            key.run_id()
+        )
+        .replace('\'', &char::from(34).to_string());
+        assert_eq!(finish, expected, "explicit legacy null bytes must not move");
+        let reread = Registry::open(&path).expect("reopens");
+        assert_eq!(reread.status_of(&key), Some(RunStatus::Done));
+        assert_eq!(
+            reread.result_of(&key),
+            Some(&PersistedRunResult::LegacyAbsent),
+            "a historical S0 null must not become zero or passed evidence"
+        );
+    }
+
+    #[test]
+    fn real_reader_round_trips_every_typed_s0_decision_field_bit_for_bit() {
+        let path = tmp("typed-s0-reader");
+        let key = key(0, None, 7);
+        let expected = measured_s0_metrics();
+        expected.validate().expect("valid S0 fixture");
+        {
+            let mut registry = Registry::open(&path).expect("opens");
+            registry
+                .insert_running(&s0_row(key.clone(), "fam"))
+                .expect("insert");
+        }
+        append_finished_json(
+            &path,
+            &key,
+            serde_json::json!({
+                "metric_kind": "s0",
+                "value": expected.clone()
+            }),
+        );
+
+        let reread = Registry::open(&path).expect("real reader accepts typed S0");
+        let Some(PersistedRunResult::S0(actual)) = reread.result_of(&key) else {
+            panic!("finished S0 row must expose typed S0 metrics");
+        };
+        assert_eq!(&expected, actual, "every non-float decision field");
+        assert_eq!(
+            s0_float_bits(&expected),
+            s0_float_bits(actual),
+            "every persisted floating-point decision field must retain its bits"
+        );
+        assert_eq!(
+            serde_json::to_vec(&expected).expect("serialize expected"),
+            serde_json::to_vec(actual).expect("serialize actual"),
+            "scope, identity, order, absence, and derived criterion all round-trip"
+        );
+    }
+
+    #[test]
+    fn unknown_or_extended_metric_shapes_are_refused() {
+        let unknown_kind = serde_json::json!({
+            "metric_kind": "future_metric",
+            "value": {}
+        });
+        let mut extended_s0 = serde_json::to_value(measured_s0_metrics()).expect("S0 JSON");
+        extended_s0
+            .as_object_mut()
+            .expect("S0 object")
+            .insert("future_decision".to_owned(), serde_json::json!(1));
+        let legacy = serde_json::json!({
+            "final_equity_nano_usd": 123,
+            "return_pct": 0.25,
+            "max_dd_pct": 0.125,
+            "sharpe_naive": null,
+            "round_trips": 0,
+            "win_rate": null,
+            "fees_nano_usd": 17
+        });
+        let mut extended_legacy = legacy.clone();
+        extended_legacy
+            .as_object_mut()
+            .expect("legacy object")
+            .insert("future_decision".to_owned(), serde_json::json!(1));
+        let mut hybrid = legacy.clone();
+        hybrid
+            .as_object_mut()
+            .expect("legacy object")
+            .insert("metric_kind".to_owned(), serde_json::json!("s0"));
+        hybrid
+            .as_object_mut()
+            .expect("legacy object")
+            .insert("value".to_owned(), serde_json::json!(measured_s0_metrics()));
+        let mut missing_sharpe = legacy.clone();
+        missing_sharpe
+            .as_object_mut()
+            .expect("legacy object")
+            .remove("sharpe_naive");
+        let mut missing_win_rate = legacy;
+        missing_win_rate
+            .as_object_mut()
+            .expect("legacy object")
+            .remove("win_rate");
+
+        for (name, metrics) in [
+            ("unknown-metric-kind", unknown_kind),
+            (
+                "extended-s0-metrics",
+                serde_json::json!({
+                    "metric_kind": "s0",
+                    "value": extended_s0
+                }),
+            ),
+            ("extended-legacy-metrics", extended_legacy),
+            ("hybrid-legacy-typed-metrics", hybrid),
+            ("missing-legacy-sharpe", missing_sharpe),
+            ("missing-legacy-win-rate", missing_win_rate),
+        ] {
+            let path = tmp(name);
+            let key = key(0, None, 7);
+            {
+                let mut registry = Registry::open(&path).expect("opens");
+                registry
+                    .insert_running(&row(key.clone(), "fam"))
+                    .expect("insert");
+            }
+            append_finished_json(&path, &key, metrics);
+            let error = Registry::open(&path).expect_err("new shape must refuse");
+            assert!(
+                matches!(error, RegistryError::Corrupt { line: 2, .. }),
+                "{name}: {error:?}"
+            );
+        }
+
+        let path = tmp("missing-metrics-member");
+        let key = key(0, None, 7);
+        {
+            let mut registry = Registry::open(&path).expect("opens");
+            registry
+                .insert_running(&row(key.clone(), "fam"))
+                .expect("insert");
+        }
+        append_json_line(
+            &path,
+            &serde_json::json!({
+                "kind": "run_finished",
+                "run_id": key.run_id(),
+                "status": "done",
+                "finished_at": "2026-08-01T00:00:00Z"
+            }),
+        );
+        let error = Registry::open(&path).expect_err("omitted metrics must refuse");
+        assert!(
+            matches!(error, RegistryError::Corrupt { line: 2, .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn typed_s0_identity_must_match_the_claimed_run_row() {
+        for (name, mutate) in [
+            ("s0-combo-mismatch", 0usize),
+            ("s0-label-mismatch", 1usize),
+            ("s0-threshold-mismatch", 2usize),
+            ("s0-fold-mismatch", 3usize),
+            ("s0-fill-model-mismatch", 4usize),
+        ] {
+            let path = tmp(name);
+            let key = key(0, (mutate == 3).then_some(0), 7);
+            let mut metrics = measured_s0_metrics();
+            match mutate {
+                0 => metrics.combo.combo_index = 1,
+                1 => metrics.combo.label = "another-combo".to_owned(),
+                2 => metrics.combo.spec.min_abs_ic = 0.75,
+                3 | 4 => {}
+                _ => unreachable!(),
+            }
+            let mut claim = s0_row(key.clone(), "fam");
+            if mutate == 4 {
+                claim.fill_model = "spread_cross".to_owned();
+            }
+            {
+                let mut registry = Registry::open(&path).expect("opens");
+                registry.insert_running(&claim).expect("insert");
+            }
+            append_finished_json(
+                &path,
+                &key,
+                serde_json::json!({
+                    "metric_kind": "s0",
+                    "value": metrics
+                }),
+            );
+            let error = Registry::open(&path).expect_err("identity mismatch must refuse");
+            assert!(
+                matches!(error, RegistryError::ResultDoesNotMatchClaim { .. }),
+                "{name}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn predictor_claims_refuse_trading_metrics_but_keep_legacy_null_readable() {
+        let metrics = RunMetrics {
+            final_equity_nano_usd: 0,
+            return_pct: 0.0,
+            max_dd_pct: 0.0,
+            sharpe_naive: None,
+            round_trips: 0,
+            win_rate: None,
+            fees_nano_usd: 0,
+        };
+        let path = tmp("s0-refuses-trading-metrics");
+        let s0_key = key(0, None, 7);
+        {
+            let mut registry = Registry::open(&path).expect("opens");
+            registry
+                .insert_running(&s0_row(s0_key.clone(), "fam"))
+                .expect("insert");
+            let error = registry
+                .finish(&s0_key, RunStatus::Done, Some(metrics), "finished")
+                .expect_err("an S0 result is not a trading result full of zeros");
+            assert!(
+                matches!(error, RegistryError::ResultDoesNotMatchClaim { .. }),
+                "{error:?}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&path)
+                    .expect("read")
+                    .lines()
+                    .count(),
+                1,
+                "claim/result disagreement must be refused before append"
+            );
+            assert_eq!(registry.status_of(&s0_key), Some(RunStatus::Running));
+            assert_eq!(registry.result_of(&s0_key), None);
+
+            registry
+                .finish(&s0_key, RunStatus::Done, None, "finished")
+                .expect("historical explicit null remains readable");
+            assert_eq!(
+                registry.result_of(&s0_key),
+                Some(&PersistedRunResult::LegacyAbsent)
+            );
+        }
+        assert!(matches!(
+            Registry::open(&path).expect("reopens").result_of(&s0_key),
+            Some(PersistedRunResult::LegacyAbsent)
+        ));
+
+        let path = tmp("s0-enabled-trading-fold");
+        let fold_key = key(0, Some(0), 7);
+        let mut claim = row(fold_key.clone(), "fam");
+        claim.criteria.stages.push(Stage::S0);
+        claim.criteria.s0_min_abs_ic = Some(0.5);
+        let mut registry = Registry::open(&path).expect("opens");
+        registry.insert_running(&claim).expect("insert");
+        registry
+            .finish(&fold_key, RunStatus::Done, Some(metrics), "finished")
+            .expect("an S0-enabled config still has ordinary trading folds");
+        assert_eq!(
+            registry.result_of(&fold_key),
+            Some(&PersistedRunResult::Trading(metrics))
+        );
     }
 
     /// Rule 3 with a correction applied: a voided run stops counting as a

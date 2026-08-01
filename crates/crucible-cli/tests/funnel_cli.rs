@@ -668,6 +668,14 @@ fn s0_runs_end_to_end_and_kills_the_null_harness_at_s0() {
     // And S0 charged its trials into the real registry, like any other stage.
     let lines = std::fs::read_to_string(out_dir.join("registry.jsonl")).expect("a registry");
     assert!(lines.contains(r#""kind":"run""#), "{lines}");
+    assert!(
+        lines.contains(r#""metrics":null"#),
+        "reader-first means the existing S0 writer is still legacy-null: {lines}"
+    );
+    assert!(
+        !lines.contains(r#""metric_kind":"s0""#),
+        "the typed S0 reader must land before any production writer: {lines}"
+    );
     let card = std::fs::read_dir(&out_dir)
         .expect("results dir")
         .filter_map(Result::ok)

@@ -695,6 +695,9 @@ mod tests;
 // The caller: S0 as a funnel stage (D-0085)
 // ---------------------------------------------------------------------------
 
+/// Registry fill-model marker for a predictor measurement that takes no position.
+pub const S0_FILL_MODEL: &str = "none (s0 takes no position)";
+
 /// What S0 was asked to measure, declared in the config's `[s0]` block before
 /// the run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -987,6 +990,28 @@ impl<'de> Deserialize<'de> for S0ComboReport {
     }
 }
 
+/// The complete typed result persisted for one measured S0 run.
+///
+/// The scope travels with the combo evidence so a registry reader never has
+/// to infer which population the buckets describe. In particular,
+/// [`S0EvidenceScope::EqualCountScoreBuckets`] is not the close-beyond-band
+/// population registered by the original H-008 Gate 0b.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct S0RunMetrics {
+    /// Exact population measured by the evidence below.
+    pub evidence_scope: S0EvidenceScope,
+    /// Identity, declaration, observations, measurements, and derived outcome.
+    pub combo: S0ComboReport,
+}
+
+impl S0RunMetrics {
+    /// Validates the decision-bearing evidence after it has been read.
+    pub fn validate(&self) -> Result<(), String> {
+        self.combo.validate()
+    }
+}
+
 /// The whole S0 stage over a grid.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -1163,7 +1188,7 @@ pub fn run_s0(
             params: combo.label(),
             // S0 takes no position, so it has no execution assumption to name.
             // Saying so beats leaving the field to imply one (§2.4).
-            fill_model: "none (s0 takes no position)".to_owned(),
+            fill_model: S0_FILL_MODEL.to_owned(),
             git_sha: inputs.git_sha.to_owned(),
             data_manifest_ids: inputs.data_manifest_ids.to_vec(),
             started_at: inputs.now.to_owned(),
