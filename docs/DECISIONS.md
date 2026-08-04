@@ -4054,3 +4054,64 @@ propose a superseding entry — don't silently diverge.
   **The rule is written where it binds.** §7 governs the controls, so it lives
   there rather than in §8's session workflow: the reader who needs it is the
   one about to break a detector on purpose.
+- **D-0114** (2026-08-04) -- **Pooled sessions are the count of DISTINCT
+  trading days across contracts, never the sum, and the sum is reported beside
+  it so the overlap is visible.** The arithmetic half of block C
+  (`crucible-funnel::pooling`). The orchestration half — the config schema, the
+  multi-contract replay and its pin — is **not** in this entry and is recorded
+  as owed below.
+  **Why the union.** Two contracts of one root trade the same calendar days for
+  as long as both are listed; ESH2024 and ESM2024 overlap for months. Adding
+  their session counts claims a sample twice the size of the one that exists,
+  and everything downstream reads that number — the admission floor, the
+  deflated Sharpe's observation count, the fold plan's session budget. It is
+  D-0062's argument against overlapping out-of-sample windows applied across
+  contracts rather than within one: a session counted twice inflates `n` and
+  flatters every statistic computed from it.
+  **The sum is reported anyway, with the overlap named.** Not because it is
+  useful — nothing may consume it as a sample size — but because a reader shown
+  only "412 sessions" cannot tell whether the pooling was honest, while one
+  shown "412 distinct, 631 summed, 219 overlapping" can. Same device as the
+  suppressed-order count (D-0061) and the path-sensitive bar count (D-0069):
+  the quantity a wrong implementation would have invented is printed rather
+  than absorbed.
+  **Cross-instrument breadth is not extra `n`.** Pooling ES with NQ over the
+  same 250 sessions is one 250-session sample plus a claim that the effect
+  appears in two instruments. The second claim is the rhyme check and is worth
+  making; it is not sample size, and the arithmetic here refuses to let it be
+  counted as any. This is the case where adding is most tempting, because the
+  contracts look independent, so it carries its own control.
+  **Pooling meets a floor and never lowers one.** H-007 and H-008 both register
+  250 sessions and both say the floors come down "only when registry pooling
+  supplies the sessions honestly, never to make a short run pass". One ES
+  contract's active life is ~60 sessions, so a single-contract run still dies
+  at admission — correctly — and five contracts of disjoint life supply 300 and
+  the floor discriminates for the first time.
+  `the_two_hundred_and_fifty_session_floor_is_met_by_pooling_not_lowered`
+  asserts both halves, including the dishonest route: five contracts over *one*
+  contract's sessions sum to 300 and are worth 60.
+  **Pooling N contracts charges N trials**, so the larger sample costs
+  something and block B's selection benchmark rises with the pool. The count is
+  derived from the pool rather than declared, so a caller cannot name a trial
+  count that disagrees with the evidence; `Registry::trials_for` stays
+  authoritative and this is what it must equal once the claims land.
+  **Four refusals, no partial counts.** No contracts; a contract with no
+  evaluable day (it would charge a trial for no evidence); the same symbol
+  twice — the double-count in its most direct form; and non-ascending day keys,
+  because distinct-day counting must read the caller's ordered key slice
+  (D-0071) rather than form a second opinion about ordering. A session total
+  that quietly dropped a contract is the same lie as one that double-counted
+  it.
+  **D-0076 is not touched.** Pooling replays real contracts and pools their
+  evidence; it is the sanctioned route to a long sample *precisely so that*
+  stitching does not have to be. Nothing here enables `ES.v.0` for grids, and a
+  future design that wants back-adjusted grids supersedes D-0076 explicitly.
+  **What block C still owes**, stated so the next session does not have to
+  infer it: the `[pooling]` config surface with `deny_unknown_fields` and its
+  refusals; the CLI orchestration that loads N curated contracts and pools
+  their replays; the pooled-run determinism pin (the tenth gate, its own commit
+  and its own MILESTONES row); and the acceptance run — a config that died at
+  admission on 60 single-contract sessions passing on pooled ones — which needs
+  curated multi-contract data rather than a synthetic fixture. The arithmetic
+  landed first deliberately: it is where the silently-wrong-result risk lives,
+  and it is provable without the archive.

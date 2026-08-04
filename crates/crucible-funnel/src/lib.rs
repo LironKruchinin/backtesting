@@ -41,6 +41,7 @@
 
 pub mod funnel;
 pub mod grid;
+pub mod pooling;
 pub mod registry;
 pub mod s0;
 pub mod scheduler;
