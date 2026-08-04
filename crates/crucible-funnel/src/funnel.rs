@@ -106,6 +106,8 @@ pub struct FunnelInputs<'a> {
     pub criteria: &'a Criteria,
     /// The exact S0 declaration, present exactly when `criteria` declares S0.
     pub s0_spec: Option<&'a crate::s0::S0Spec>,
+    /// The S0 data/window declaration, under the same presence contract.
+    pub s0_data_source: Option<&'a crate::s0::S0DataSourceIdentity>,
     /// The declared execution assumption.
     pub costs: Costs,
     /// Position size, needed by the controls so they trade what the strategy
@@ -270,49 +272,125 @@ impl From<crate::registry::RegistryError> for FunnelError {
 
 fn validate_s0_report(
     inputs: &FunnelInputs<'_>,
+    registry: &Registry,
     report: Option<&crate::s0::S0Report>,
 ) -> Result<(), FunnelError> {
     let declared = inputs.criteria.runs(Stage::S0);
-    match (declared, inputs.s0_spec, report) {
-        (false, None, None) => return Ok(()),
-        (false, _, Some(_)) => {
+    if !declared {
+        if report.is_some() {
             return Err(FunnelError::InvalidS0(
                 "evidence was supplied although S0 was not declared".to_owned(),
             ));
         }
-        (true, None, _) => {
-            return Err(FunnelError::InvalidS0(
-                "criteria declare S0 but the declaration is absent".to_owned(),
-            ));
-        }
-        (true, Some(_), None) => {
-            return Err(FunnelError::InvalidS0(
-                "criteria declare S0 but its measured report is absent".to_owned(),
-            ));
-        }
-        (false, Some(_), None) => {
+        if inputs.s0_spec.is_some() || inputs.s0_data_source.is_some() {
             return Err(FunnelError::InvalidS0(
                 "an S0 declaration exists although the stage is not declared".to_owned(),
             ));
         }
-        (true, Some(spec), Some(report)) => {
-            report.validate().map_err(FunnelError::InvalidS0)?;
-            if report.combos.len() != inputs.grid.len() {
-                return Err(FunnelError::InvalidS0(
-                    "report and grid must contain the same number of combos".to_owned(),
+        return Ok(());
+    }
+    let spec = inputs.s0_spec.ok_or_else(|| {
+        FunnelError::InvalidS0("criteria declare S0 but the declaration is absent".to_owned())
+    })?;
+    crate::s0::validate_s0_criteria_contract(inputs.criteria, spec)
+        .map_err(FunnelError::InvalidS0)?;
+    let data_source = inputs.s0_data_source.ok_or_else(|| {
+        FunnelError::InvalidS0(
+            "criteria declare S0 but the data/window declaration is absent".to_owned(),
+        )
+    })?;
+    let report = report.ok_or_else(|| {
+        FunnelError::InvalidS0("criteria declare S0 but its measured report is absent".to_owned())
+    })?;
+
+    let expected_registration = crate::s0::s0_run_registration_hash(
+        inputs.grid.spec(),
+        spec,
+        inputs.spec.tick,
+        data_source,
+        inputs.events,
+        inputs.day_keys,
+        inputs.data_manifest_ids,
+    )
+    .map_err(|error| FunnelError::InvalidS0(error.to_string()))?;
+    if inputs.identity.config_hash != expected_registration {
+        return Err(FunnelError::InvalidS0(format!(
+            "supplied run identity {} does not match derived registration {expected_registration}",
+            inputs.identity.config_hash
+        )));
+    }
+    report.validate().map_err(FunnelError::InvalidS0)?;
+    if report.registration_hash != expected_registration.to_string() {
+        return Err(FunnelError::InvalidS0(
+            "report registration hash must match every run claim".to_owned(),
+        ));
+    }
+    if report.combos.len() != inputs.grid.len() {
+        return Err(FunnelError::InvalidS0(
+            "report and grid must contain the same number of combos".to_owned(),
+        ));
+    }
+    validate_registry_s0_results(
+        inputs.identity,
+        inputs.grid,
+        spec,
+        inputs.spec.tick,
+        registry,
+        report,
+    )
+    .map_err(FunnelError::InvalidS0)
+}
+
+pub(crate) fn validate_registry_s0_results(
+    identity: &RunIdentity,
+    grid: &Grid,
+    spec: &crate::s0::S0Spec,
+    tick_size: Price,
+    registry: &Registry,
+    report: &crate::s0::S0Report,
+) -> Result<(), String> {
+    for (metrics, combo) in report.combos.iter().zip(grid.iter()) {
+        let key = crate::s0::s0_run_key(identity, combo.index);
+        if registry.status_of(&key) != Some(RunStatus::Done) {
+            return Err(format!(
+                "combo {} registry S0 result is not in Done status",
+                combo.index
+            ));
+        }
+        let contract = crate::s0::S0ResultContract::for_combo(
+            &identity.config_hash,
+            grid.spec(),
+            spec,
+            tick_size,
+            &combo,
+        );
+        contract.validate(&key, metrics)?;
+        match registry.result_of(&key) {
+            Some(crate::registry::PersistedRunResult::S0(persisted))
+                if persisted.decision_bytes() == metrics.decision_bytes() => {}
+            Some(crate::registry::PersistedRunResult::S0(_)) => {
+                return Err(format!(
+                    "combo {} report disagrees with its registry-owned S0 result",
+                    combo.index
                 ));
             }
-            for (measured, combo) in report.combos.iter().zip(inputs.grid.iter()) {
-                if measured.combo_index != combo.index
-                    || measured.label != combo.label()
-                    || measured.spec != *spec
-                    || measured.tick_size_nanopoints != inputs.spec.tick.as_nanos()
-                {
-                    return Err(FunnelError::InvalidS0(
-                        "combo index, label, declaration, and contract tick must match the run"
-                            .to_owned(),
-                    ));
-                }
+            Some(crate::registry::PersistedRunResult::LegacyAbsent) => {
+                return Err(format!(
+                    "combo {} has only historical metrics:null in the registry",
+                    combo.index
+                ));
+            }
+            Some(crate::registry::PersistedRunResult::Trading(_)) => {
+                return Err(format!(
+                    "combo {} has trading metrics where S0 evidence is required",
+                    combo.index
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "combo {} has no registry-owned S0 result",
+                    combo.index
+                ));
             }
         }
     }
@@ -329,7 +407,7 @@ pub fn run_funnel(
     registry: &mut Registry,
     s0: Option<crate::s0::S0Report>,
 ) -> Result<FunnelReport, FunnelError> {
-    validate_s0_report(inputs, s0.as_ref())?;
+    validate_s0_report(inputs, registry, s0.as_ref())?;
     let trials_before = registry.trials_for(inputs.hypothesis_family);
     let claims = claim_runs(inputs, registry)?;
 
@@ -410,7 +488,10 @@ pub fn run_funnel(
         // `validate_s0_report` established exact contiguous grid identity
         // before any run was claimed, so assessment and rendering cannot pick
         // different copies of a duplicate or silently miss one.
-        let s0_combo = s0.as_ref().and_then(|report| report.combos.get(index));
+        let s0_combo = s0
+            .as_ref()
+            .and_then(|report| report.combos.get(index))
+            .map(|metrics| &metrics.combo);
         let assessment = assess(inputs.criteria, &evidence, s0_combo);
 
         combos.push(ComboOutcome {

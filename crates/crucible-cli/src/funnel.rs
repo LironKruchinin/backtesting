@@ -49,7 +49,7 @@ use crucible_funnel::walkforward::{FoldPlan, FoldSpec, RunIdentity};
 use crucible_funnel::{ComboOutcome, Costs, FunnelInputs, FunnelReport, run_funnel};
 
 use crate::combo::{annualization, attach_sessions, collect_events, print_header, usd};
-use crate::config::{self, Consumer, LoadedConfig};
+use crate::config::{self, Consumer, DataSource, LoadedConfig};
 use crate::pull::EXIT_USAGE;
 use crate::walkforward::trading_days;
 
@@ -267,22 +267,6 @@ pub fn run_cmd(args: &FunnelArgs) -> i32 {
         initial_cash_nano_usd: loaded.initial_cash_nano_usd,
         bars_per_year,
     };
-    let identity = RunIdentity {
-        config_hash: loaded.config_hash,
-        root_seed: loaded.file.run.seed,
-        // No account is evaluated yet: the breach probability, the day-block
-        // bootstrap and P(pass) are `ACCOUNT_EVAL_SPEC.md` §4 and land with the
-        // block that consumes the day series this run already captures. The
-        // field is threaded through the run identity and the seed lineage now
-        // (D-0067) so that the first account to arrive cannot be charged
-        // silently.
-        account_id: None,
-    };
-    let now = timestamp();
-    // ---- S0, ahead of everything, because a score that predicts nothing is
-    // dead before any equity curve exists (D-0081/D-0085). It takes no
-    // position, so it has no fill model and no replay: one streaming pass per
-    // combo over the same bars.
     let s0_spec = loaded
         .file
         .s0
@@ -298,6 +282,59 @@ pub fn run_cmd(args: &FunnelArgs) -> i32 {
             bootstrap_draws: cfg_s0.bootstrap_draws,
             min_abs_ic: cfg_s0.min_abs_ic,
         });
+    let s0_data_source = if criteria.runs(crucible_funnel::stages::Stage::S0) {
+        match s0_data_source_identity(&loaded) {
+            Ok(data_source) => Some(data_source),
+            Err(message) => {
+                eprintln!("error: {message}");
+                return EXIT_USAGE;
+            }
+        }
+    } else {
+        None
+    };
+    let registration_hash = if criteria.runs(crucible_funnel::stages::Stage::S0) {
+        let Some(spec) = s0_spec.as_ref() else {
+            eprintln!("error: `stages` declares s0 but there is no `[s0]` block");
+            return EXIT_USAGE;
+        };
+        let data_source = s0_data_source
+            .as_ref()
+            .expect("S0 data identity was constructed above");
+        match crucible_funnel::s0::s0_run_registration_hash(
+            loaded.grid.spec(),
+            spec,
+            loaded.spec.tick,
+            data_source,
+            &series.events,
+            &days.keys,
+            &series.data_manifest_ids,
+        ) {
+            Ok(hash) => hash,
+            Err(error) => {
+                eprintln!("error: {error}");
+                return EXIT_USAGE;
+            }
+        }
+    } else {
+        loaded.config_hash
+    };
+    let identity = RunIdentity {
+        config_hash: registration_hash,
+        root_seed: loaded.file.run.seed,
+        // No account is evaluated yet: the breach probability, the day-block
+        // bootstrap and P(pass) are `ACCOUNT_EVAL_SPEC.md` §4 and land with the
+        // block that consumes the day series this run already captures. The
+        // field is threaded through the run identity and the seed lineage now
+        // (D-0067) so that the first account to arrive cannot be charged
+        // silently.
+        account_id: None,
+    };
+    let now = timestamp();
+    // ---- S0, ahead of everything, because a score that predicts nothing is
+    // dead before any equity curve exists (D-0081/D-0085). It takes no
+    // position, so it has no fill model and no replay: one streaming pass per
+    // combo over the same bars.
     let mut s0_report = None;
     if criteria.runs(crucible_funnel::stages::Stage::S0) {
         let Some(spec) = s0_spec.as_ref() else {
@@ -305,10 +342,12 @@ pub fn run_cmd(args: &FunnelArgs) -> i32 {
             return EXIT_USAGE;
         };
         let s0_inputs = crucible_funnel::s0::S0Inputs {
+            data_source: s0_data_source
+                .as_ref()
+                .expect("S0 data identity was constructed above"),
             events: &series.events,
             day_keys: &days.keys,
             grid: &loaded.grid,
-            spec: loaded.grid.spec(),
             s0: spec,
             tick_size: loaded.spec.tick,
             identity: &identity,
@@ -337,6 +376,7 @@ pub fn run_cmd(args: &FunnelArgs) -> i32 {
         identity: &identity,
         criteria: &criteria,
         s0_spec: s0_spec.as_ref(),
+        s0_data_source: s0_data_source.as_ref(),
         costs: Costs {
             half_spread_ticks: loaded.file.execution.half_spread_ticks,
             fee_per_contract_nano_usd: loaded.fee_per_contract_nano_usd,
@@ -370,6 +410,7 @@ pub fn run_cmd(args: &FunnelArgs) -> i32 {
         hypothesis_family: loaded.file.meta.hypothesis_family.clone(),
         economic_rationale: loaded.file.meta.economic_rationale.clone(),
         config_hash: loaded.config_hash.to_string(),
+        registration_hash: identity.config_hash.to_string(),
         git_sha: git_sha.clone(),
         data_manifest_ids: series.data_manifest_ids.clone(),
         data_source: series.description.clone(),
@@ -399,13 +440,17 @@ pub fn run_cmd(args: &FunnelArgs) -> i32 {
     };
     let card = args
         .out
-        .join(format!("scorecard-{}.html", loaded.config_hash.short()));
+        .join(format!("scorecard-{}.html", identity.config_hash.short()));
     if let Err(e) = std::fs::write(&card, html) {
         eprintln!("error: cannot write {}: {e}", card.display());
         return EXIT_USAGE;
     }
 
     print_header(&loaded, "funnel");
+    println!(
+        "  registration   {}  (registry/run identity, D-0106)",
+        identity.config_hash
+    );
     println!("  bars           {}", series.description);
     crate::grain::print_caveats(&series.caveats);
     print_report(&loaded, &report, &criteria, &days, series.events.len());
@@ -422,6 +467,41 @@ pub fn run_cmd(args: &FunnelArgs) -> i32 {
         return EXIT_ALL_KILLED;
     }
     0
+}
+
+fn s0_data_source_identity(
+    loaded: &LoadedConfig,
+) -> Result<crucible_funnel::s0::S0DataSourceIdentity, String> {
+    let instrument = loaded.spec.instrument.clone();
+    let timeframe = loaded.timeframe;
+    match &loaded.file.data {
+        DataSource::Curated { start, end } => {
+            Ok(crucible_funnel::s0::S0DataSourceIdentity::Curated {
+                instrument,
+                timeframe,
+                start: start.clone(),
+                end: end.clone(),
+            })
+        }
+        DataSource::Synthetic {
+            seed,
+            bars,
+            start_price_points,
+            vol_ticks,
+        } => {
+            let start_price_nanopoints = Price::from_points_str(start_price_points)
+                .map_err(|error| format!("data.start_price_points: {error}"))?
+                .as_nanos();
+            Ok(crucible_funnel::s0::S0DataSourceIdentity::Synthetic {
+                instrument,
+                timeframe,
+                seed: *seed,
+                bars: *bars,
+                start_price_nanopoints,
+                vol_ticks: *vol_ticks,
+            })
+        }
+    }
 }
 
 /// The repository revision (§2.5).
@@ -757,16 +837,18 @@ fn format_s0(report: &crucible_funnel::s0::S0Report) -> String {
         let _ = writeln!(text, "S0 — UNAVAILABLE: no grid combos were measured");
         return text;
     };
-    let min_abs_ic = first.spec.min_abs_ic;
+    let min_abs_ic = first.combo.spec.min_abs_ic;
     let _ = writeln!(text);
     let _ = writeln!(
         text,
         "S0 — signal triage. Score = `{}`. No orders, no fills, no equity curve:
             this stage asks only whether the score predicts the return that follows it.
             Pre-registered: |IC| >= {min_abs_ic:.4} at some declared horizon.",
-        first.spec.score_slot
+        first.combo.spec.score_slot
     );
-    for c in &report.combos {
+    let _ = writeln!(text, "  registration/run hash {}", report.registration_hash);
+    for metrics in &report.combos {
+        let c = &metrics.combo;
         let _ = writeln!(text);
         let _ = writeln!(
             text,
@@ -845,13 +927,14 @@ fn format_s0(report: &crucible_funnel::s0::S0Report) -> String {
         report.survivors(),
         report.combos.len()
     );
-    match report.evidence_scope {
-        crucible_funnel::s0::S0EvidenceScope::EqualCountScoreBuckets => {
+    match report.evidence_scope() {
+        Some(crucible_funnel::s0::S0EvidenceScope::EqualCountScoreBuckets) => {
             let _ = writeln!(
                 text,
                 "  Capability limitation (not an H-008 run result): original H-008 Gate 0b remains UNEVALUATED — equal-count score buckets are not the registered population of closes beyond their Bollinger band."
             );
         }
+        None => {}
     }
     text
 }
@@ -861,7 +944,7 @@ mod tests {
     use super::{format_s0, format_s0_buckets};
     use crucible_funnel::s0::{
         Availability, Bucket, BucketSet, HorizonEvidence, Interval, S0ComboReport, S0EvidenceScope,
-        S0Report, S0Spec, UnavailableReason,
+        S0Report, S0RunMetrics, S0Spec, UnavailableReason,
     };
 
     const MIN: i64 = 60_000_000_000;
@@ -914,22 +997,25 @@ mod tests {
             })
             .collect();
         S0Report {
-            evidence_scope: S0EvidenceScope::EqualCountScoreBuckets,
-            combos: vec![S0ComboReport {
-                score_identity: "zscore close period=20".to_owned(),
-                tick_size_nanopoints: 250_000_000,
-                spec: S0Spec {
-                    score_slot: "z".to_owned(),
-                    horizons_ns: declared.to_vec(),
-                    buckets: 5,
-                    bootstrap_draws: 200,
-                    min_abs_ic: 0.05,
+            registration_hash: "ab".repeat(32),
+            combos: vec![S0RunMetrics {
+                evidence_scope: S0EvidenceScope::EqualCountScoreBuckets,
+                combo: S0ComboReport {
+                    score_identity: "zscore close period=20".to_owned(),
+                    tick_size_nanopoints: 250_000_000,
+                    spec: S0Spec {
+                        score_slot: "z".to_owned(),
+                        horizons_ns: declared.to_vec(),
+                        buckets: 5,
+                        bootstrap_draws: 200,
+                        min_abs_ic: 0.05,
+                    },
+                    combo_index: 0,
+                    label: "z(period=20 source=close)".to_owned(),
+                    warmup_bars: 20,
+                    scores: 5,
+                    horizons,
                 },
-                combo_index: 0,
-                label: "z(period=20 source=close)".to_owned(),
-                warmup_bars: 20,
-                scores: 5,
-                horizons,
             }],
         }
     }
@@ -999,7 +1085,7 @@ mod tests {
     #[test]
     fn stdout_does_not_present_the_no_separation_converse_as_an_edge() {
         let mut report = ordered_report();
-        for horizon in &mut report.combos[0].horizons {
+        for horizon in &mut report.combos[0].combo.horizons {
             horizon.ic = Availability::Unavailable {
                 reason: UnavailableReason::ConstantForwardReturn,
             };

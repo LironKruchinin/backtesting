@@ -21,8 +21,10 @@
 //! - **Config identity.** `config_hash = blake3(spec.canonical_form())` —
 //!   computed by the caller (`crucible-cli::config`), never over raw file
 //!   bytes and never with `DefaultHasher`. Done, D-0012/D-0060.
-//! - **Run identity and dedupe.** `(config_hash, account_id, combo_index,
-//!   fold, seed)`. Done, in [`crate::registry`].
+//! - **Run identity and dedupe.** `(registration_hash, account_id,
+//!   combo_index, fold, seed)`. The registration hash is the config hash above
+//!   unless S0 is declared, when D-0106 also binds S0, tick, and data window.
+//!   Done, in [`crate::registry`].
 //! - **Derived seeds.** Done, in [`crate::walkforward::seed`].
 
 /// Combos above which a grid is more likely a mistyped `step` than a plan.

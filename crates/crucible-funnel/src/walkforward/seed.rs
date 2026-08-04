@@ -9,11 +9,13 @@
 //! least visible.
 //!
 //! The config's own `[run].seed` joins the tuple. §2.2's triple is a floor,
-//! not a ceiling, and `config_hash` deliberately does not cover `[run].seed`:
-//! it is blake3 over a [`ComboSpec::canonical_form`], which is slots, rules
-//! and size. Leaving the root seed out would make two configs that differ
-//! only in their declared seed derive identical per-fold seeds — the exact
-//! thing a seed field exists to prevent.
+//! not a ceiling, and the effective registration hash deliberately does not
+//! cover `[run].seed`: it is normally blake3 over a
+//! [`ComboSpec::canonical_form`] and, for an S0 registration, D-0106 extends
+//! that identity with predictor/data inputs but still not the run seed.
+//! Leaving the root seed out would make two configs that differ only in their
+//! declared seed derive identical per-fold seeds — the exact thing a seed
+//! field exists to prevent.
 //!
 //! The mixer is hand-rolled (FNV-1a absorb, SplitMix64 finalize) for the same
 //! reason `Fnv64` in the CLI is: `DefaultHasher` is not stable across Rust

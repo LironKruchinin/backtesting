@@ -103,7 +103,9 @@ use crate::stages::{Criteria, Verdict};
 /// the code that wrote it is five years gone.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct RunKey {
-    /// blake3 of the config's canonical form (D-0012), lowercase hex.
+    /// Effective registration hash, lowercase hex. This is the D-0012
+    /// strategy hash for ordinary runs and the D-0106 composite when S0 is
+    /// declared.
     pub config_hash: String,
     /// The evaluated account (`configs/accounts/*.toml` stem), or `None` when
     /// the run is not being scored against one. Part of the identity because
@@ -116,11 +118,10 @@ pub struct RunKey {
     /// The derived seed for this run
     /// ([`crate::walkforward::derive_run_seed`]).
     ///
-    /// In the key, not merely on the row: `config_hash` is blake3 over a
-    /// `ComboSpec::canonical_form`, which deliberately does not cover
-    /// `[run].seed` (D-0064). Without the seed here, two configs differing
-    /// only in their declared seed would dedupe into each other and the second
-    /// would never run.
+    /// In the key, not merely on the row: neither the D-0012 strategy hash nor
+    /// D-0106's S0 registration hash covers `[run].seed` (D-0064). Without the
+    /// seed here, two registrations differing only in their declared seed
+    /// would dedupe into each other and the second would never run.
     pub seed: u64,
 }
 
@@ -876,6 +877,17 @@ impl Registry {
         finished_at: &str,
     ) -> Result<(), RegistryError> {
         let run_id = key.run_id();
+        if status == RunStatus::Done
+            && metrics.is_none()
+            && self.claims.get(&run_id).is_some_and(|claim| {
+                claim.fold.is_none() && claim.fill_model == crate::s0::S0_FILL_MODEL
+            })
+        {
+            return Err(RegistryError::ResultDoesNotMatchClaim {
+                run_id,
+                message: "a successfully measured S0 claim requires typed S0 metrics".to_owned(),
+            });
+        }
         let metrics = metrics.map_or(MetricsWire::LegacyAbsent(()), MetricsWire::Trading);
         if self.runs.contains_key(&run_id) {
             self.validate_finished_result(&run_id, &metrics)?;
@@ -883,6 +895,44 @@ impl Registry {
         let record = Line::RunFinished {
             run_id,
             status,
+            metrics,
+            finished_at: finished_at.to_owned(),
+        };
+        self.append(&record)?;
+        self.apply(record)
+    }
+
+    /// Records a successfully measured S0 run as its typed predictor result.
+    ///
+    /// Unlike the legacy [`Self::finish`] API, an S0 measurement has only one
+    /// successful terminal status and cannot be represented by trading metrics
+    /// or by `metrics: null`. The complete typed result is validated against
+    /// the insert-before-run claim before any bytes are appended.
+    ///
+    /// # Errors
+    /// [`RegistryError::UnknownRun`] if the run was never claimed,
+    /// [`RegistryError::ResultDoesNotMatchClaim`] if the result contradicts
+    /// that claim, or [`RegistryError::Io`] if the validated line cannot be
+    /// appended.
+    pub(crate) fn finish_s0(
+        &mut self,
+        key: &RunKey,
+        metrics: &crate::s0::S0RunMetrics,
+        expected: &crate::s0::S0ResultContract,
+        finished_at: &str,
+    ) -> Result<(), RegistryError> {
+        let run_id = key.run_id();
+        expected.validate(key, metrics).map_err(|message| {
+            RegistryError::ResultDoesNotMatchClaim {
+                run_id: run_id.clone(),
+                message,
+            }
+        })?;
+        let metrics = MetricsWire::Typed(TypedMetricsWire::S0(metrics.clone()));
+        self.validate_finished_result(&run_id, &metrics)?;
+        let record = Line::RunFinished {
+            run_id,
+            status: RunStatus::Done,
             metrics,
             finished_at: finished_at.to_owned(),
         };
@@ -1364,6 +1414,84 @@ mod tests {
     }
 
     #[test]
+    fn typed_s0_writer_round_trips_every_decision_field_bit_for_bit() {
+        let path = tmp("typed-s0-writer");
+        let key = key(0, None, 7);
+        let expected = measured_s0_metrics();
+        expected.validate().expect("valid S0 fixture");
+        let contract =
+            crate::s0::S0ResultContract::matching_for_test(key.config_hash.clone(), &expected);
+        {
+            let mut registry = Registry::open(&path).expect("opens");
+            registry
+                .insert_running(&s0_row(key.clone(), "fam"))
+                .expect("insert");
+            registry
+                .finish_s0(&key, &expected, &contract, "2026-08-02T00:00:00Z")
+                .expect("typed S0 finish");
+            assert_eq!(registry.status_of(&key), Some(RunStatus::Done));
+            assert_eq!(
+                registry.result_of(&key),
+                Some(&PersistedRunResult::S0(expected.clone()))
+            );
+        }
+
+        let text = std::fs::read_to_string(&path).expect("read registry");
+        let finish: serde_json::Value =
+            serde_json::from_str(text.lines().nth(1).expect("finish line")).expect("finish JSON");
+        assert_eq!(finish["status"], "done");
+        assert_eq!(finish["metrics"]["metric_kind"], "s0");
+        assert_eq!(finish["metrics"]["value"], serde_json::json!(expected));
+
+        let reread = Registry::open(&path).expect("real reader accepts writer output");
+        let Some(PersistedRunResult::S0(actual)) = reread.result_of(&key) else {
+            panic!("finished S0 row must expose typed S0 metrics");
+        };
+        assert_eq!(&expected, actual, "every non-float decision field");
+        assert_eq!(
+            s0_float_bits(&expected),
+            s0_float_bits(actual),
+            "every persisted floating-point decision field must retain its bits"
+        );
+        assert_eq!(
+            serde_json::to_vec(&expected).expect("serialize expected"),
+            serde_json::to_vec(actual).expect("serialize actual"),
+            "writer and real reader must agree on every persisted decision byte"
+        );
+    }
+
+    #[test]
+    fn typed_s0_writer_refuses_an_identity_mismatch_before_append() {
+        let path = tmp("typed-s0-writer-identity-mismatch");
+        let key = key(0, None, 7);
+        let expected = measured_s0_metrics();
+        let contract =
+            crate::s0::S0ResultContract::matching_for_test(key.config_hash.clone(), &expected);
+        let mut metrics = expected;
+        metrics.combo.score_identity = "another score identity".to_owned();
+        let mut registry = Registry::open(&path).expect("opens");
+        registry
+            .insert_running(&s0_row(key.clone(), "fam"))
+            .expect("insert");
+        let before = std::fs::read(&path).expect("read claim bytes");
+
+        let error = registry
+            .finish_s0(&key, &metrics, &contract, "2026-08-02T00:00:00Z")
+            .expect_err("claim/result identity mismatch must be refused");
+        assert!(
+            matches!(error, RegistryError::ResultDoesNotMatchClaim { .. }),
+            "{error:?}"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("read unchanged registry"),
+            before,
+            "an invalid typed result must be refused before append"
+        );
+        assert_eq!(registry.status_of(&key), Some(RunStatus::Running));
+        assert_eq!(registry.result_of(&key), None);
+    }
+
+    #[test]
     fn unknown_or_extended_metric_shapes_are_refused() {
         let unknown_kind = serde_json::json!({
             "metric_kind": "future_metric",
@@ -1506,7 +1634,7 @@ mod tests {
     }
 
     #[test]
-    fn predictor_claims_refuse_trading_metrics_but_keep_legacy_null_readable() {
+    fn predictor_claims_refuse_trading_or_fresh_null_metrics_but_keep_legacy_null_readable() {
         let metrics = RunMetrics {
             final_equity_nano_usd: 0,
             return_pct: 0.0,
@@ -1541,14 +1669,25 @@ mod tests {
             assert_eq!(registry.status_of(&s0_key), Some(RunStatus::Running));
             assert_eq!(registry.result_of(&s0_key), None);
 
-            registry
+            let error = registry
                 .finish(&s0_key, RunStatus::Done, None, "finished")
-                .expect("historical explicit null remains readable");
-            assert_eq!(
-                registry.result_of(&s0_key),
-                Some(&PersistedRunResult::LegacyAbsent)
+                .expect_err("a fresh successful S0 result cannot be null");
+            assert!(
+                matches!(error, RegistryError::ResultDoesNotMatchClaim { .. }),
+                "{error:?}"
             );
+            assert_eq!(
+                std::fs::read_to_string(&path)
+                    .expect("read")
+                    .lines()
+                    .count(),
+                1,
+                "fresh S0 null must be refused before append"
+            );
+            assert_eq!(registry.status_of(&s0_key), Some(RunStatus::Running));
+            assert_eq!(registry.result_of(&s0_key), None);
         }
+        append_finished_json(&path, &s0_key, serde_json::Value::Null);
         assert!(matches!(
             Registry::open(&path).expect("reopens").result_of(&s0_key),
             Some(PersistedRunResult::LegacyAbsent)

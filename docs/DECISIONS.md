@@ -3620,3 +3620,119 @@ propose a superseding entry — don't silently diverge.
   restore the standing-trial count, and verdict rows repeat a family label but
   are not run claims. Their semantics require separate rulings; this entry
   changes neither while enforcing the reviewer-issued claim-time boundary.
+- **D-0106** (2026-08-01) -- **An S0 registration owns a versioned composite
+  run identity, writes the typed D-0104 aggregate, and resumes only from that
+  registry-owned result.** The old D-0012 strategy hash remains visible, but
+  a funnel that declares S0 now uses
+  `blake3("crucible-s0-registration/1" || canonical fields)` as the existing
+  `RunKey.config_hash` for both its S0 row and all downstream trading folds.
+  The canonical, length-prefixed encoding binds the base strategy hash; score
+  slot; horizons in declared order; bucket count; bootstrap draws;
+  `min_abs_ic` bits; contract tick nanopoints; typed curated window or complete
+  synthetic-generator declaration; the sorted/deduplicated manifest-id set;
+  observed first/last availability timestamps and bar count; and every ordered
+  OHLCV/signal-offset/session-key value. Thus the requested data window is in
+  the identity, while an interior-bar or bootstrap-block change cannot collide
+  merely because its endpoints agree. Both `run_s0` and `run_funnel`
+  independently derive D-0012 from the grid's owned `ComboSpec` and then
+  derive this composite before any claim, so a public caller cannot pair an
+  arbitrary base/effective hash or a foreign spec with the grid. Synthetic
+  bar counts must match the observed population and cannot carry archive
+  manifests; a nonempty curated population must carry at least one manifest.
+  The CLI remains the authority that parses curated date endpoints and applies
+  them to archive reads; the library binds both the declaration and delivered
+  population but does not independently rederive civil-date containment.
+  The run seed remains a separate `RunKey` component under D-0064.
+  **One registration, one trial.** S0 and S1/S2 receive the same effective
+  hash, so folds do not create a second trial per combo. Configs without S0
+  retain their D-0012 identity and their existing determinism pins. Scorecard
+  provenance and filenames use the registration/run hash while retaining the
+  strategy hash beside it; the stdout S0 product names the same identity.
+  D-0064 seed derivation now consumes that effective identity: changing any
+  bound S0/data input deliberately changes the S0 bootstrap stream and the
+  downstream fold/control streams as well as the key. This avoids reusing a
+  seed lineage across distinct registered populations, at the cost of not
+  supplying common random numbers across those registrations.
+  **Reader-first writer activation.** D-0104 is already on main. This commit
+  adds the crate-private `Registry::finish_s0`, which can write only a
+  successful typed `S0RunMetrics` in D-0104's already-readable tagged shape.
+  It receives the single S0 run path's derived result contract and validates
+  registration, combo, score identity, warmup, declaration, and tick before
+  append; external callers cannot inject a parallel contract. The generic
+  legacy writer now also
+  refuses a successful S0 `metrics:null` before append, while ordinary trading
+  claims retain their old nullable compatibility path. Historical null rows
+  remain accepted only by replay. This does not alter the JSONL schema.
+  `S0Report` owns the registration hash and the exact `Vec<S0RunMetrics>`
+  values passed to persistence; assessment, stdout, HTML, and determinism
+  borrow each value's `combo`, so there is no parallel renderer aggregate to
+  drift. Before assessment, `run_funnel` requires each report value to be in
+  `Done` status and byte-equal to the real reader's registry-owned typed value.
+  Scorecard rendering also refuses when its provenance registration hash and
+  the S0 report's registry-owned hash disagree.
+  **Resume is a read, never a reconstruction.** `run_s0` branches on
+  `Inserted::AlreadyDone` before constructing a scorer, updating a bar,
+  joining a horizon, or drawing a bootstrap. It clones the typed result from
+  `Registry::result_of`; missing, trading, or historical `metrics:null` on a
+  Done S0 row is an explicit `CachedResult` refusal and appends nothing. Old
+  null rows remain readable as `LegacyAbsent` and keep their historical trial
+  charge. The composite v1 namespace means they are never reinterpreted as a
+  new measured result.
+  **Controls.** `every_declared_s0_and_data_window_input_changes_run_identity`
+  independently changes the horizon set and order, buckets, draws, threshold
+  bits, tick, curated start and end, synthetic declaration, observed
+  population, session keys, score slot, and base strategy; each changes
+  identity, while manifest reordering does not. A separate source-honesty
+  control refuses contradictory synthetic bar counts, synthetic manifests,
+  and missing curated manifests.
+  `already_done_serves_typed_registry_result_without_remeasurement` observes
+  one measurement start per fresh combo and zero on real-reader resume, proves
+  byte-identical JSONL and report/determinism equality, compares every report
+  aggregate to `PersistedRunResult::S0`, and proves a planted legacy-null Done
+  row, injected through the historical replay seam, refuses with zero
+  measurement starts and no append. The same control refuses an arbitrary
+  caller-supplied identity before claim, request-incompatible cached score and
+  warmup provenance before measurement, a non-Done typed result, and a
+  report/reader numeric disagreement. The registry control proves a live
+  writer cannot emit null or contract-incompatible typed evidence, and a
+  planted S0/provenance hash disagreement proves the scorecard cannot render
+  contradictory identities. A cached-threshold control changes the current
+  criteria from `0.05` to `0.99`: both `run_s0` and `run_funnel` refuse it
+  before measurement or append because criteria and declaration thresholds
+  must be bit-identical. The CLI control reopens the real registry after
+  the six-combo S0 null harness: all successful S0 rows are typed, no
+  `metrics:null` exists, S0 plus all trading folds still charge exactly six
+  trials, and the HTML filename uses the effective hash.
+  **Mutation verification.** Omitting horizon values from the identity made
+  the declared-order assertion fail; marking an `AlreadyDone` branch as a
+  measurement made the zero-work assertion report one; reversing the derived
+  identity refusal let an arbitrary hash measure and persist; changing the
+  live-null guard from `Done` to `Failed` let the planted fresh null finish;
+  reversing report/reader byte equality let divergent ticks pass; and
+  reversing scorecard hash equality rendered contradictory identities.
+  Accepting any current S0 threshold instead of requiring bit equality let a
+  cached `0.05` result cross into `0.99` criteria; the zero-work resume control
+  failed at its expected refusal. The named controls failed in every case.
+  Inverse patches restored byte-exact SHA-256 values: `s0.rs`
+  `6557994a9f4cfcfc7af655722ef689959d1f52275a7247539f3e2872eb5d3141`,
+  `registry.rs`
+  `df64ccadde7686dcae4c9a36bed5c748ed2be92b60b5b4e9224c9839e49c56ef`,
+  `funnel.rs`
+  `6f018da373e6fef74b0d753a0948c3c29b5ce3a8e60c11b5a57771d1ca3354b3`,
+  and `scorecard.rs`
+  `17f2083460ee4aa5b769b2249b80fac5ba872b0945b89f4ed8219fea59ef30bc`.
+  **Pin discipline.** Binding identity and replacing the legacy-null writer
+  intentionally changes S0's determinism bytes. The old
+  `825356c88295ce94` remains the historical D-0103 pin; the new value is
+  measured twice and recorded separately in D-0107, not smuggled into this
+  implementation commit.
+  **Adjacent holes are not decided here.** `FunnelReport::trials_before` is
+  sampled after S0 claims, so its label is not an invocation-start count.
+  Also, an AlreadyDone metric was measured under the original claim's git SHA
+  while the current scorecard names the renderer checkout. Exposing original
+  measurement provenance and correcting before/after semantics require
+  separate rulings; this commit does not silently choose them. A voided Done
+  S0 row also still satisfies the registry's status-only `AlreadyDone`
+  shortcut even though its trial is outside the standing denominator. Whether
+  void invalidates resume evidence is part of D-0105's reserved post-void
+  semantics, not silently decided here.

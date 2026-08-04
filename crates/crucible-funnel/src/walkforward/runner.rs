@@ -44,7 +44,7 @@ use super::window::RunTrace;
 /// parts only the caller knows (git sha, data manifest ids).
 #[derive(Clone, Debug)]
 pub struct RunIdentity {
-    /// blake3 over the config's canonical form (D-0012).
+    /// Effective registration hash: D-0012 normally, D-0106 when S0 is declared.
     pub config_hash: ConfigHash,
     /// The config's declared `[run].seed`, root of every derived seed.
     pub root_seed: u64,

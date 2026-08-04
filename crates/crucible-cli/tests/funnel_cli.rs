@@ -669,20 +669,41 @@ fn s0_runs_end_to_end_and_kills_the_null_harness_at_s0() {
     let lines = std::fs::read_to_string(out_dir.join("registry.jsonl")).expect("a registry");
     assert!(lines.contains(r#""kind":"run""#), "{lines}");
     assert!(
-        lines.contains(r#""metrics":null"#),
-        "reader-first means the existing S0 writer is still legacy-null: {lines}"
+        lines.contains(r#""metric_kind":"s0""#),
+        "every successfully measured S0 row must persist its typed evidence: {lines}"
     );
     assert!(
-        !lines.contains(r#""metric_kind":"s0""#),
-        "the typed S0 reader must land before any production writer: {lines}"
+        !lines.contains(r#""metrics":null"#),
+        "a successful S0 measurement must never be persisted as legacy absence: {lines}"
     );
+    let registry = crucible_funnel::registry::Registry::open(&out_dir.join("registry.jsonl"))
+        .expect("real reader replays S0 and trading claims");
+    assert_eq!(
+        registry.trials_for("null-harness-sma-cross"),
+        6,
+        "S0 and every downstream fold must share one registration hash and one trial per combo"
+    );
+    drop(registry);
     let card = std::fs::read_dir(&out_dir)
         .expect("results dir")
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .find(|path| path.extension().is_some_and(|ext| ext == "html"))
         .expect("S0 scorecard");
-    let html = std::fs::read_to_string(card).expect("read S0 scorecard");
+    let registration_hash = text
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split_whitespace();
+            (fields.next() == Some("registration"))
+                .then(|| fields.next().expect("registration hash").to_owned())
+        })
+        .expect("stdout registration hash");
+    assert_eq!(
+        card.file_name().and_then(|name| name.to_str()),
+        Some(format!("scorecard-{}.html", &registration_hash[..12]).as_str()),
+        "scorecard filename must use the effective registration hash"
+    );
+    let html = std::fs::read_to_string(&card).expect("read S0 scorecard");
     for required in [
         "mean forward return (fraction)",
         "mean move (ticks)",

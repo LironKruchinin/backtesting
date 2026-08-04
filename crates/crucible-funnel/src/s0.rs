@@ -66,6 +66,9 @@ use rand_chacha::ChaCha8Rng;
 use rand_chacha::rand_core::{RngCore, SeedableRng};
 use serde::{Deserialize, Serialize};
 
+use crucible_core::prelude::{InstrumentId, MarketEvent, Price, TimeFrame};
+use crucible_strategies::combo::ConfigHash;
+
 /// One market bar on S0's price timeline, with an optional score.
 ///
 /// `price_points` is the **tradeable** close in points, not the signal-space
@@ -698,6 +701,350 @@ mod tests;
 /// Registry fill-model marker for a predictor measurement that takes no position.
 pub const S0_FILL_MODEL: &str = "none (s0 takes no position)";
 
+/// The data declaration whose window and generator/archive identity belong to
+/// an S0 registration hash (D-0106).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum S0DataSourceIdentity {
+    /// One curated outright over an inclusive-start, exclusive-end UTC window.
+    Curated {
+        /// Contract symbol declared by `[universe]`.
+        instrument: InstrumentId,
+        /// Delivered or mechanically resampled bar grain.
+        timeframe: TimeFrame,
+        /// Inclusive `YYYY-MM-DD` UTC start.
+        start: String,
+        /// Exclusive `YYYY-MM-DD` UTC end.
+        end: String,
+    },
+    /// The deterministic null generator and all of its declared inputs.
+    Synthetic {
+        /// Synthetic instrument declared by `[universe]`.
+        instrument: InstrumentId,
+        /// Generated bar grain.
+        timeframe: TimeFrame,
+        /// Generator seed.
+        seed: u64,
+        /// Requested bar count.
+        bars: usize,
+        /// Opening tradeable price, in fixed-point nanopoints.
+        start_price_nanopoints: i64,
+        /// Random-walk step size, in ticks.
+        vol_ticks: u64,
+    },
+}
+
+impl S0DataSourceIdentity {
+    fn instrument_and_timeframe(&self) -> (&InstrumentId, TimeFrame) {
+        match self {
+            Self::Curated {
+                instrument,
+                timeframe,
+                ..
+            }
+            | Self::Synthetic {
+                instrument,
+                timeframe,
+                ..
+            } => (instrument, *timeframe),
+        }
+    }
+}
+
+/// Requires the stage criterion and the persisted S0 declaration to name one
+/// bit-identical decision threshold.
+///
+/// This check belongs ahead of both claim paths. In particular, an
+/// `AlreadyDone` row must not bypass it and feed evidence measured at one
+/// threshold into an assessment that renders another threshold.
+pub(crate) fn validate_s0_criteria_contract(
+    criteria: &crate::stages::Criteria,
+    s0: &S0Spec,
+) -> Result<(), String> {
+    if !criteria.runs(crate::stages::Stage::S0) {
+        return Err("the criteria do not declare the S0 stage".to_owned());
+    }
+    match criteria.s0_min_abs_ic {
+        Some(threshold) if threshold.to_bits() == s0.min_abs_ic.to_bits() => Ok(()),
+        Some(threshold) => Err(format!(
+            "criteria s0_min_abs_ic {threshold} does not bit-match the S0 declaration {}",
+            s0.min_abs_ic
+        )),
+        None => Err("the criteria declare S0 without s0_min_abs_ic".to_owned()),
+    }
+}
+
+/// Every value folded into the versioned S0 registration identity.
+pub struct S0RegistrationInputs<'a> {
+    /// D-0012 strategy/config hash before S0 and data identity are added.
+    pub strategy_hash: ConfigHash,
+    /// Complete S0 declaration.
+    pub s0: &'a S0Spec,
+    /// Declared contract tick.
+    pub tick_size: Price,
+    /// Declared archive window or synthetic generator.
+    pub data_source: &'a S0DataSourceIdentity,
+    /// Exact ordered population the run will consume.
+    pub events: &'a [MarketEvent],
+    /// FoldPlan-authoritative trading-session key beside every bar.
+    pub day_keys: &'a [i64],
+    /// Set of archived source identities; empty for synthetic data.
+    pub data_manifest_ids: &'a [String],
+}
+
+/// Why an S0 registration identity could not truthfully name its population.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum S0RegistrationError {
+    /// Events and their session keys must be one-to-one.
+    SessionKeyCount { events: usize, day_keys: usize },
+    /// A run over no bars has no data window to bind.
+    EmptyWindow,
+    /// A deterministic synthetic declaration must yield exactly its requested bars.
+    SyntheticBarCount { declared: usize, observed: usize },
+    /// Availability order must be strict before it can be hashed or joined.
+    NonIncreasingAvailability { previous: i64, next: i64 },
+    /// A bar contradicted the declared instrument or timeframe.
+    DataDeclarationMismatch {
+        expected_instrument: String,
+        expected_timeframe: String,
+        observed_instrument: String,
+        observed_timeframe: String,
+    },
+    /// S0 identity inputs were invalid before a claim could be made.
+    InvalidDeclaration(String),
+}
+
+impl std::fmt::Display for S0RegistrationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SessionKeyCount { events, day_keys } => write!(
+                f,
+                "s0 registration has {events} bars but {day_keys} trading-session keys"
+            ),
+            Self::EmptyWindow => write!(f, "s0 registration cannot bind an empty data window"),
+            Self::SyntheticBarCount { declared, observed } => write!(
+                f,
+                "s0 synthetic registration declares {declared} bars but supplied {observed}"
+            ),
+            Self::NonIncreasingAvailability { previous, next } => write!(
+                f,
+                "s0 registration requires strictly increasing availability timestamps; {next} follows {previous}"
+            ),
+            Self::DataDeclarationMismatch {
+                expected_instrument,
+                expected_timeframe,
+                observed_instrument,
+                observed_timeframe,
+            } => write!(
+                f,
+                "s0 data declaration {expected_instrument} {expected_timeframe} contradicts observed bar {observed_instrument} {observed_timeframe}"
+            ),
+            Self::InvalidDeclaration(message) => write!(f, "invalid s0 registration: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for S0RegistrationError {}
+
+fn hash_len(hasher: &mut blake3::Hasher, len: usize) {
+    let len = u64::try_from(len).expect("collection length fits the 64-bit identity encoding");
+    hasher.update(&len.to_le_bytes());
+}
+
+fn hash_bytes(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    hash_len(hasher, bytes.len());
+    hasher.update(bytes);
+}
+
+fn hash_text(hasher: &mut blake3::Hasher, text: &str) {
+    hash_bytes(hasher, text.as_bytes());
+}
+
+/// Computes the domain-separated S0 registration/run hash (D-0106).
+///
+/// The exact bar/session population is encoded in addition to its declared
+/// endpoints. This makes the observed first/last timestamps and count part of
+/// the identity while also refusing the more subtle collision where those
+/// three values agree but an interior bar or session assignment differs.
+/// Manifest ids are a set and therefore sort/deduplicate before hashing; every
+/// other sequence retains declaration or replay order.
+///
+/// # Errors
+/// [`S0RegistrationError`] if the declaration or population cannot be named
+/// without contradiction.
+pub fn s0_registration_hash(
+    inputs: &S0RegistrationInputs<'_>,
+) -> Result<ConfigHash, S0RegistrationError> {
+    if inputs.events.len() != inputs.day_keys.len() {
+        return Err(S0RegistrationError::SessionKeyCount {
+            events: inputs.events.len(),
+            day_keys: inputs.day_keys.len(),
+        });
+    }
+    if inputs.events.is_empty() {
+        return Err(S0RegistrationError::EmptyWindow);
+    }
+    if let S0DataSourceIdentity::Synthetic { bars, .. } = inputs.data_source
+        && *bars != inputs.events.len()
+    {
+        return Err(S0RegistrationError::SyntheticBarCount {
+            declared: *bars,
+            observed: inputs.events.len(),
+        });
+    }
+    match inputs.data_source {
+        S0DataSourceIdentity::Synthetic { .. } if !inputs.data_manifest_ids.is_empty() => {
+            return Err(S0RegistrationError::InvalidDeclaration(
+                "synthetic data cannot name archived manifest ids".to_owned(),
+            ));
+        }
+        S0DataSourceIdentity::Curated { .. } if inputs.data_manifest_ids.is_empty() => {
+            return Err(S0RegistrationError::InvalidDeclaration(
+                "a nonempty curated population must name at least one archived manifest id"
+                    .to_owned(),
+            ));
+        }
+        S0DataSourceIdentity::Curated { .. } | S0DataSourceIdentity::Synthetic { .. } => {}
+    }
+    if inputs.s0.score_slot.trim().is_empty()
+        || inputs.s0.horizons_ns.is_empty()
+        || inputs.s0.horizons_ns.iter().any(|h| *h <= 0)
+        || inputs.s0.buckets == 0
+        || !inputs.s0.min_abs_ic.is_finite()
+        || inputs.s0.min_abs_ic < 0.0
+        || inputs.tick_size.as_nanos() <= 0
+    {
+        return Err(S0RegistrationError::InvalidDeclaration(
+            "score, positive horizons/buckets/tick, and a finite nonnegative min_abs_ic are required"
+                .to_owned(),
+        ));
+    }
+    let (expected_instrument, expected_timeframe) = inputs.data_source.instrument_and_timeframe();
+    let mut previous = None;
+    for event in inputs.events {
+        let MarketEvent::Bar(bar) = event;
+        let availability = bar.avail_ts().0;
+        if let Some(previous) = previous
+            && availability <= previous
+        {
+            return Err(S0RegistrationError::NonIncreasingAvailability {
+                previous,
+                next: availability,
+            });
+        }
+        previous = Some(availability);
+        if &bar.instrument != expected_instrument || bar.tf != expected_timeframe {
+            return Err(S0RegistrationError::DataDeclarationMismatch {
+                expected_instrument: expected_instrument.to_string(),
+                expected_timeframe: expected_timeframe.to_string(),
+                observed_instrument: bar.instrument.to_string(),
+                observed_timeframe: bar.tf.to_string(),
+            });
+        }
+    }
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"crucible-s0-registration/1\0");
+    hasher.update(inputs.strategy_hash.as_bytes());
+    hash_text(&mut hasher, &inputs.s0.score_slot);
+    hash_len(&mut hasher, inputs.s0.horizons_ns.len());
+    for horizon in &inputs.s0.horizons_ns {
+        hasher.update(&horizon.to_le_bytes());
+    }
+    hash_len(&mut hasher, inputs.s0.buckets);
+    hash_len(&mut hasher, inputs.s0.bootstrap_draws);
+    hasher.update(&inputs.s0.min_abs_ic.to_bits().to_le_bytes());
+    hasher.update(&inputs.tick_size.as_nanos().to_le_bytes());
+
+    match inputs.data_source {
+        S0DataSourceIdentity::Curated {
+            instrument,
+            timeframe,
+            start,
+            end,
+        } => {
+            hash_text(&mut hasher, "curated");
+            hash_text(&mut hasher, instrument.as_str());
+            hasher.update(&timeframe.duration_ns().to_le_bytes());
+            hash_text(&mut hasher, start);
+            hash_text(&mut hasher, end);
+        }
+        S0DataSourceIdentity::Synthetic {
+            instrument,
+            timeframe,
+            seed,
+            bars,
+            start_price_nanopoints,
+            vol_ticks,
+        } => {
+            hash_text(&mut hasher, "synthetic");
+            hash_text(&mut hasher, instrument.as_str());
+            hasher.update(&timeframe.duration_ns().to_le_bytes());
+            hasher.update(&seed.to_le_bytes());
+            hash_len(&mut hasher, *bars);
+            hasher.update(&start_price_nanopoints.to_le_bytes());
+            hasher.update(&vol_ticks.to_le_bytes());
+        }
+    }
+
+    let mut manifests = inputs.data_manifest_ids.to_vec();
+    manifests.sort_unstable();
+    manifests.dedup();
+    hash_len(&mut hasher, manifests.len());
+    for manifest in &manifests {
+        hash_text(&mut hasher, manifest);
+    }
+
+    hash_len(&mut hasher, inputs.events.len());
+    let first = inputs
+        .events
+        .first()
+        .expect("nonempty checked")
+        .avail_ts()
+        .0;
+    let last = inputs.events.last().expect("nonempty checked").avail_ts().0;
+    hasher.update(&first.to_le_bytes());
+    hasher.update(&last.to_le_bytes());
+    for (event, day_key) in inputs.events.iter().zip(inputs.day_keys) {
+        let MarketEvent::Bar(bar) = event;
+        hash_text(&mut hasher, bar.instrument.as_str());
+        hasher.update(&bar.tf.duration_ns().to_le_bytes());
+        hasher.update(&bar.ts_open.0.to_le_bytes());
+        for price in [bar.open, bar.high, bar.low, bar.close, bar.signal_offset] {
+            hasher.update(&price.as_nanos().to_le_bytes());
+        }
+        hasher.update(&bar.volume.to_le_bytes());
+        hasher.update(&day_key.to_le_bytes());
+    }
+
+    Ok(ConfigHash::from_bytes(*hasher.finalize().as_bytes()))
+}
+
+/// Derives D-0012 from the executable combo spec, then binds every S0/data input.
+///
+/// This is the production entry point: callers cannot pair an arbitrary base
+/// hash with a different strategy declaration.
+pub fn s0_run_registration_hash(
+    combo_spec: &crucible_strategies::combo::ComboSpec,
+    s0: &S0Spec,
+    tick_size: Price,
+    data_source: &S0DataSourceIdentity,
+    events: &[MarketEvent],
+    day_keys: &[i64],
+    data_manifest_ids: &[String],
+) -> Result<ConfigHash, S0RegistrationError> {
+    let strategy_hash =
+        ConfigHash::from_bytes(*blake3::hash(combo_spec.canonical_form().as_bytes()).as_bytes());
+    s0_registration_hash(&S0RegistrationInputs {
+        strategy_hash,
+        s0,
+        tick_size,
+        data_source,
+        events,
+        day_keys,
+        data_manifest_ids,
+    })
+}
+
 /// What S0 was asked to measure, declared in the config's `[s0]` block before
 /// the run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1010,23 +1357,29 @@ impl S0RunMetrics {
     pub fn validate(&self) -> Result<(), String> {
         self.combo.validate()
     }
+
+    pub(crate) fn decision_bytes(&self) -> Vec<u8> {
+        self.validate()
+            .expect("invalid S0 metrics cannot be compared or rendered");
+        serde_json::to_vec(self).expect("validated S0 metrics must serialize")
+    }
 }
 
 /// The whole S0 stage over a grid.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct S0Report {
-    /// Exact population capability shared by every combo in this report.
-    pub evidence_scope: S0EvidenceScope,
-    /// One entry per combo, in grid-index order.
-    pub combos: Vec<S0ComboReport>,
+    /// Versioned registration/run identity used by every registry claim.
+    pub registration_hash: String,
+    /// One complete persisted result per combo, in grid-index order.
+    pub combos: Vec<S0RunMetrics>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct S0ReportWire {
-    evidence_scope: S0EvidenceScope,
-    combos: Vec<S0ComboReport>,
+    registration_hash: String,
+    combos: Vec<S0RunMetrics>,
 }
 
 impl<'de> Deserialize<'de> for S0Report {
@@ -1036,7 +1389,7 @@ impl<'de> Deserialize<'de> for S0Report {
     {
         let wire = S0ReportWire::deserialize(deserializer)?;
         let report = Self {
-            evidence_scope: wire.evidence_scope,
+            registration_hash: wire.registration_hash,
             combos: wire.combos,
         };
         report.validate().map_err(serde::de::Error::custom)?;
@@ -1047,15 +1400,29 @@ impl<'de> Deserialize<'de> for S0Report {
 impl S0Report {
     /// Validates invariants shared by assessment, persistence, rendering, and hashing.
     pub fn validate(&self) -> Result<(), String> {
-        for (position, combo) in self.combos.iter().enumerate() {
-            combo.validate()?;
+        if self.registration_hash.len() != 64
+            || !self
+                .registration_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(
+                "S0 registration hash must be 64 lowercase hexadecimal characters".to_owned(),
+            );
+        }
+        for (position, metrics) in self.combos.iter().enumerate() {
+            metrics.validate()?;
+            let combo = &metrics.combo;
             if combo.combo_index != position {
                 return Err("S0 combos must appear once in contiguous grid-index order".to_owned());
             }
             if let Some(first) = self.combos.first()
-                && combo.spec != first.spec
+                && (combo.spec != first.combo.spec
+                    || metrics.evidence_scope != first.evidence_scope)
             {
-                return Err("every combo must share one S0 declaration".to_owned());
+                return Err(
+                    "every combo must share one S0 declaration and evidence population".to_owned(),
+                );
             }
         }
         Ok(())
@@ -1064,7 +1431,16 @@ impl S0Report {
     /// Combos whose generic S0 criterion cleared.
     #[must_use]
     pub fn survivors(&self) -> usize {
-        self.combos.iter().filter(|combo| combo.passed()).count()
+        self.combos
+            .iter()
+            .filter(|metrics| metrics.combo.passed())
+            .count()
+    }
+
+    /// Exact population capability shared by every combo, when one exists.
+    #[must_use]
+    pub fn evidence_scope(&self) -> Option<S0EvidenceScope> {
+        self.combos.first().map(|metrics| metrics.evidence_scope)
     }
 
     /// Canonical bytes consumed by the determinism hash.
@@ -1078,17 +1454,39 @@ impl S0Report {
 /// Anything that stops S0 from running.
 #[derive(Debug)]
 pub enum S0Error {
+    /// The versioned registration identity could not be derived truthfully.
+    Registration(S0RegistrationError),
+    /// The caller supplied a run identity other than the derived registration.
+    RegistrationIdentity { expected: String, supplied: String },
+    /// The decision criterion contradicted the S0 declaration.
+    CriteriaContract(String),
     /// The score slot could not be resolved against the config's indicators.
     Scorer(crucible_strategies::combo::ScorerError),
     /// The registry could not be claimed or written.
     Registry(crate::registry::RegistryError),
+    /// A completed registry row could not supply the typed S0 result it names.
+    CachedResult { run_id: String, reason: String },
 }
 
 impl std::fmt::Display for S0Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            S0Error::Registration(e) => write!(f, "s0: {e}"),
+            S0Error::RegistrationIdentity { expected, supplied } => write!(
+                f,
+                "s0: supplied run identity {supplied} does not match derived registration {expected}"
+            ),
+            S0Error::CriteriaContract(message) => {
+                write!(f, "s0: criteria/declaration mismatch: {message}")
+            }
             S0Error::Scorer(e) => write!(f, "s0: {e}"),
             S0Error::Registry(e) => write!(f, "s0: {e}"),
+            S0Error::CachedResult { run_id, reason } => {
+                write!(
+                    f,
+                    "s0: completed registry run {run_id} cannot be resumed: {reason}"
+                )
+            }
         }
     }
 }
@@ -1101,21 +1499,28 @@ impl From<crate::registry::RegistryError> for S0Error {
     }
 }
 
+impl From<S0RegistrationError> for S0Error {
+    fn from(e: S0RegistrationError) -> S0Error {
+        S0Error::Registration(e)
+    }
+}
+
 /// Everything S0 needs, supplied by the caller. No clock, no I/O.
+#[derive(Clone, Copy)]
 pub struct S0Inputs<'a> {
+    /// Declared curated window or synthetic generator identity.
+    pub data_source: &'a S0DataSourceIdentity,
     /// The shared bar series, in availability order.
     pub events: &'a [crucible_core::prelude::MarketEvent],
     /// One trading-day key per bar, the caller-computed slice (D-0071).
     pub day_keys: &'a [i64],
     /// The expanded grid.
     pub grid: &'a crucible_strategies::combo::Grid,
-    /// The spec the grid came from.
-    pub spec: &'a crucible_strategies::combo::ComboSpec,
     /// What to measure, declared before the run.
     pub s0: &'a S0Spec,
     /// Declared contract tick used for per-observation move conversion.
     pub tick_size: crucible_core::prelude::Price,
-    /// Config hash, root seed, account.
+    /// D-0106 registration hash, root seed, account.
     pub identity: &'a crate::walkforward::RunIdentity,
     /// The pre-registered criteria, stored verbatim on the registry row.
     pub criteria: &'a crate::stages::Criteria,
@@ -1128,6 +1533,108 @@ pub struct S0Inputs<'a> {
     pub data_manifest_ids: &'a [String],
     /// Wall clock, supplied by the caller.
     pub now: &'a str,
+}
+
+#[derive(Debug)]
+pub(crate) struct S0ResultContract {
+    registration_hash: String,
+    spec: S0Spec,
+    tick_size_nanopoints: i64,
+    combo_index: usize,
+    label: String,
+    score_identity: String,
+    warmup_bars: usize,
+}
+
+impl S0ResultContract {
+    fn new(inputs: &S0Inputs<'_>, combo: &crucible_strategies::combo::Combo) -> Self {
+        Self::for_combo(
+            &inputs.identity.config_hash,
+            inputs.grid.spec(),
+            inputs.s0,
+            inputs.tick_size,
+            combo,
+        )
+    }
+
+    pub(crate) fn for_combo(
+        registration_hash: &ConfigHash,
+        combo_spec: &crucible_strategies::combo::ComboSpec,
+        s0: &S0Spec,
+        tick_size: Price,
+        combo: &crucible_strategies::combo::Combo,
+    ) -> Self {
+        let label = combo.label();
+        Self {
+            registration_hash: registration_hash.to_string(),
+            spec: s0.clone(),
+            tick_size_nanopoints: tick_size.as_nanos(),
+            combo_index: combo.index,
+            score_identity: format!(
+                "{} score={} combo={}",
+                combo_spec.canonical_form(),
+                s0.score_slot,
+                label
+            ),
+            warmup_bars: combo.own_warmup_bars(),
+            label,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn matching_for_test(registration_hash: String, metrics: &S0RunMetrics) -> Self {
+        Self {
+            registration_hash,
+            spec: metrics.combo.spec.clone(),
+            tick_size_nanopoints: metrics.combo.tick_size_nanopoints,
+            combo_index: metrics.combo.combo_index,
+            label: metrics.combo.label.clone(),
+            score_identity: metrics.combo.score_identity.clone(),
+            warmup_bars: metrics.combo.warmup_bars,
+        }
+    }
+
+    pub(crate) fn validate(
+        &self,
+        key: &crate::registry::RunKey,
+        metrics: &S0RunMetrics,
+    ) -> Result<(), String> {
+        if key.config_hash != self.registration_hash
+            || metrics.evidence_scope != S0EvidenceScope::EqualCountScoreBuckets
+            || metrics.combo.combo_index != self.combo_index
+            || metrics.combo.label != self.label
+            || metrics.combo.spec != self.spec
+            || metrics.combo.tick_size_nanopoints != self.tick_size_nanopoints
+            || metrics.combo.score_identity != self.score_identity
+            || metrics.combo.warmup_bars != self.warmup_bars
+        {
+            return Err(
+                "typed evidence contradicts the registration, combo, score identity, warmup, S0 declaration, tick, or population"
+                    .to_owned(),
+            );
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn s0_run_key(
+    identity: &crate::walkforward::RunIdentity,
+    combo_index: usize,
+) -> crate::registry::RunKey {
+    let seed = crate::walkforward::derive_run_seed(
+        &identity.config_hash,
+        identity.root_seed,
+        identity.account_id.as_deref(),
+        combo_index,
+        0,
+    );
+    crate::registry::RunKey {
+        config_hash: identity.config_hash.to_string(),
+        account_id: identity.account_id.clone(),
+        combo_index,
+        fold: None,
+        seed,
+    }
 }
 
 /// Runs S0 over a grid: score, join, measure, and **record**.
@@ -1148,44 +1655,50 @@ pub fn run_s0(
     inputs: &S0Inputs<'_>,
     registry: &mut crate::registry::Registry,
 ) -> Result<S0Report, S0Error> {
-    use crate::registry::{RunKey, RunRow, RunStatus};
-    use crucible_core::prelude::MarketEvent;
+    run_s0_with_measurement_observer(inputs, registry, |_| {})
+}
 
-    assert_eq!(inputs.events.len(), inputs.day_keys.len());
-    assert!(inputs.tick_size.as_nanos() > 0);
+fn run_s0_with_measurement_observer<F>(
+    inputs: &S0Inputs<'_>,
+    registry: &mut crate::registry::Registry,
+    mut on_measurement_start: F,
+) -> Result<S0Report, S0Error>
+where
+    F: FnMut(usize),
+{
+    use crate::registry::{Inserted, PersistedRunResult, RunRow};
+
+    validate_s0_criteria_contract(inputs.criteria, inputs.s0).map_err(S0Error::CriteriaContract)?;
+    let expected_registration_hash = s0_run_registration_hash(
+        inputs.grid.spec(),
+        inputs.s0,
+        inputs.tick_size,
+        inputs.data_source,
+        inputs.events,
+        inputs.day_keys,
+        inputs.data_manifest_ids,
+    )?;
+    if expected_registration_hash != inputs.identity.config_hash {
+        return Err(S0Error::RegistrationIdentity {
+            expected: expected_registration_hash.to_string(),
+            supplied: inputs.identity.config_hash.to_string(),
+        });
+    }
     let mut combos = Vec::with_capacity(inputs.grid.len());
 
     for combo in inputs.grid.iter() {
-        let mut scorer = crucible_strategies::combo::ComboScorer::build(
-            inputs.spec,
-            &combo,
-            &inputs.s0.score_slot,
-        )
-        .map_err(S0Error::Scorer)?;
-
+        let contract = S0ResultContract::new(inputs, &combo);
         // Claim before measuring (registry rule 1). `fold: None` — S0 is one
         // pass over the whole series, not a fold table; the seed is the
         // combo's, derived from the same lineage every other run uses (D-0064).
         // Fold index 0: S0 is one pass over the whole series, so it has the
         // shape of a single fold rather than a table of them.
-        let seed = crate::walkforward::derive_run_seed(
-            &inputs.identity.config_hash,
-            inputs.identity.root_seed,
-            inputs.identity.account_id.as_deref(),
-            combo.index,
-            0,
-        );
-        let key = RunKey {
-            config_hash: inputs.identity.config_hash.to_string(),
-            account_id: inputs.identity.account_id.clone(),
-            combo_index: combo.index,
-            fold: None,
-            seed,
-        };
+        let key = s0_run_key(inputs.identity, combo.index);
+        let seed = key.seed;
         let row = RunRow {
             key: key.clone(),
             hypothesis_family: inputs.hypothesis_family.to_owned(),
-            params: combo.label(),
+            params: contract.label.clone(),
             // S0 takes no position, so it has no execution assumption to name.
             // Saying so beats leaving the field to imply one (§2.4).
             fill_model: S0_FILL_MODEL.to_owned(),
@@ -1194,7 +1707,57 @@ pub fn run_s0(
             started_at: inputs.now.to_owned(),
             criteria: inputs.criteria.clone(),
         };
-        registry.insert_running(&row)?;
+        match registry.insert_running(&row)? {
+            Inserted::AlreadyDone => {
+                let run_id = key.run_id();
+                let metrics = match registry.result_of(&key) {
+                    Some(PersistedRunResult::S0(metrics)) => metrics.clone(),
+                    Some(PersistedRunResult::LegacyAbsent) => {
+                        return Err(S0Error::CachedResult {
+                            run_id,
+                            reason: "the completed row contains legacy metrics:null, not typed S0 evidence"
+                                .to_owned(),
+                        });
+                    }
+                    Some(PersistedRunResult::Trading(_)) => {
+                        return Err(S0Error::CachedResult {
+                            run_id,
+                            reason: "the completed row contains trading metrics for a no-position S0 claim"
+                                .to_owned(),
+                        });
+                    }
+                    None => {
+                        return Err(S0Error::CachedResult {
+                            run_id,
+                            reason: "the row is Done but has no indexed result".to_owned(),
+                        });
+                    }
+                };
+                metrics.validate().map_err(|reason| S0Error::CachedResult {
+                    run_id: key.run_id(),
+                    reason,
+                })?;
+                contract
+                    .validate(&key, &metrics)
+                    .map_err(|reason| S0Error::CachedResult {
+                        run_id: key.run_id(),
+                        reason,
+                    })?;
+                combos.push(metrics);
+                continue;
+            }
+            Inserted::New | Inserted::Retrying => {}
+        }
+
+        on_measurement_start(combo.index);
+        let mut scorer = crucible_strategies::combo::ComboScorer::build(
+            inputs.grid.spec(),
+            &combo,
+            &inputs.s0.score_slot,
+        )
+        .map_err(S0Error::Scorer)?;
+        debug_assert_eq!(scorer.slot_name(), inputs.s0.score_slot);
+        debug_assert_eq!(scorer.warmup_bars(), contract.warmup_bars);
 
         // Score every bar, in availability order.
         let mut scored: Vec<ScoredBar> = Vec::with_capacity(inputs.events.len());
@@ -1235,28 +1798,28 @@ pub fn run_s0(
             });
         }
 
-        registry.finish(&key, RunStatus::Done, None, inputs.now)?;
-
-        let score_identity = format!(
-            "{} score={} combo={}",
-            inputs.spec.canonical_form(),
-            scorer.slot_name(),
-            combo.label()
-        );
-        combos.push(S0ComboReport {
-            score_identity,
-            tick_size_nanopoints: inputs.tick_size.as_nanos(),
-            spec: inputs.s0.clone(),
-            combo_index: combo.index,
-            label: combo.label(),
-            warmup_bars: scorer.warmup_bars(),
-            scores: scored.iter().filter(|bar| bar.score.is_some()).count(),
-            horizons,
-        });
+        let metrics = S0RunMetrics {
+            evidence_scope: S0EvidenceScope::EqualCountScoreBuckets,
+            combo: S0ComboReport {
+                score_identity: contract.score_identity.clone(),
+                tick_size_nanopoints: contract.tick_size_nanopoints,
+                spec: contract.spec.clone(),
+                combo_index: contract.combo_index,
+                label: contract.label.clone(),
+                warmup_bars: contract.warmup_bars,
+                scores: scored.iter().filter(|bar| bar.score.is_some()).count(),
+                horizons,
+            },
+        };
+        metrics
+            .validate()
+            .expect("run_s0 must construct valid typed metrics");
+        registry.finish_s0(&key, &metrics, &contract, inputs.now)?;
+        combos.push(metrics);
     }
 
     let report = S0Report {
-        evidence_scope: S0EvidenceScope::EqualCountScoreBuckets,
+        registration_hash: inputs.identity.config_hash.to_string(),
         combos,
     };
     report

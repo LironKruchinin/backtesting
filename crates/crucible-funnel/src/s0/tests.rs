@@ -59,22 +59,25 @@ fn separable_horizon(horizon_ns: i64) -> HorizonEvidence {
 
 fn separable_report() -> S0Report {
     S0Report {
-        evidence_scope: S0EvidenceScope::EqualCountScoreBuckets,
-        combos: vec![S0ComboReport {
-            score_identity: "slot=z kind=zscore source=close period=20".to_owned(),
-            tick_size_nanopoints: 250_000_000,
-            spec: S0Spec {
-                score_slot: "z".to_owned(),
-                horizons_ns: vec![10 * MIN, MIN],
-                buckets: 2,
-                bootstrap_draws: 200,
-                min_abs_ic: 0.05,
+        registration_hash: "ab".repeat(32),
+        combos: vec![S0RunMetrics {
+            evidence_scope: S0EvidenceScope::EqualCountScoreBuckets,
+            combo: S0ComboReport {
+                score_identity: "slot=z kind=zscore source=close period=20".to_owned(),
+                tick_size_nanopoints: 250_000_000,
+                spec: S0Spec {
+                    score_slot: "z".to_owned(),
+                    horizons_ns: vec![10 * MIN, MIN],
+                    buckets: 2,
+                    bootstrap_draws: 200,
+                    min_abs_ic: 0.05,
+                },
+                combo_index: 0,
+                label: "z(period=20 source=close)".to_owned(),
+                warmup_bars: 20,
+                scores: 4,
+                horizons: vec![separable_horizon(10 * MIN), separable_horizon(MIN)],
             },
-            combo_index: 0,
-            label: "z(period=20 source=close)".to_owned(),
-            warmup_bars: 20,
-            scores: 4,
-            horizons: vec![separable_horizon(10 * MIN), separable_horizon(MIN)],
         }],
     }
 }
@@ -565,30 +568,38 @@ fn determinism_bytes_cover_order_bounds_ticks_and_absence() {
     let expected = report.determinism_bytes();
 
     let mut changed = report.clone();
-    changed.combos[0].horizons.swap(0, 1);
-    changed.combos[0].spec.horizons_ns.swap(0, 1);
+    changed.registration_hash = "cd".repeat(32);
+    assert_ne!(
+        changed.determinism_bytes(),
+        expected,
+        "registration identity"
+    );
+
+    let mut changed = report.clone();
+    changed.combos[0].combo.horizons.swap(0, 1);
+    changed.combos[0].combo.spec.horizons_ns.swap(0, 1);
     assert_ne!(changed.determinism_bytes(), expected, "horizon order");
 
     let mut changed = report.clone();
-    changed.combos[0].tick_size_nanopoints += 1;
+    changed.combos[0].combo.tick_size_nanopoints += 1;
     assert_ne!(changed.determinism_bytes(), expected, "declared tick");
 
     let mut changed = report.clone();
-    let Availability::Available { value } = &mut changed.combos[0].horizons[0].buckets else {
+    let Availability::Available { value } = &mut changed.combos[0].combo.horizons[0].buckets else {
         panic!("fixture buckets");
     };
     value.0[0].score_lo -= 0.25;
     assert_ne!(changed.determinism_bytes(), expected, "bucket bounds");
 
     let mut changed = report.clone();
-    let Availability::Available { value } = &mut changed.combos[0].horizons[0].buckets else {
+    let Availability::Available { value } = &mut changed.combos[0].combo.horizons[0].buckets else {
         panic!("fixture buckets");
     };
     value.0[0].mean_move_ticks += 0.25;
     assert_ne!(changed.determinism_bytes(), expected, "bucket tick mean");
 
     let mut changed = report.clone();
-    changed.combos[0].horizons[0].buckets = Availability::Unavailable {
+    changed.combos[0].combo.horizons[0].buckets = Availability::Unavailable {
         reason: UnavailableReason::TooFewObservations {
             observed: 1,
             required: 2,
@@ -630,7 +641,7 @@ fn persisted_available_bucket_set_cannot_reverse_or_corrupt_order() {
 fn persisted_criterion_cannot_contradict_its_evidence() {
     let report = separable_report();
     let mut wire = serde_json::to_value(report).expect("S0 wire value");
-    wire["combos"][0]["criterion"] = serde_json::json!({
+    wire["combos"][0]["combo"]["criterion"] = serde_json::json!({
         "outcome": "passed",
         "horizon_ns": 10 * MIN,
     });
@@ -644,6 +655,826 @@ fn report_validation_refuses_duplicate_or_missing_combo_identity() {
     report.combos.push(report.combos[0].clone());
     assert!(report.validate().is_err());
     report.combos.pop();
-    report.combos[0].combo_index = 1;
+    report.combos[0].combo.combo_index = 1;
     assert!(report.validate().is_err());
+}
+
+fn identity_events(n: usize) -> Vec<MarketEvent> {
+    use crucible_core::prelude::{Bar, Ts};
+
+    (0..n)
+        .map(|index| {
+            let index = i64::try_from(index).expect("small identity fixture");
+            let close = Price::from_nanos(100_000_000_000 + index * 250_000_000);
+            MarketEvent::Bar(Bar {
+                instrument: InstrumentId::new("SYN:S0-ID"),
+                tf: TimeFrame::M1,
+                ts_open: Ts(index * MIN),
+                open: close,
+                high: close,
+                low: close,
+                close,
+                volume: u64::try_from(index + 1).expect("positive fixture volume"),
+                signal_offset: Price::ZERO,
+            })
+        })
+        .collect()
+}
+
+fn registration_hash_for(
+    strategy_hash: ConfigHash,
+    spec: &S0Spec,
+    tick_size: Price,
+    source: &S0DataSourceIdentity,
+    events: &[MarketEvent],
+    day_keys: &[i64],
+    manifests: &[String],
+) -> ConfigHash {
+    s0_registration_hash(&S0RegistrationInputs {
+        strategy_hash,
+        s0: spec,
+        tick_size,
+        data_source: source,
+        events,
+        day_keys,
+        data_manifest_ids: manifests,
+    })
+    .expect("valid registration fixture")
+}
+
+#[test]
+fn every_declared_s0_and_data_window_input_changes_run_identity() {
+    let strategy_hash = ConfigHash::from_bytes([0x11; 32]);
+    let spec = S0Spec {
+        score_slot: "z".to_owned(),
+        horizons_ns: vec![MIN, 2 * MIN],
+        buckets: 2,
+        bootstrap_draws: 20,
+        min_abs_ic: 0.05,
+    };
+    let source = S0DataSourceIdentity::Synthetic {
+        instrument: InstrumentId::new("SYN:S0-ID"),
+        timeframe: TimeFrame::M1,
+        seed: 7,
+        bars: 6,
+        start_price_nanopoints: 100_000_000_000,
+        vol_ticks: 2,
+    };
+    let events = identity_events(6);
+    let days = vec![10, 10, 10, 11, 11, 11];
+    let manifests = Vec::new();
+    let expected = registration_hash_for(
+        strategy_hash,
+        &spec,
+        Price::from_nanos(250_000_000),
+        &source,
+        &events,
+        &days,
+        &manifests,
+    );
+
+    let mut changed = spec.clone();
+    changed.horizons_ns.push(3 * MIN);
+    assert_ne!(
+        registration_hash_for(
+            strategy_hash,
+            &changed,
+            Price::from_nanos(250_000_000),
+            &source,
+            &events,
+            &days,
+            &manifests,
+        ),
+        expected,
+        "changed horizon set must change S0 run identity"
+    );
+    let mut changed = spec.clone();
+    changed.horizons_ns.swap(0, 1);
+    assert_ne!(
+        registration_hash_for(
+            strategy_hash,
+            &changed,
+            Price::from_nanos(250_000_000),
+            &source,
+            &events,
+            &days,
+            &manifests,
+        ),
+        expected,
+        "declared horizon order"
+    );
+    for (name, changed) in [
+        (
+            "score slot",
+            S0Spec {
+                score_slot: "another-score".to_owned(),
+                ..spec.clone()
+            },
+        ),
+        (
+            "bucket count",
+            S0Spec {
+                buckets: 3,
+                ..spec.clone()
+            },
+        ),
+        (
+            "bootstrap draws",
+            S0Spec {
+                bootstrap_draws: 21,
+                ..spec.clone()
+            },
+        ),
+        (
+            "minimum IC bits",
+            S0Spec {
+                min_abs_ic: f64::from_bits(spec.min_abs_ic.to_bits() + 1),
+                ..spec.clone()
+            },
+        ),
+    ] {
+        assert_ne!(
+            registration_hash_for(
+                strategy_hash,
+                &changed,
+                Price::from_nanos(250_000_000),
+                &source,
+                &events,
+                &days,
+                &manifests,
+            ),
+            expected,
+            "{name}"
+        );
+    }
+    assert_ne!(
+        registration_hash_for(
+            strategy_hash,
+            &spec,
+            Price::from_nanos(125_000_000),
+            &source,
+            &events,
+            &days,
+            &manifests,
+        ),
+        expected,
+        "contract tick"
+    );
+
+    let changed_source = S0DataSourceIdentity::Synthetic {
+        instrument: InstrumentId::new("SYN:S0-ID"),
+        timeframe: TimeFrame::M1,
+        seed: 8,
+        bars: 6,
+        start_price_nanopoints: 100_000_000_000,
+        vol_ticks: 2,
+    };
+    assert_ne!(
+        registration_hash_for(
+            strategy_hash,
+            &spec,
+            Price::from_nanos(250_000_000),
+            &changed_source,
+            &events,
+            &days,
+            &manifests,
+        ),
+        expected,
+        "synthetic source declaration"
+    );
+    let mut changed_events = events.clone();
+    let MarketEvent::Bar(last) = changed_events.last_mut().expect("last bar");
+    last.close = Price::from_nanos(last.close.as_nanos() + 250_000_000);
+    assert_ne!(
+        registration_hash_for(
+            strategy_hash,
+            &spec,
+            Price::from_nanos(250_000_000),
+            &source,
+            &changed_events,
+            &days,
+            &manifests,
+        ),
+        expected,
+        "observed data population"
+    );
+    let mut changed_days = days.clone();
+    changed_days[2] = 11;
+    assert_ne!(
+        registration_hash_for(
+            strategy_hash,
+            &spec,
+            Price::from_nanos(250_000_000),
+            &source,
+            &events,
+            &changed_days,
+            &manifests,
+        ),
+        expected,
+        "bootstrap session population"
+    );
+    assert_ne!(
+        registration_hash_for(
+            ConfigHash::from_bytes([0x12; 32]),
+            &spec,
+            Price::from_nanos(250_000_000),
+            &source,
+            &events,
+            &days,
+            &manifests,
+        ),
+        expected,
+        "base strategy identity"
+    );
+    let curated = S0DataSourceIdentity::Curated {
+        instrument: InstrumentId::new("SYN:S0-ID"),
+        timeframe: TimeFrame::M1,
+        start: "1970-01-01".to_owned(),
+        end: "1970-01-02".to_owned(),
+    };
+    let curated_manifests = vec!["bb".repeat(32), "aa".repeat(32)];
+    let curated_expected = registration_hash_for(
+        strategy_hash,
+        &spec,
+        Price::from_nanos(250_000_000),
+        &curated,
+        &events,
+        &days,
+        &curated_manifests,
+    );
+    for (name, start, end) in [
+        ("curated start", "1969-12-31", "1970-01-02"),
+        ("curated end", "1970-01-01", "1970-01-03"),
+    ] {
+        let changed_window = S0DataSourceIdentity::Curated {
+            instrument: InstrumentId::new("SYN:S0-ID"),
+            timeframe: TimeFrame::M1,
+            start: start.to_owned(),
+            end: end.to_owned(),
+        };
+        assert_ne!(
+            registration_hash_for(
+                strategy_hash,
+                &spec,
+                Price::from_nanos(250_000_000),
+                &changed_window,
+                &events,
+                &days,
+                &curated_manifests,
+            ),
+            curated_expected,
+            "{name} must change the run identity"
+        );
+    }
+    let reversed_manifests = curated_manifests.iter().rev().cloned().collect::<Vec<_>>();
+    assert_eq!(
+        registration_hash_for(
+            strategy_hash,
+            &spec,
+            Price::from_nanos(250_000_000),
+            &curated,
+            &events,
+            &days,
+            &reversed_manifests,
+        ),
+        curated_expected,
+        "manifest identity is a set, not filesystem order"
+    );
+}
+
+#[test]
+fn registration_refuses_contradictory_source_and_manifest_declarations() {
+    let strategy_hash = ConfigHash::from_bytes([0x11; 32]);
+    let spec = S0Spec {
+        score_slot: "z".to_owned(),
+        horizons_ns: vec![MIN],
+        buckets: 2,
+        bootstrap_draws: 20,
+        min_abs_ic: 0.05,
+    };
+    let events = identity_events(6);
+    let days = vec![0; events.len()];
+    let synthetic = S0DataSourceIdentity::Synthetic {
+        instrument: InstrumentId::new("SYN:S0-ID"),
+        timeframe: TimeFrame::M1,
+        seed: 7,
+        bars: events.len() + 1,
+        start_price_nanopoints: 100_000_000_000,
+        vol_ticks: 2,
+    };
+    let error = s0_registration_hash(&S0RegistrationInputs {
+        strategy_hash,
+        s0: &spec,
+        tick_size: Price::from_nanos(250_000_000),
+        data_source: &synthetic,
+        events: &events,
+        day_keys: &days,
+        data_manifest_ids: &[],
+    })
+    .expect_err("synthetic bar declaration must match its population");
+    assert!(matches!(
+        error,
+        S0RegistrationError::SyntheticBarCount { .. }
+    ));
+
+    let synthetic = S0DataSourceIdentity::Synthetic {
+        instrument: InstrumentId::new("SYN:S0-ID"),
+        timeframe: TimeFrame::M1,
+        seed: 7,
+        bars: events.len(),
+        start_price_nanopoints: 100_000_000_000,
+        vol_ticks: 2,
+    };
+    assert!(
+        s0_registration_hash(&S0RegistrationInputs {
+            strategy_hash,
+            s0: &spec,
+            tick_size: Price::from_nanos(250_000_000),
+            data_source: &synthetic,
+            events: &events,
+            day_keys: &days,
+            data_manifest_ids: &["archive".to_owned()],
+        })
+        .is_err(),
+        "synthetic evidence cannot claim archived provenance"
+    );
+    let curated = S0DataSourceIdentity::Curated {
+        instrument: InstrumentId::new("SYN:S0-ID"),
+        timeframe: TimeFrame::M1,
+        start: "1970-01-01".to_owned(),
+        end: "1970-01-02".to_owned(),
+    };
+    assert!(
+        s0_registration_hash(&S0RegistrationInputs {
+            strategy_hash,
+            s0: &spec,
+            tick_size: Price::from_nanos(250_000_000),
+            data_source: &curated,
+            events: &events,
+            day_keys: &days,
+            data_manifest_ids: &[],
+        })
+        .is_err(),
+        "a curated population must name archived provenance"
+    );
+}
+
+fn s0_resume_grid() -> crucible_strategies::combo::Grid {
+    use crucible_core::prelude::Qty;
+    use crucible_strategies::combo::{ComboSpec, IndicatorSpec, IntAxis, RuleSource};
+    use crucible_strategies::indicators::RollingSource;
+
+    ComboSpec::new(
+        vec![(
+            "z".to_owned(),
+            IndicatorSpec::ZScore {
+                period: IntAxis::Fixed(2),
+                source: RollingSource::Close,
+            },
+        )],
+        &RuleSource {
+            enter_long: Some("z < -1".to_owned()),
+            ..RuleSource::default()
+        },
+        Qty(1),
+    )
+    .expect("valid S0 resume spec")
+    .expand()
+    .expect("one-combo grid")
+}
+
+#[test]
+fn already_done_serves_typed_registry_result_without_remeasurement() {
+    use crate::registry::{PersistedRunResult, Registry, RunKey, RunRow};
+    use crate::stages::{Criteria, Stage};
+    use crate::walkforward::{RunIdentity, derive_run_seed};
+    use std::io::Write as _;
+
+    let grid = s0_resume_grid();
+    let spec = S0Spec {
+        score_slot: "z".to_owned(),
+        horizons_ns: vec![MIN, 2 * MIN],
+        buckets: 2,
+        bootstrap_draws: 20,
+        min_abs_ic: 0.05,
+    };
+    let events = identity_events(30);
+    let day_keys = (0..events.len())
+        .map(|index| i64::try_from(index / 10).expect("small day key"))
+        .collect::<Vec<_>>();
+    let source = S0DataSourceIdentity::Synthetic {
+        instrument: InstrumentId::new("SYN:S0-ID"),
+        timeframe: TimeFrame::M1,
+        seed: 7,
+        bars: events.len(),
+        start_price_nanopoints: 100_000_000_000,
+        vol_ticks: 2,
+    };
+    let registration_hash = s0_run_registration_hash(
+        grid.spec(),
+        &spec,
+        Price::from_nanos(250_000_000),
+        &source,
+        &events,
+        &day_keys,
+        &[],
+    )
+    .expect("derived S0 registration");
+    let identity = RunIdentity {
+        config_hash: registration_hash,
+        root_seed: 42,
+        account_id: None,
+    };
+    let mut criteria = Criteria::for_tests();
+    criteria.stages.insert(0, Stage::S0);
+    criteria.s0_min_abs_ic = Some(spec.min_abs_ic);
+    let inputs = S0Inputs {
+        data_source: &source,
+        events: &events,
+        day_keys: &day_keys,
+        grid: &grid,
+        s0: &spec,
+        tick_size: Price::from_nanos(250_000_000),
+        identity: &identity,
+        criteria: &criteria,
+        hypothesis_family: "s0-resume-control",
+        git_sha: "0123456789abcdef",
+        data_manifest_ids: &[],
+        now: "2026-08-01T00:00:00Z",
+    };
+    let path =
+        std::env::temp_dir().join(format!("crucible-s0-resume-{}.jsonl", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+
+    let wrong_path = std::env::temp_dir().join(format!(
+        "crucible-s0-wrong-registration-{}.jsonl",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&wrong_path);
+    let wrong_identity = RunIdentity {
+        config_hash: ConfigHash::from_bytes([0x99; 32]),
+        root_seed: identity.root_seed,
+        account_id: identity.account_id.clone(),
+    };
+    let wrong_inputs = S0Inputs {
+        identity: &wrong_identity,
+        ..inputs
+    };
+    let mut wrong_registry = Registry::open(&wrong_path).expect("wrong-identity registry");
+    let mut forbidden_measurements = 0usize;
+    let error = run_s0_with_measurement_observer(&wrong_inputs, &mut wrong_registry, |_| {
+        forbidden_measurements += 1;
+    })
+    .expect_err("an arbitrary caller-supplied registration must be refused");
+    assert!(
+        matches!(error, S0Error::RegistrationIdentity { .. }),
+        "{error:?}"
+    );
+    assert_eq!(forbidden_measurements, 0);
+    assert_eq!(
+        std::fs::read(&wrong_path).expect("wrong-identity bytes"),
+        Vec::<u8>::new(),
+        "identity refusal must happen before a claim"
+    );
+    let _ = std::fs::remove_file(wrong_path);
+
+    let mut registry = Registry::open(&path).expect("fresh registry");
+    let mut fresh_measurements = 0usize;
+    let fresh = run_s0_with_measurement_observer(&inputs, &mut registry, |_| {
+        fresh_measurements += 1;
+    })
+    .expect("fresh S0 run");
+    assert_eq!(fresh_measurements, grid.len());
+    let before = std::fs::read(&path).expect("typed registry bytes");
+    let text = String::from_utf8(before.clone()).expect("registry utf-8");
+    assert!(text.contains(r#""metric_kind":"s0""#), "{text}");
+    assert!(!text.contains(r#""metrics":null"#), "{text}");
+    drop(registry);
+
+    let mut registry = Registry::open(&path).expect("real reader reopens");
+    let mut mismatched_criteria = criteria.clone();
+    mismatched_criteria.s0_min_abs_ic = Some(0.99);
+    let mismatched_inputs = S0Inputs {
+        criteria: &mismatched_criteria,
+        ..inputs
+    };
+    let cached_before_mismatch = std::fs::read(&path).expect("typed cache before mismatch");
+    let mut forbidden_measurements = 0usize;
+    let error = run_s0_with_measurement_observer(&mismatched_inputs, &mut registry, |_| {
+        forbidden_measurements += 1
+    })
+    .expect_err("AlreadyDone cannot bridge two decision thresholds");
+    assert!(matches!(error, S0Error::CriteriaContract(_)), "{error:?}");
+    assert_eq!(
+        forbidden_measurements, 0,
+        "criteria mismatch must be refused before cached or fresh measurement work"
+    );
+    assert_eq!(
+        std::fs::read(&path).expect("cache after mismatch refusal"),
+        cached_before_mismatch,
+        "criteria mismatch must be refused before append"
+    );
+
+    let plan = crate::walkforward::FoldPlan::build(
+        &day_keys,
+        grid.max_warmup_bars(),
+        crate::walkforward::FoldSpec {
+            scheme: crate::walkforward::FoldScheme::Rolling,
+            train_days: 1,
+            test_days: 1,
+            step_days: 1,
+        },
+    )
+    .expect("minimal valid funnel plan");
+    let contract_spec = crucible_core::prelude::ContractSpec {
+        instrument: InstrumentId::new("SYN:S0-ID"),
+        tick: inputs.tick_size,
+        point_value_usd: 1,
+    };
+    let backtest_params = crucible_engine::BacktestParams {
+        initial_cash_nano_usd: 1_000_000_000_000,
+        bars_per_year: 252.0,
+    };
+    let funnel_inputs = crate::funnel::FunnelInputs {
+        events: &events,
+        day_keys: &day_keys,
+        grid: &grid,
+        plan: &plan,
+        spec: &contract_spec,
+        params: &backtest_params,
+        identity: &identity,
+        criteria: &mismatched_criteria,
+        s0_spec: Some(&spec),
+        s0_data_source: Some(&source),
+        costs: crate::funnel::Costs {
+            half_spread_ticks: 1,
+            fee_per_contract_nano_usd: 0,
+        },
+        qty: crucible_core::prelude::Qty(1),
+        hypothesis_family: inputs.hypothesis_family,
+        git_sha: inputs.git_sha,
+        data_manifest_ids: &[],
+        now: inputs.now,
+    };
+    let error = crate::funnel::run_funnel(&funnel_inputs, &mut registry, Some(fresh.clone()))
+        .expect_err("the funnel must refuse contradictory S0 decision thresholds");
+    assert!(
+        matches!(error, crate::funnel::FunnelError::InvalidS0(_)),
+        "{error:?}"
+    );
+    assert!(error.to_string().contains("does not bit-match"), "{error}");
+    assert_eq!(
+        std::fs::read(&path).expect("cache after funnel mismatch refusal"),
+        cached_before_mismatch,
+        "funnel mismatch must be refused before trading claims append"
+    );
+
+    let mut resumed_measurements = 0usize;
+    let resumed = run_s0_with_measurement_observer(&inputs, &mut registry, |_| {
+        resumed_measurements += 1;
+    })
+    .expect("AlreadyDone resumes from typed registry metrics");
+    assert_eq!(
+        resumed_measurements, 0,
+        "AlreadyDone must branch before scorer, join, or bootstrap work"
+    );
+    assert_eq!(
+        std::fs::read(&path).expect("registry after resume"),
+        before,
+        "resume appends no claim or finish row"
+    );
+    assert_eq!(resumed, fresh, "report is the persisted result, unchanged");
+    assert_eq!(resumed.determinism_bytes(), fresh.determinism_bytes());
+
+    for metrics in &resumed.combos {
+        let seed = derive_run_seed(
+            &identity.config_hash,
+            identity.root_seed,
+            identity.account_id.as_deref(),
+            metrics.combo.combo_index,
+            0,
+        );
+        let key = RunKey {
+            config_hash: identity.config_hash.to_string(),
+            account_id: identity.account_id.clone(),
+            combo_index: metrics.combo.combo_index,
+            fold: None,
+            seed,
+        };
+        assert_eq!(
+            registry.result_of(&key),
+            Some(&PersistedRunResult::S0(metrics.clone())),
+            "every report decision field comes from the real registry reader"
+        );
+    }
+
+    let mut divergent = resumed.clone();
+    let Availability::Available { value } = &mut divergent.combos[0].combo.horizons[0].buckets
+    else {
+        panic!("resume fixture has bucket evidence");
+    };
+    value.0[0].mean_move_ticks += 0.25;
+    let error = crate::funnel::validate_registry_s0_results(
+        &identity,
+        &grid,
+        &spec,
+        inputs.tick_size,
+        &registry,
+        &divergent,
+    )
+    .expect_err("a renderer report cannot disagree with the registry result");
+    assert!(
+        error.contains("disagrees with its registry-owned"),
+        "{error}"
+    );
+    drop(registry);
+    {
+        let metrics = fresh.combos[0].clone();
+        let key = s0_run_key(&identity, metrics.combo.combo_index);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("append failed-status fixture");
+        serde_json::to_writer(
+            &mut file,
+            &serde_json::json!({
+                "kind": "run_finished",
+                "run_id": key.run_id(),
+                "status": "failed",
+                "metrics": {
+                    "metric_kind": "s0",
+                    "value": metrics,
+                },
+                "finished_at": inputs.now,
+            }),
+        )
+        .expect("serialize failed-status fixture");
+        writeln!(file).expect("terminate failed-status fixture line");
+    }
+    let failed_registry = Registry::open(&path).expect("reader keeps historical status readable");
+    let error = crate::funnel::validate_registry_s0_results(
+        &identity,
+        &grid,
+        &spec,
+        inputs.tick_size,
+        &failed_registry,
+        &fresh,
+    )
+    .expect_err("a non-Done typed row cannot feed the funnel");
+    assert!(error.contains("not in Done status"), "{error}");
+    drop(failed_registry);
+
+    for corruption in ["score-identity", "warmup"] {
+        let corrupt_path = std::env::temp_dir().join(format!(
+            "crucible-s0-cached-{corruption}-{}.jsonl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&corrupt_path);
+        let mut corrupt_metrics = fresh.combos[0].clone();
+        match corruption {
+            "score-identity" => {
+                corrupt_metrics.combo.score_identity = "planted false identity".to_owned();
+            }
+            "warmup" => corrupt_metrics.combo.warmup_bars += 1,
+            _ => unreachable!(),
+        }
+        let seed = derive_run_seed(
+            &identity.config_hash,
+            identity.root_seed,
+            identity.account_id.as_deref(),
+            0,
+            0,
+        );
+        let key = RunKey {
+            config_hash: identity.config_hash.to_string(),
+            account_id: identity.account_id.clone(),
+            combo_index: 0,
+            fold: None,
+            seed,
+        };
+        let mut corrupt = Registry::open(&corrupt_path).expect("corrupt fixture registry");
+        corrupt
+            .insert_running(&RunRow {
+                key: key.clone(),
+                hypothesis_family: inputs.hypothesis_family.to_owned(),
+                params: grid.combo(0).label(),
+                fill_model: S0_FILL_MODEL.to_owned(),
+                git_sha: inputs.git_sha.to_owned(),
+                data_manifest_ids: vec![],
+                started_at: inputs.now.to_owned(),
+                criteria: criteria.clone(),
+            })
+            .expect("corrupt fixture claim");
+        drop(corrupt);
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&corrupt_path)
+                .expect("append historical typed fixture");
+            serde_json::to_writer(
+                &mut file,
+                &serde_json::json!({
+                    "kind": "run_finished",
+                    "run_id": key.run_id(),
+                    "status": "done",
+                    "metrics": {
+                        "metric_kind": "s0",
+                        "value": corrupt_metrics,
+                    },
+                    "finished_at": inputs.now,
+                }),
+            )
+            .expect("serialize historical typed fixture");
+            writeln!(file).expect("terminate historical typed fixture line");
+        }
+        let corrupt_before = std::fs::read(&corrupt_path).expect("corrupt fixture bytes");
+        let mut corrupt = Registry::open(&corrupt_path).expect("real reader reopens fixture");
+        let mut forbidden_measurements = 0usize;
+        let error = run_s0_with_measurement_observer(&inputs, &mut corrupt, |_| {
+            forbidden_measurements += 1;
+        })
+        .expect_err("an incompatible cached identity cannot be rendered or recomputed");
+        assert!(matches!(error, S0Error::CachedResult { .. }), "{error:?}");
+        assert_eq!(
+            forbidden_measurements, 0,
+            "{corruption} disagreement must be caught before measurement"
+        );
+        assert_eq!(
+            std::fs::read(&corrupt_path).expect("fixture after refusal"),
+            corrupt_before,
+            "{corruption} disagreement must append nothing"
+        );
+        let _ = std::fs::remove_file(corrupt_path);
+    }
+
+    let legacy_path = std::env::temp_dir().join(format!(
+        "crucible-s0-legacy-resume-{}.jsonl",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&legacy_path);
+    let mut legacy = Registry::open(&legacy_path).expect("legacy fixture registry");
+    let seed = derive_run_seed(
+        &identity.config_hash,
+        identity.root_seed,
+        identity.account_id.as_deref(),
+        0,
+        0,
+    );
+    let key = RunKey {
+        config_hash: identity.config_hash.to_string(),
+        account_id: identity.account_id.clone(),
+        combo_index: 0,
+        fold: None,
+        seed,
+    };
+    legacy
+        .insert_running(&RunRow {
+            key: key.clone(),
+            hypothesis_family: inputs.hypothesis_family.to_owned(),
+            params: grid.combo(0).label(),
+            fill_model: S0_FILL_MODEL.to_owned(),
+            git_sha: inputs.git_sha.to_owned(),
+            data_manifest_ids: vec![],
+            started_at: inputs.now.to_owned(),
+            criteria: criteria.clone(),
+        })
+        .expect("legacy S0 claim");
+    drop(legacy);
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&legacy_path)
+            .expect("append historical fixture");
+        serde_json::to_writer(
+            &mut file,
+            &serde_json::json!({
+                "kind": "run_finished",
+                "run_id": key.run_id(),
+                "status": "done",
+                "metrics": null,
+                "finished_at": inputs.now,
+            }),
+        )
+        .expect("serialize historical null fixture");
+        writeln!(file).expect("terminate historical fixture line");
+    }
+    let legacy_before = std::fs::read(&legacy_path).expect("legacy bytes");
+    let mut legacy = Registry::open(&legacy_path).expect("historical null remains readable");
+    let mut forbidden_measurements = 0usize;
+    let error = run_s0_with_measurement_observer(&inputs, &mut legacy, |_| {
+        forbidden_measurements += 1;
+    })
+    .expect_err("legacy absence cannot authorize reconstruction");
+    assert!(matches!(error, S0Error::CachedResult { .. }), "{error:?}");
+    assert_eq!(
+        forbidden_measurements, 0,
+        "absence must not trigger recompute"
+    );
+    assert_eq!(
+        std::fs::read(&legacy_path).expect("legacy bytes after refusal"),
+        legacy_before,
+        "refusing legacy absence appends nothing"
+    );
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(legacy_path);
 }

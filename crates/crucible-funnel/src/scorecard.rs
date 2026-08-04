@@ -56,6 +56,8 @@ pub struct Provenance {
     pub economic_rationale: String,
     /// blake3 of the config's canonical form (D-0012).
     pub config_hash: String,
+    /// Effective registry/run hash; includes S0 and data identity when declared.
+    pub registration_hash: String,
     /// Repository revision (§2.5).
     pub git_sha: String,
     /// blake3 of every archived file the series was read from (§2.5). Empty is
@@ -105,10 +107,10 @@ fn trial_composition_of(_p: &Provenance, report: &FunnelReport) -> TrialComposit
     }
 }
 
-/// A required honesty-box field was missing, so nothing was rendered.
+/// A required honesty-box field was missing or contradictory, so nothing was rendered.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScorecardError {
-    /// Which fields were empty.
+    /// Which required honesty contracts were empty or contradictory.
     pub missing: Vec<&'static str>,
 }
 
@@ -116,7 +118,7 @@ impl std::fmt::Display for ScorecardError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "the scorecard's honesty box is missing {}, so nothing was rendered.\n\
+            "the scorecard's honesty box is missing or contradicts {}, so nothing was rendered.\n\
              Every field in that box is required (CLAUDE.md §2.4, §2.5): a page that omits its \
              fill model, its trial count or its git sha looks exactly like a page whose numbers \
              are safe to quote, and it is the one omission that must fail loudly instead of \
@@ -131,7 +133,8 @@ impl std::error::Error for ScorecardError {}
 /// Renders one self-contained HTML scorecard for a whole funnel run.
 ///
 /// # Errors
-/// [`ScorecardError`] if any honesty-box field is empty. No partial page is
+/// [`ScorecardError`] if any honesty-box field is empty or the registry-owned
+/// S0 identity contradicts the provenance identity. No partial page is
 /// produced — see the module docs.
 pub fn render(
     report: &FunnelReport,
@@ -157,13 +160,17 @@ pub fn render(
 /// The rule the module docs describe, as code.
 fn check_honesty_box(report: &FunnelReport, provenance: &Provenance) -> Result<(), ScorecardError> {
     let mut missing = Vec::new();
-    let required: [(&'static str, bool); 10] = [
+    let required: [(&'static str, bool); 12] = [
         ("meta.name", provenance.idea_name.trim().is_empty()),
         (
             "meta.hypothesis_family",
             provenance.hypothesis_family.trim().is_empty(),
         ),
         ("config hash", provenance.config_hash.trim().is_empty()),
+        (
+            "registration/run hash",
+            provenance.registration_hash.trim().is_empty(),
+        ),
         ("git sha", provenance.git_sha.trim().is_empty()),
         ("the data source", provenance.data_source.trim().is_empty()),
         ("the fill model", provenance.fill_model.trim().is_empty()),
@@ -182,6 +189,12 @@ fn check_honesty_box(report: &FunnelReport, provenance: &Provenance) -> Result<(
         (
             "valid S0 evidence",
             report.s0.as_ref().is_some_and(|s0| s0.validate().is_err()),
+        ),
+        (
+            "matching S0/provenance registration hash",
+            report.s0.as_ref().is_some_and(|s0| {
+                s0.registration_hash.as_str() != provenance.registration_hash.as_str()
+            }),
         ),
     ];
     for (name, is_missing) in required {
@@ -296,7 +309,8 @@ fn write_honesty_box(h: &mut String, report: &FunnelReport, criteria: &Criteria,
          deliberately conservative where trials are not independent — sixteen accounts are one \
          signal under sixteen risk overlays, so the raw product over-deflates, and the preferred \
          error is against the strategy</dd>\
-         <dt>config hash</dt><dd class=\"mono\">{config}</dd>\
+         <dt>strategy config hash</dt><dd class=\"mono\">{config}</dd>\
+         <dt>registration/run hash</dt><dd class=\"mono\">{registration}</dd>\
          <dt>git sha</dt><dd class=\"mono\">{git}</dd>\
          <dt>data manifest ids</dt><dd class=\"mono\">{manifest}</dd>\
          <dt>cost sweep</dt><dd>{sweep} tick(s) of half-spread, mandatory (§2.4)</dd>\
@@ -315,6 +329,7 @@ fn write_honesty_box(h: &mut String, report: &FunnelReport, criteria: &Criteria,
         before = report.trials_before,
         composition = esc(&trial_composition_of(p, report).render()),
         config = esc(&p.config_hash),
+        registration = esc(&p.registration_hash),
         git = esc(&p.git_sha),
         manifest = manifest,
         sweep = criteria
@@ -421,12 +436,21 @@ fn write_s0(h: &mut String, report: &FunnelReport) {
     h.push_str(
         "<p class='dim'>Every declared horizon and every equal-count score bucket is shown below. Bucket means are conditional on bucket membership; the bootstrap interval is separately labelled UNCONDITIONAL.</p>",
     );
-    match s0.evidence_scope {
-        crate::s0::S0EvidenceScope::EqualCountScoreBuckets => h.push_str(
+    let _ = write!(
+        h,
+        "<p class='dim'>registration/run hash: <span class='mono'>{}</span></p>",
+        esc(&s0.registration_hash)
+    );
+    match s0.evidence_scope() {
+        Some(crate::s0::S0EvidenceScope::EqualCountScoreBuckets) => h.push_str(
             "<p><strong>Capability limitation (not an H-008 run result): original H-008 Gate 0b remains UNEVALUATED.</strong> Equal-count score buckets are not the registered population of closes beyond their Bollinger band. Visible buckets do not prove equivalence.</p>",
         ),
+        None => h.push_str(
+            "<p><strong>S0 evidence UNAVAILABLE.</strong> No grid combo result was persisted.</p>",
+        ),
     }
-    for combo in &s0.combos {
+    for metrics in &s0.combos {
+        let combo = &metrics.combo;
         let _ = write!(
             h,
             "<h3>Combo {} — <span class='mono'>{}</span></h3><p class='dim'>score identity: <span class='mono'>{}</span>; {} scores after {} warmup bars; tick {} nanopoints.</p>",
@@ -848,7 +872,8 @@ fn write_gaps(h: &mut String, criteria: &Criteria) {
 mod tests {
     use super::*;
     use crate::s0::{
-        Bucket, Interval, S0ComboReport, S0EvidenceScope, S0Report, S0Spec, UnavailableReason,
+        Bucket, Interval, S0ComboReport, S0EvidenceScope, S0Report, S0RunMetrics, S0Spec,
+        UnavailableReason,
     };
 
     fn provenance() -> Provenance {
@@ -857,6 +882,7 @@ mod tests {
             hypothesis_family: "fam".to_owned(),
             economic_rationale: "none".to_owned(),
             config_hash: "ab".repeat(32),
+            registration_hash: "cd".repeat(32),
             git_sha: "0123456".to_owned(),
             data_manifest_ids: vec![],
             data_source: "synthetic random walk, seed 42".to_owned(),
@@ -925,22 +951,25 @@ mod tests {
 
     fn s0_report(horizons: Vec<HorizonEvidence>) -> S0Report {
         S0Report {
-            evidence_scope: S0EvidenceScope::EqualCountScoreBuckets,
-            combos: vec![S0ComboReport {
-                score_identity: "zscore close period=20 field=value".to_owned(),
-                tick_size_nanopoints: 250_000_000,
-                spec: S0Spec {
-                    score_slot: "z".to_owned(),
-                    horizons_ns: horizons.iter().map(|h| h.horizon_ns).collect(),
-                    buckets: 5,
-                    bootstrap_draws: 200,
-                    min_abs_ic: 0.05,
+            registration_hash: "cd".repeat(32),
+            combos: vec![S0RunMetrics {
+                evidence_scope: S0EvidenceScope::EqualCountScoreBuckets,
+                combo: S0ComboReport {
+                    score_identity: "zscore close period=20 field=value".to_owned(),
+                    tick_size_nanopoints: 250_000_000,
+                    spec: S0Spec {
+                        score_slot: "z".to_owned(),
+                        horizons_ns: horizons.iter().map(|h| h.horizon_ns).collect(),
+                        buckets: 5,
+                        bootstrap_draws: 200,
+                        min_abs_ic: 0.05,
+                    },
+                    combo_index: 0,
+                    label: "z(period=20 source=close)".to_owned(),
+                    warmup_bars: 20,
+                    scores: 5,
+                    horizons,
                 },
-                combo_index: 0,
-                label: "z(period=20 source=close)".to_owned(),
-                warmup_bars: 20,
-                scores: 5,
-                horizons,
             }],
         }
     }
@@ -954,10 +983,11 @@ mod tests {
 
     #[test]
     fn a_scorecard_without_its_honesty_box_does_not_render() {
-        let clearers: [Clearer; 8] = [
+        let clearers: [Clearer; 9] = [
             ("meta.name", |p| p.idea_name.clear()),
             ("meta.hypothesis_family", |p| p.hypothesis_family.clear()),
             ("config hash", |p| p.config_hash.clear()),
+            ("registration/run hash", |p| p.registration_hash.clear()),
             ("git sha", |p| p.git_sha.clear()),
             ("the data source", |p| p.data_source.clear()),
             ("the fill model", |p| p.fill_model.clear()),
@@ -1005,6 +1035,25 @@ mod tests {
         ] {
             assert!(html.contains(required), "missing {required}");
         }
+    }
+
+    #[test]
+    fn contradictory_s0_and_provenance_registration_hashes_do_not_render() {
+        let mut report = empty_report();
+        report.s0 = Some(s0_report(vec![horizon(
+            60_000_000_000,
+            Availability::Available {
+                value: bucket_set(),
+            },
+        )]));
+        report.s0.as_mut().expect("S0 report").registration_hash = "ef".repeat(32);
+
+        let error = render(&report, &Criteria::for_tests(), &provenance())
+            .expect_err("two rendered registration identities must not disagree");
+        assert_eq!(
+            error.missing,
+            vec!["matching S0/provenance registration hash"]
+        );
     }
 
     #[test]
