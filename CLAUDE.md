@@ -323,6 +323,26 @@ crate lands, delete its placeholder comment from the relevant `Cargo.toml`.
   `||` in a restore path, and a restore aimed at `HEAD` instead of at the
   pre-mutation blob, are the same class of bug as a scripted edit that
   matches nothing (§8.1).
+- **A negative search proves nothing until its pattern has matched
+  something.** "No caller reaches this", "nothing else splits the sample",
+  "no pin moved", "the gate is green" — each is normally established by a
+  search returning nothing, and a search returning nothing has two causes
+  that look identical: the thing is absent, or **the pattern is wrong**.
+  Before concluding absence, run a **positive control**: point the same
+  pattern at something you know it should find, and watch it match. A
+  `grep -c` that returns 0, a `cargo test` filter that selects no test, a
+  `git log` pathspec that lists no commit — all are unfired detectors, and
+  §7 already says an unfired detector is decoration. Three incidents, each
+  found by someone re-checking rather than by the search itself: a scripted
+  edit that matched nothing and left a contract file asserting the opposite
+  of the commit (§8.1, 4297fbb); a guessed test name
+  `the_truncation_hash_is_pinned` that printed no output and was nearly
+  reported as a green gate (D-0116); and a review grep spelled
+  `is_continuous|continuous_alias` against code spelling it
+  `ContinuousAlias::looks_like`, whose empty result was read as "the refusal
+  is unenforced" when the refusal was fourteen lines of enforced code. The
+  cost of the control is one command; the cost of skipping it has twice been
+  a confident claim in the opposite direction.
 - **When two things disagree, add the third case that makes them agree** —
   it turns a difference into a diagnosis. A test proving captured and
   reconstructed equity differ says only "something differs"; the companion

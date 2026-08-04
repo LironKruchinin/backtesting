@@ -4253,3 +4253,44 @@ propose a superseding entry — don't silently diverge.
   else; pre-mutation and post-restore blob
   `7a167120237695076dea47c6576af2566474beb8`, restored by unconditional copy
   under D-0116.
+- **D-0118** (2026-08-04) -- **A negative search proves nothing until its
+  pattern has matched something: run a positive control before concluding
+  absence.** Generalizing D-0116's gate-table clause, which stated the rule for
+  one case — a pinned-hash test that printed nothing — to every negative
+  search: greps, `cargo test` filters, `git log` pathspecs, any `grep -c`
+  returning 0.
+  **The two causes are indistinguishable from the output.** A search returning
+  nothing means either the thing is absent or the pattern is wrong, and the
+  terminal shows the same thing either way. That is the defining property of an
+  unfired detector, which §7 already refuses to accept as evidence when it is a
+  test; a search is a detector a reviewer builds on the spot, and it inherits
+  the same rule. The control is one command: point the pattern at something it
+  should find and watch it match.
+  **Three incidents, none caught by the search itself.** A scripted edit whose
+  string-replace matched nothing left `CLAUDE.md` asserting the opposite of what
+  its commit claimed (§8.1, 4297fbb). A guessed test name
+  `the_truncation_hash_is_pinned` — the real one is
+  `the_truncation_sweep_is_pinned` — printed no output during a gate sweep and
+  eight of nine gates were nearly reported as nine (D-0116). And a review grep
+  spelled `is_continuous|continuous_alias|refuse.*continuous`, snake_case
+  against code spelling it `ContinuousAlias::looks_like`, returned nothing and
+  was read as "the D-0076 refusal exists only as a doc comment" — while
+  `crucible-cli/src/combo.rs:299` carried fourteen lines of reasoning and an
+  enforced refusal naming D-0076 and §2.1, which the CLI prints on `combo`,
+  `walk-forward` and `funnel` alike.
+  **Every one was found by a human or a second pass re-checking the claim, not
+  by the mechanism that produced it.** That is the argument for the rule: the
+  failure is silent by construction, so it cannot be caught downstream, and the
+  only cheap moment to catch it is before the conclusion is drawn.
+  **Why this is a contract clause and not advice.** It governs the measurements
+  the next several commits will make. Block C's claims are almost all negative
+  searches — no second splitter exists, no caller reaches this path, no pin
+  moved — and a wrong pattern in any of them produces a confident false
+  statement in a decision entry, which is the failure mode this log exists to
+  prevent. A rule that governs measurements has to exist before them, which is
+  why it landed as its own commit ahead of C1 rather than inside it: C1's whole
+  claim is "pure refactor, moves no hash", and that claim is checkable exactly
+  because C1 contains nothing else.
+  **Scope, fixed at ruling time**: one §7 clause and this entry. Sweeping the
+  existing greps in the repository, building tooling, or adding a lint are
+  separate items and go back to the queue.
