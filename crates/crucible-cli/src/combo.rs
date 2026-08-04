@@ -227,8 +227,34 @@ pub(crate) struct Series {
 }
 
 /// Materializes the config's data source into one bar series.
+///
+/// The single-instrument entry point, and the one every command uses today: it
+/// reads `universe.instruments[0]`, which is the *only* instrument a config
+/// without `[pooling]` is allowed to declare (`config::validate_pooling`).
 pub(crate) fn collect_events(loaded: &LoadedConfig) -> Result<Series, (i32, String)> {
-    let instrument = &loaded.file.universe.instruments[0];
+    collect_events_for(loaded, &loaded.file.universe.instruments[0])
+}
+
+/// Materializes one *named* instrument from the config's data source.
+///
+/// Split out of [`collect_events`] for block C: a pooled run replays several
+/// contracts of one root through this function, once per contract, rather than
+/// teaching the loader to return many series. The instrument is a parameter and
+/// everything else — grain, window, contract spec, refusals — still comes from
+/// the config, which is what keeps §2.6 honest across a pool: every contract is
+/// read the same way, so no contract can gain an edge from being loaded
+/// differently.
+///
+/// **This is a pure refactor and moves no determinism hash.** `collect_events`
+/// delegates here with `instruments[0]`, which is exactly what it read before,
+/// so the combo, walk-forward and funnel gates must be byte-identical across
+/// this commit — and those three are among the five that no test asserts, so
+/// they are compared by value against `docs/MILESTONES.md` rather than by
+/// "the gate produced output" (D-0118).
+pub(crate) fn collect_events_for(
+    loaded: &LoadedConfig,
+    instrument: &str,
+) -> Result<Series, (i32, String)> {
     match &loaded.file.data {
         DataSource::Synthetic {
             seed,
