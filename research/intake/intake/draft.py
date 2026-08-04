@@ -25,17 +25,6 @@ from datetime import datetime, timezone
 
 from .sources import Paper
 
-#: Sections in the order `research/backlog/README.md` §4 fixes them.
-SECTIONS = [
-    "Citation",
-    "Mechanism",
-    "Signal in Crucible terms",
-    "Data",
-    "Pre-registered kill criteria",
-    "Honesty note",
-    "Triage grade",
-]
-
 #: Words whose presence in a draft would break the backlog's binding rule.
 #: Checked by `find_predictions`, and by the tool's own test.
 PREDICTION_MARKERS = re.compile(
@@ -75,6 +64,13 @@ def draft_markdown(paper: Paper, *, topic: str, family_hint: str) -> str:
     doi_line = f"DOI `{paper.doi}`" if paper.doi else "**no DOI** (preprint)"
     generated = datetime.now(timezone.utc).date().isoformat()
     slug = slugify(paper.title)
+    abstract_state = (
+        "the index carried an abstract"
+        if paper.abstract
+        else "**the index carried no abstract** — the paper itself is the only source"
+    )
+    doi_literal = repr(paper.doi)
+    title_literal = repr(paper.title[:40])
 
     return f"""---
 id: TODO(human) — allocate against research/backlog/ at promotion time
@@ -104,15 +100,32 @@ accessed: {paper.accessed}
 Retrieved from the {paper.source} API on {paper.accessed}.
 
 TODO(human) — the verbatim claim, quoted from the paper, no paraphrase creep.
-The abstract is reproduced below as harvested and is **not** a substitute:
-an abstract states what the authors set out to show, and the registration needs
-what they actually claim to have shown.
 
-<details><summary>Harvested abstract (unedited, third-party text)</summary>
+**The abstract is deliberately not reproduced here.** Read it in the corpus
+record ({abstract_state}) or in the paper itself:
 
-{paper.abstract or "_no abstract in the index_"}
+```bash
+python - <<'PY'
+import json
+for line in open("research/intake/corpus/papers.jsonl", encoding="utf-8"):
+    r = json.loads(line)
+    if r["doi"] == {doi_literal} or r["title"].startswith({title_literal}):
+        print(r["abstract"]); break
+PY
+```
 
-</details>
+Two reasons, and both are rules this repository already holds. A source
+paper's own performance figures belong in the **Honesty note** and nowhere
+else (`research/backlog/README.md` §1) — an abstract routinely leads with the
+paper's own headline performance figure, so embedding one here would put that
+figure in the Citation section by construction. And an abstract is
+third-party prose: the corpus is gitignored precisely so this repository does
+not carry other people's copyrighted text, and a draft that quoted it would
+have committed the same text the corpus rule exists to keep out.
+
+An abstract is not a substitute for the claim in any case: it states what the
+authors set out to show, and the registration needs what they claim to have
+shown.
 
 ## Mechanism
 

@@ -3974,3 +3974,51 @@ propose a superseding entry — don't silently diverge.
   documentation. The sentence is now worded without naming them. A check that
   fires on its own boilerplate gets disabled within a week, which is worse than
   not having one.
+- **D-0112** (2026-08-04) -- **A registration draft references its corpus
+  record and never embeds the paper's abstract.** Superseding the shape D-0111
+  shipped, where the drafter reproduced the harvested abstract verbatim under a
+  `<details>` block and the no-predicted-performance checker skipped that block.
+  **Two rules this repository already holds meet here, and the original shape
+  broke both.** `research/backlog/README.md` §1 puts a source paper's own
+  performance figures in the **Honesty note and nowhere else**; an abstract
+  routinely leads with one, so an embedded abstract placed them in the
+  *Citation* section by construction. The first draft the tool ever produced
+  demonstrated it — an SSRN paper whose abstract carries its own Sharpe,
+  Sortino and p-value — and promoting that file unedited would have breached §1
+  as written. Separately, the corpus is gitignored precisely so this repository
+  carries no third-party prose, and two drafts had already committed exactly
+  the text that rule exists to keep out.
+  **The fix makes the divergence inexpressible rather than policed.** The
+  front matter already carries the DOI, source API and access date, so the
+  draft prints the one-liner that reads the abstract back out of the corpus and
+  the human reads it there or in the paper. Nothing is lost: an abstract was
+  never a substitute for the verbatim claim, which is the `TODO(human)` beside
+  it.
+  **The checker's exemption is gone with the thing it existed for.**
+  `find_predictions` now scans the whole draft. The exemption was not a
+  mistake given an embedded abstract — scanning quoted third-party text would
+  have made the rule unsatisfiable for exactly the papers worth reading — but
+  it meant the checker was blind to the figures most likely to break §1. Ruling
+  5's phrasing is the right one: fix the structure so the divergence cannot be
+  expressed, rather than adding a check for it.
+  **The self-firing template happened twice.** D-0111 recorded the first: the
+  warning sentence named the banned metrics, so every draft was refused by the
+  rule's restatement of itself. Writing this entry's fix reintroduced it in the
+  sentence explaining *why* abstracts are no longer embedded. Twice is a
+  pattern, not an accident, and the remedy is a test rather than more care —
+  `test_a_generated_draft_passes_its_own_check` asserts the drafter's own
+  boilerplate survives its own checker.
+  **The tests D-0111 claimed now exist.** `draft.py` said the check was covered
+  "by the tool's own test" and no test existed; the repair is writing them, not
+  deleting the sentence (§7, no quality exemption). Nine stdlib `unittest`
+  controls under `research/intake/tests/`, each watched failing against a
+  planted defect first: `find_predictions` returning `[]` (six subtests), the
+  drafter re-embedding the abstract, and the redirect handler ceasing to
+  re-check the host. **They are run by hand — CI is cargo-only and does not
+  know this directory exists**, which the README says rather than implies.
+  **The allowlist now holds on every redirect hop.** It guarded only the URL
+  the tool typed, while `urllib` follows redirects itself, so a `301` off an
+  allowed host would have been followed silently — with the README claiming
+  structural enforcement. None of the four endpoints redirects off-host, so
+  this was never exploitable; it is fixed because "structural" has to mean the
+  structure holds and not that the happy path happens to.

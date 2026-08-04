@@ -26,15 +26,32 @@ DOI `10.20944/preprints202603.1400.v1`. <https://doi.org/10.20944/preprints20260
 Retrieved from the crossref API on 2026-08-04.
 
 TODO(human) — the verbatim claim, quoted from the paper, no paraphrase creep.
-The abstract is reproduced below as harvested and is **not** a substitute:
-an abstract states what the authors set out to show, and the registration needs
-what they actually claim to have shown.
 
-<details><summary>Harvested abstract (unedited, third-party text)</summary>
+**The abstract is deliberately not reproduced here.** Read it in the corpus
+record (the index carried an abstract) or in the paper itself:
 
-<jats:p>This paper employs machine learning techniques based on market volatility to identify and construct trading signals for both short-term and long-term Time Series Momentum (TSM) strategies. Through a comparative study of China&amp;#039;s CSI 300 Index and the U.S. S&amp;amp;amp;P 500 Index, we conduct an empirical analysis from a cross-market perspective. The findings reveal that the performance of time series momentum strategies is jointly determined by their signal responsiveness and the prevailing market volatility regime. Using the Random Forest algorithm, this study effectively identifies critical thresholds for regime switching between low-volatility and high-volatility states in index futures markets. The empirical results demonstrate that during high-volatility periods, short-term TSM strategies significantly outperform their long-term counterparts, whereas the opposite holds true in low-volatility environments. Further analysis indicates that the short-term momentum alpha can be attributed to market timing ability. Our findings provide important theoretical and practical implications for optimizing trend-following strategies in commodity and financial futures markets through machine learning approaches.</jats:p>
+```bash
+python - <<'PY'
+import json
+for line in open("research/intake/corpus/papers.jsonl", encoding="utf-8"):
+    r = json.loads(line)
+    if r["doi"] == '10.20944/preprints202603.1400.v1' or r["title"].startswith('Machine Learning-Based Adaptive Time Ser'):
+        print(r["abstract"]); break
+PY
+```
 
-</details>
+Two reasons, and both are rules this repository already holds. A source
+paper's own performance figures belong in the **Honesty note** and nowhere
+else (`research/backlog/README.md` §1) — an abstract routinely leads with the
+paper's own headline performance figure, so embedding one here would put that
+figure in the Citation section by construction. And an abstract is
+third-party prose: the corpus is gitignored precisely so this repository does
+not carry other people's copyrighted text, and a draft that quoted it would
+have committed the same text the corpus rule exists to keep out.
+
+An abstract is not a substitute for the claim in any case: it states what the
+authors set out to show, and the registration needs what they claim to have
+shown.
 
 ## Mechanism
 

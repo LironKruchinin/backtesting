@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 from . import corpus, draft
-from .sources import SOURCES, DisallowedHost, Paper
+from .sources import SOURCES, DisallowedHost
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CORPUS = ROOT / "corpus" / "papers.jsonl"
@@ -93,11 +93,11 @@ def cmd_draft(args: argparse.Namespace) -> int:
         # The tool refuses to emit a draft that breaks the backlog's binding
         # rule, rather than emitting it for review. A rule enforced only at
         # review is a rule that holds until someone is busy.
-        offences = draft.find_predictions(_without_abstract(text))
+        offences = draft.find_predictions(text)
         if offences:
             print(
-                f"REFUSED {paper.title[:60]!r}: draft contains prediction language "
-                f"{offences} outside the quoted abstract",
+                f"REFUSED {paper.title[:60]!r}: draft contains prediction "
+                f"language {offences}",
                 file=sys.stderr,
             )
             continue
@@ -107,22 +107,6 @@ def cmd_draft(args: argparse.Namespace) -> int:
         written += 1
     print(f"\n{written} draft(s) in {out}. None of them is a registration.")
     return EXIT_OK
-
-
-def _without_abstract(text: str) -> str:
-    """Strip the quoted-abstract block before the no-predictions check.
-
-    The abstract is *their* text, reproduced verbatim under a `<details>` and
-    labelled as third-party; it routinely contains Sharpe ratios and that is
-    not the drafter making a prediction. Checking it would make the rule
-    unsatisfiable for exactly the papers worth reading. Everything the tool
-    itself wrote is checked.
-    """
-    start = text.find("<details>")
-    end = text.find("</details>")
-    if start == -1 or end == -1:
-        return text
-    return text[:start] + text[end:]
 
 
 def main(argv: list[str] | None = None) -> int:

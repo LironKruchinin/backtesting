@@ -33,7 +33,8 @@ produced was `10.2139/ssrn.7008318`, reached that way. **PDFs are fetched by a
 human, by hand**, when a human decides a paper is worth reading.
 
 Enforcement is structural, not conventional. Every request goes through one
-function, `sources._get`, which refuses any host outside `ALLOWED_HOSTS`. There
+function, `sources._get`, which refuses any host outside `ALLOWED_HOSTS` — and
+through an opener that re-checks the allowlist on **every redirect hop**. There
 is no second HTTP call site and there are no dependencies, so auditing "what
 does this talk to?" is reading one constant and one function. Requests are
 throttled to one per 1.1 s per host and the client identifies itself, because
@@ -79,17 +80,58 @@ read the paper can make.
 
 **The backlog's binding rule — no predicted performance figure in any file —
 is enforced here, not left to review.** `draft.find_predictions` scans the
-drafter's own output and the tool *refuses* to write a draft that breaks it.
-The paper's own abstract is excluded from that scan: it is quoted third-party
-text under a `<details>`, it routinely contains performance figures, and
-checking it would make the rule unsatisfiable for exactly the papers worth
-reading.
+whole draft and the tool *refuses* to write one that breaks the rule. There is
+no exemption any more: the abstract used to be embedded and excluded from the
+scan, which meant the checker could not see the very figures most likely to
+break §1. Drafts now carry no abstract at all, so the scan covers everything in
+the file and the exemption is gone with the thing it existed for.
 
 > The first version of the template listed the banned metrics by name in its
 > own warning sentence, so **every draft was refused by the rule's restatement
 > of itself**. Same failure as a grep that matches its own documentation
 > (CLAUDE.md §8.2), and worth recording rather than quietly fixing: a check
-> that fires on its own boilerplate gets disabled within a week.
+> that fires on its own boilerplate gets disabled within a week. It then
+> happened a *second* time, in the sentence explaining why abstracts are not
+> embedded — which is why `test_a_generated_draft_passes_its_own_check` exists.
+
+## Drafts carry no third-party prose
+
+A draft **references** its corpus record and never embeds the abstract. Two
+rules meet here and both are already this repository's. A source paper's own
+performance figures belong in the **Honesty note** and nowhere else
+(`research/backlog/README.md` §1), and an abstract routinely leads with one —
+so an embedded abstract puts those figures in the Citation section by
+construction, and promoting the draft unedited would breach §1 as written. And
+the corpus is gitignored precisely so this repository carries no third-party
+text; a draft that quoted it would commit exactly what that rule keeps out.
+
+The front matter already carries the DOI and access date, and the draft prints
+the one-liner that reads the abstract back out of the corpus. The human reads
+it there, or in the paper.
+
+## Tests
+
+```bash
+cd research/intake && python -m unittest discover -s tests -v
+```
+
+**Run them by hand: the project's CI is cargo-only and does not know this
+directory exists.** Nine controls over the two things the tool promises — the
+host allowlist and the no-predicted-performance rule — and each was watched
+failing against a planted defect before it was committed:
+
+| planted defect | caught by |
+|---|---|
+| `find_predictions` returns `[]` | `test_a_planted_marker_is_found` (6 subtests) |
+| drafter re-embeds the abstract | `test_the_abstract_is_not_reproduced` |
+| redirect handler stops re-checking the host | `test_a_redirect_off_an_allowed_host_is_refused` |
+
+The allowlist is re-checked on **every redirect hop**, not only on the URL the
+tool typed: `urllib` follows redirects itself, so a `301` off an allowed host
+would otherwise be followed silently while this README claimed structural
+enforcement. None of today's four endpoints redirects off-host, so it is
+unexploitable in practice — the point is that "structural" has to mean the
+structure holds.
 
 ## Exit codes
 

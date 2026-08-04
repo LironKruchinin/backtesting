@@ -26,15 +26,32 @@ DOI `10.2139/ssrn.7008318`. <https://doi.org/10.2139/ssrn.7008318>
 Retrieved from the crossref API on 2026-08-04.
 
 TODO(human) — the verbatim claim, quoted from the paper, no paraphrase creep.
-The abstract is reproduced below as harvested and is **not** a substitute:
-an abstract states what the authors set out to show, and the registration needs
-what they actually claim to have shown.
 
-<details><summary>Harvested abstract (unedited, third-party text)</summary>
+**The abstract is deliberately not reproduced here.** Read it in the corpus
+record (the index carried an abstract) or in the paper itself:
 
-<jats:p>We test the intraday momentum effect documented by Gao et al. (2018) and Baltussen et al. (2021) across five spot FX CFD instruments and one currency futures contract. Using M5 Dukascopy data for spot pairs (2012–2024) and M1 Databento data for 6J CME futures (2019–2024), with a strict in-sample/out-of-sample split (IS: 2012–2018; OOS: 2019–2024), we document three principal findings. First, the London Open 30-minute sign signal is statistically significant on five of six instruments in both periods (permutation p &amp;lt; 0.001), with GBPUSD exhibiting a reversed signal direction consistent with the absence of JPY carry-trade amplification, confirming that the intraday momentum mechanism extends to retail market structures. Second, we identify a JPY Amplification Mechanism: JPY-denominated instruments exhibit regression coefficients approximately 3.8× larger than non-JPY pairs (average OOS β: 0.000859 vs. 0.000226), with GBPUSD treated separately due to its structurally reversed signal direction, consistent with the structural role of JPY as a global risk-sentiment amplifier and carry-trade funding currency. Third, after applying realistic round-trip transaction costs from actual platform data, USDJPY spot is the sole instrument producing a positive cost-adjusted edge (OOS Sortino: +0.748), while four spot pairs and 6J futures fail to clear their respective cost hurdles when standard prop-firm position sizing constraints are applied. A direct spot-futures comparison reveals a mechanistically important divergence in 2022: while BOJ Yield Curve Control interventions destroyed the spot signal, 6J futures maintained positive performance (annual Sharpe: +0.383 vs. −0.557), indicating that futures microstructure partially insulates the signal from central bank intervention. Regime filter tests confirm the USDJPY baseline is filter-robust. These results establish that the intraday momentum mechanism is pervasive across retail FX instruments but faces a steep cost barrier, with JPY carry dynamics as the primary exploitable source of intraday directional information.</jats:p>
+```bash
+python - <<'PY'
+import json
+for line in open("research/intake/corpus/papers.jsonl", encoding="utf-8"):
+    r = json.loads(line)
+    if r["doi"] == '10.2139/ssrn.7008318' or r["title"].startswith('Intraday Momentum in Spot FX and Currenc'):
+        print(r["abstract"]); break
+PY
+```
 
-</details>
+Two reasons, and both are rules this repository already holds. A source
+paper's own performance figures belong in the **Honesty note** and nowhere
+else (`research/backlog/README.md` §1) — an abstract routinely leads with the
+paper's own headline performance figure, so embedding one here would put that
+figure in the Citation section by construction. And an abstract is
+third-party prose: the corpus is gitignored precisely so this repository does
+not carry other people's copyrighted text, and a draft that quoted it would
+have committed the same text the corpus rule exists to keep out.
+
+An abstract is not a substitute for the claim in any case: it states what the
+authors set out to show, and the registration needs what they claim to have
+shown.
 
 ## Mechanism
 

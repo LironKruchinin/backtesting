@@ -23,11 +23,10 @@ from __future__ import annotations
 
 import json
 import time
-import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import date, timezone, datetime
+from datetime import datetime, timezone
 from typing import Any, Iterator
 
 #: The complete allowlist. Adding to it is a compliance decision, not a code
@@ -108,12 +107,12 @@ def _today() -> str:
 _last_request_at: dict[str, float] = {}
 
 
-def _get(url: str, *, accept: str = "application/json") -> bytes:
-    """Fetch ``url``, refusing any host outside the allowlist.
+def check_host(url: str) -> str:
+    """Return ``url``'s host, or raise [`DisallowedHost`].
 
-    The single HTTP call site in this package. Throttled per host, and it
-    raises rather than returning a sentinel: a harvest that silently skipped a
-    source would produce a corpus whose gaps nobody could see.
+    Public because it is the whole compliance surface and a test asserts on it
+    directly. There is nowhere else in this package that decides what may be
+    contacted.
     """
     host = urllib.parse.urlsplit(url).hostname or ""
     if host not in ALLOWED_HOSTS:
@@ -122,6 +121,40 @@ def _get(url: str, *, accept: str = "application/json") -> bytes:
             f"({', '.join(sorted(ALLOWED_HOSTS))}); Google Scholar and SSRN are never "
             "scraped — see research/intake/README.md."
         )
+    return host
+
+
+class _AllowlistRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Re-checks the allowlist on **every** redirect hop.
+
+    Without this the allowlist would guard only the URL we typed. `urllib`
+    follows redirects by itself, so a `301` from an allowed host to any other
+    host would be followed silently and the tool would contact something it
+    promised not to — while the README claimed structural enforcement.
+
+    Today's four endpoints are HTTPS and none of them redirects off-host, so
+    this is unexploitable in practice. It is here because "structural" has to
+    mean the structure actually holds, not that the happy path happens to.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
+        check_host(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+#: Built once. `urlopen`'s default opener has no allowlist handler, so every
+#: request in this package goes through this one instead.
+_OPENER = urllib.request.build_opener(_AllowlistRedirectHandler)
+
+
+def _get(url: str, *, accept: str = "application/json") -> bytes:
+    """Fetch ``url``, refusing any host outside the allowlist.
+
+    The single HTTP call site in this package. Throttled per host, and it
+    raises rather than returning a sentinel: a harvest that silently skipped a
+    source would produce a corpus whose gaps nobody could see.
+    """
+    host = check_host(url)
     elapsed = time.monotonic() - _last_request_at.get(host, 0.0)
     if elapsed < THROTTLE_SECONDS:
         time.sleep(THROTTLE_SECONDS - elapsed)
@@ -129,7 +162,7 @@ def _get(url: str, *, accept: str = "application/json") -> bytes:
         url, headers={"User-Agent": USER_AGENT, "Accept": accept}
     )
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with _OPENER.open(request, timeout=30) as response:
             body = response.read()
     finally:
         _last_request_at[host] = time.monotonic()
