@@ -401,7 +401,42 @@ The quant-research payload. Specs live in `crucible-funnel` module docs.
             with every gate before S3 still passing and asserted to pass. The
             converse control came first and caught a broken fixture on the way.
             Pinned hash `9fe41f6f5b3653e7`; the five existing hashes unmoved
-      - [ ] Deflated Sharpe, PBO/CSCV — block B of `docs/plans/m3-full.md`
+      - [x] **Deflated Sharpe on the run path + PBO/CSCV** (2026-08-04,
+            D-0109, pinned by D-0110): block B of `docs/plans/m3-full.md`. Two
+            named holes become numbers and two S3 criteria are evaluated rather
+            than declared and ignored. The trial count comes from
+            `Registry::trials_for` or from nowhere, so D-0083's void exclusion
+            holds by construction; `Summary` carries `ReturnShape` so a Sharpe
+            is deflated by the moments of the *same* series it came from. The
+            **CSCV blocks are the fold plan's folds** — `FoldPlan` stays the
+            sole boundary authority — and the per-cell metric is the fold's OOS
+            return, because a fold with no trades has a return and no Sharpe.
+            Odd block counts, split explosions and non-finite cells are refused
+            rather than repaired, and each renders ABSENT and **fails** its
+            criterion. On the null harness **PBO = 0.3333** (2 of 6 splits):
+            not near zero, so the split is not leaking, and six splits cannot
+            confirm 0.5 — which is stated rather than claimed. `decided_at`
+            moves S2 → S3 for a config that passes everything; the ceiling does
+            not move with it (D-0075)
+
+      **The nine live determinism gates**, as of D-0110 — five doc-pinned
+      values across four hash-emitting CLI entry points (`funnel` is pinned
+      against two configs) and four code-pinned digest assertions. Kept as one
+      table because the eight-vs-nine count had to be settled by measurement
+      once already (D-0108), and a table that lags the code re-creates exactly
+      that:
+
+      | gate | hash | pinned in |
+      |---|---|---|
+      | demo | `b55747513df596ed` | docs |
+      | combo | `0e1ab52d474b862b` | docs |
+      | walk-forward | `711e1cb34a2ee2b4` | docs |
+      | funnel (`combo-smoke`) | `2f430893d2a79a8f` | docs |
+      | S0 (`s0-smoke`) | `e74766eb3f7becfc` | docs, D-0107 |
+      | permutation null | `9fe41f6f5b3653e7` | `stats/permutation/tests.rs` |
+      | truncation | `91b9ff5b9bbcdb25` | `stats/truncation/tests.rs` |
+      | deflated Sharpe | `dc7f94f25235df6c` | `stats/deflated/tests.rs` |
+      | **block-B battery** | **`ef703dfd8d19fdd3`** | `stats/pbo/pinned.rs`, D-0110 |
 
       **The planted defect they were measured against already existed**:
       `controls::LeakyZScore` (a full-sample z-score, §2.1's named lookahead),

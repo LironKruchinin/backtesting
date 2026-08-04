@@ -34,18 +34,38 @@
 //!
 //! # What is deliberately refused
 //!
-//! - **An odd block count.** CSCV splits `S` blocks into two halves of `S/2`;
+//! [`PboUnavailable`] has **five** variants and they are two different kinds
+//! of thing. Both render as ABSENT with their reason and both **fail** the
+//! `max_pbo` criterion rather than passing quietly (D-0075) — the split below
+//! is about who has to fix them, not about how they are reported.
+//!
+//! **Policy refusals — the inputs are well-formed and the answer is still
+//! withheld.** These are the judgement calls, and each names its remedy:
+//!
+//! - **An odd block count** ([`PboUnavailable::UnsplittableBlocks`], which also
+//!   covers fewer than two). CSCV splits `S` blocks into two halves of `S/2`;
 //!   an odd `S` has no such split. The tempting repair is to drop a block, and
 //!   it is refused: silently discarding a fold changes the sample the number
 //!   describes while the number still claims to describe the run. The config
 //!   changes its fold plan, or PBO is reported absent with this reason.
-//! - **More splits than [`MAX_SPLITS`].** `C(S, S/2)` grows fast — twenty
-//!   blocks is 184,756 splits. Above the cap this refuses instead of
-//!   subsampling, because a subsampled CSCV is a different estimator wearing
-//!   the same name, and §9's no-silent-caps rule applies: a bound that changes
-//!   the answer must be visible in the answer.
-//! - **A non-finite performance cell.** A NaN would propagate into the argmax
-//!   and silently decide which combo "won".
+//! - **More splits than [`MAX_SPLITS`]** ([`PboUnavailable::TooManySplits`]).
+//!   `C(S, S/2)` grows fast — twenty blocks is 184,756 splits. Above the cap
+//!   this refuses instead of subsampling, because a subsampled CSCV is a
+//!   different estimator wearing the same name, and §9's no-silent-caps rule
+//!   applies: a bound that changes the answer must be visible in the answer.
+//! - **Fewer than two combos** ([`PboUnavailable::TooFewCombos`]). A grid of
+//!   one has no selection to be wrong about. This is an absence and not a
+//!   zero, because a zero here would read as "the search was reliable".
+//!
+//! **Input-contract errors — the matrix is malformed and no answer exists.**
+//! A caller that hits one of these has a bug, not a fold plan to change:
+//!
+//! - **A ragged matrix** ([`PboUnavailable::RaggedMatrix`]): combos disagreeing
+//!   about how many folds they were measured over cannot be ranked against
+//!   each other.
+//! - **A non-finite performance cell**
+//!   ([`PboUnavailable::NonFinitePerformance`]). A NaN would propagate into the
+//!   argmax and silently decide which combo "won".
 //!
 //! # Resolution
 //!
