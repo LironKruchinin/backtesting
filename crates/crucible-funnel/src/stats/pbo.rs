@@ -337,4 +337,6 @@ fn binomial(n: usize, k: usize) -> Option<u64> {
 }
 
 #[cfg(test)]
+mod pinned;
+#[cfg(test)]
 mod tests;

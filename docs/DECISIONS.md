@@ -3890,3 +3890,38 @@ propose a superseding entry — don't silently diverge.
   against the strategy, and shrinking it needs its own entry and a control
   showing it does not resurrect a known-spurious edge. The permutation null
   remains unwired to the run path and is still rendered as a named hole.
+- **D-0110** (2026-08-04) -- **The block-B battery gets a determinism pin,
+  `ef703dfd8d19fdd3`, and it is the ninth live gate.** One hash over both of
+  block B's statistics, in its own commit, isolated from the D-0109
+  implementation that produced it — the same discipline D-0103 and D-0107
+  followed for the S0 pin, and for the same reason: a diff that moves a gate
+  should contain nothing a reader has to disentangle it from.
+  **What it covers**, which is exactly what `docs/plans/m3-full.md` asks a
+  block-B pin to cover — config, trial count, block count and seed: the fixture
+  seed, the block and combo counts, the split count, the underperforming-split
+  count and the PBO value; then, over the same matrix at a trial count of 24,
+  every deflated Sharpe's observed value, selection benchmark, standard error,
+  DSR and echoed trial count. The two halves of block B are pinned **against
+  one another** rather than separately, so a change that moved the PBO and
+  compensated in the deflation could not pass.
+  **Hashed rather than asserted field by field** so drift anywhere fails, not
+  only where an assertion happens to look — the argument the permutation and
+  truncation gates already make. The fixture is a deterministic SplitMix64
+  matrix rather than a hand-written one because the rank logic is only
+  exercised across many combos and folds, and the generator is inlined for the
+  same reason the permutation gate inlines its own: a pinned fixture must not
+  move when a dependency's internals do.
+  **Derived twice in separate clean invocations before being written down**,
+  the second after `cargo clean -p crucible-funnel`, both `ef703dfd8d19fdd3`.
+  **The other eight gates do not move**, and were re-measured at the
+  implementation commit and again here: demo `b55747513df596ed`, combo
+  `0e1ab52d474b862b`, walk-forward `711e1cb34a2ee2b4`, funnel
+  `2f430893d2a79a8f`, S0 `e74766eb3f7becfc`, permutation `9fe41f6f5b3653e7`,
+  truncation `91b9ff5b9bbcdb25`, deflated Sharpe `dc7f94f25235df6c`. Both smoke
+  configs kill every combo before S3 is reached — `combo-smoke` at S1,
+  `s0-smoke` at S0 — so block B's new criteria cannot reach a verdict there and
+  the funnel gates are unmoved for a stated reason rather than a lucky one.
+  **The live-gate count is now nine**: five doc-pinned values across four
+  hash-emitting CLI entry points (`funnel` is pinned against two configs) and
+  four code-pinned digest assertions. D-0108's enumeration of eight stands as
+  the count before this entry.
