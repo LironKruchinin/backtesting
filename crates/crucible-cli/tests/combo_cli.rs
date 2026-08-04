@@ -493,9 +493,14 @@ fn the_grammar_surface_config_expands() {
 // ---------------------------------------------------------------------------
 
 /// The converse, and it comes first: without it every refusal below could be
-/// satisfied by a parser that rejected `[pooling]` outright.
+/// satisfied by a parser that rejected `[pooling]` outright for any reason.
+///
+/// A well-formed pool must reach the **orchestration** refusal — the blanket
+/// "this build cannot run it" — rather than any of the shape refusals. That is
+/// what proves the four shape rules below are diagnosing shape and not just
+/// rejecting the block on sight.
 #[test]
-fn a_well_formed_pool_of_one_root_is_accepted_by_the_parser() {
+fn a_well_formed_pool_reaches_the_not_yet_orchestrated_refusal() {
     let dir = TempDir::new();
     let path = dir.config(
         &TEMPLATE
@@ -506,8 +511,7 @@ fn a_well_formed_pool_of_one_root_is_accepted_by_the_parser() {
             .replace("[run]", "[pooling]\nroot = \"ES\"\n\n[run]"),
     );
     let out = run(&["combo", "--config", &path.to_string_lossy()]);
-    // `combo` does not consume a pool, so it must SAY so rather than run one.
-    // Whatever it exits with, the one thing it must not do is fail to parse.
+    assert_eq!(code(&out), 2);
     assert!(
         !stderr(&out).contains("unknown field"),
         "`[pooling]` must parse: {}",
@@ -516,6 +520,11 @@ fn a_well_formed_pool_of_one_root_is_accepted_by_the_parser() {
     assert!(
         !stderr(&out).contains("partial answer as a whole one"),
         "a declared pool is exactly what makes >1 instrument legal: {}",
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out).contains("is not implemented"),
+        "a well-formed pool must reach the orchestration refusal: {}",
         stderr(&out)
     );
 }

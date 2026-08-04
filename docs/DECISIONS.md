@@ -4209,3 +4209,47 @@ propose a superseding entry — don't silently diverge.
   and treat a gate that printed nothing as RED until proven otherwise. A
   verification whose silence is indistinguishable from success is not a
   verification.
+- **D-0117** (2026-08-04) -- **A well-formed `[pooling]` declaration is REFUSED
+  until the orchestration that honours it exists.** Closing a half-wired window
+  D-0115 opened the same day.
+  **What D-0115 got wrong.** It relaxed the single-instrument rule so a
+  `[pooling]` config could name many contracts, and it landed the four *shape*
+  refusals — but nothing refused a **well-formed** pool. `collect_events` reads
+  `universe.instruments[0]`, so `crucible funnel` against a curated pooled
+  config would have replayed **ESH2024 alone** and printed the result under a
+  config that asked for a pool. Measured rather than reasoned: the first
+  attempt refused only incidentally, on the synthetic feed's instrument
+  mismatch, and swapping the data source to curated exposed it.
+  **This is D-0075's shape exactly.** "A config declaring `stages = ["s3"]` is
+  REFUSED, not run with the missing stage skipped — a config that asks for the
+  permutation battery and silently receives a fold table has been answered with
+  a different question than it asked, and the answer looks exactly like the one
+  it wanted." A pooled declaration answered with a single-contract result is
+  the same sentence with different nouns, and the single-contract number is the
+  *more* dangerous of the two because it is a plausible verdict rather than an
+  obvious hole.
+  **The refusal ordering carries information.** The four shape refusals fire
+  first, so a malformed pool still gets its own diagnosis — duplicate,
+  continuous alias, foreign root, arity — and only a pool that is *correct in
+  every respect* reaches the blanket "this build cannot run it". That ordering
+  is also what makes the converse control meaningful: a well-formed pool
+  reaching the orchestration refusal proves the shape rules are diagnosing
+  shape rather than rejecting the block on sight.
+  **The refusal is lifted in the same commit whose orchestration controls go
+  green, never before.** That is the device that makes a one-pass orchestration
+  safe, and it is the third use of the inert-first ordering in this block:
+  D-0114 landed arithmetic nothing called, D-0115 landed a declaration nothing
+  consumed, and this entry makes the gap between them un-runnable rather than
+  merely unfinished.
+  **The lesson, which is not "add a refusal".** Inert-first is only inert if
+  the *permission* is withheld too. D-0115 shipped the permission (many
+  instruments are now legal) without the refusal that makes it harmless, and
+  the two halves were one commit apart. When a change relaxes a rule to make
+  room for future work, the relaxation and the not-yet-implemented refusal
+  belong in the same commit — otherwise the tree spends the interval accepting
+  configs it cannot answer.
+  Control: removing the refusal fails
+  `a_well_formed_pool_reaches_the_not_yet_orchestrated_refusal` and nothing
+  else; pre-mutation and post-restore blob
+  `7a167120237695076dea47c6576af2566474beb8`, restored by unconditional copy
+  under D-0116.

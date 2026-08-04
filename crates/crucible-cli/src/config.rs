@@ -916,5 +916,28 @@ fn validate_pooling(file: &ConfigFile) -> Result<(), ConfigError> {
             });
         }
     }
-    Ok(())
+
+    // The declaration is well formed, and **no consumer in this build can
+    // honour it**. Refusing here is the D-0075 shape: a config that asks for a
+    // pooled verdict and silently receives a single-contract one has been
+    // answered with a different question than it asked, and the answer looks
+    // exactly like the one it wanted. The specific refusals above run first, so
+    // a malformed pool still gets its own diagnosis rather than this blanket
+    // one.
+    //
+    // This refusal is lifted in the same commit whose orchestration controls go
+    // green — never before. Until then `crucible funnel` would replay
+    // `instruments[0]` alone and label the result a pooled run, which is
+    // exactly the half-wired window the inert-first ordering exists to prevent.
+    Err(ConfigError::Field {
+        field: "pooling",
+        message: format!(
+            "`[pooling].root = {root:?}` over {} contracts is a well-formed declaration that \
+             this build cannot run: the orchestration — replaying each contract and pooling \
+             the evidence — is not implemented (D-0114, D-0115). It is refused rather than \
+             answered with a single-contract result wearing a pooled-run header. Drop \
+             `[pooling]` and name one instrument to run today",
+            instruments.len()
+        ),
+    })
 }
