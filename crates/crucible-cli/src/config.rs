@@ -73,6 +73,10 @@ pub struct ConfigFile {
     pub s0: Option<S0Cfg>,
     /// Declared; consumed by `crucible funnel` (M3).
     pub funnel: Option<FunnelCfg>,
+    /// Pooling across contracts of one root, consumed by `crucible funnel`
+    /// (D-0114 and block C). Present exactly when `universe.instruments`
+    /// names more than one contract.
+    pub pooling: Option<PoolingCfg>,
     /// Run-level settings.
     pub run: RunCfg,
 }
@@ -318,6 +322,32 @@ pub struct S0Cfg {
     pub min_abs_ic: f64,
 }
 
+/// `[pooling]` — one verdict over many contracts of one root (block C).
+///
+/// A pooled run replays **real contracts** and pools their evidence. It is the
+/// sanctioned route to a long sample precisely so that stitching does not have
+/// to be: `combo` and `walk-forward` refuse continuous aliases because a grid
+/// expands rules nobody has read and a level comparison is unsafe on a
+/// back-adjusted series (D-0076), and pooling does not change that. A future
+/// design wanting back-adjusted grids supersedes D-0076 explicitly.
+///
+/// The contracts themselves are `universe.instruments`, not a second list
+/// here: two lists that must agree are two lists that will eventually
+/// disagree. This block carries the *policy* — which root they must all
+/// belong to — and its presence is what permits more than one instrument at
+/// all.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PoolingCfg {
+    /// The root every pooled contract must belong to (`ES`, `NQ`, …).
+    ///
+    /// Declared rather than inferred from the symbols. Inferring it would make
+    /// a typo'd contract silently define its own root, and a pool is a claim
+    /// that these contracts are the same instrument across time — which is a
+    /// claim the config should have to make out loud.
+    pub root: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FunnelCfg {
@@ -538,17 +568,7 @@ pub fn load(path: &Path) -> Result<LoadedConfig, ConfigError> {
     // One instrument, one timeframe. The cross-product over a universe is the
     // funnel's job; running the first entry of a list and calling it done is
     // the kind of partial answer that reads as a whole one.
-    if file.universe.instruments.len() != 1 {
-        return Err(ConfigError::Field {
-            field: "universe.instruments",
-            message: format!(
-                "{} instruments declared. `combo` runs one instrument; the cross-product \
-                 over a universe is the funnel's job (M3), and running only the first \
-                 would report a partial answer as a whole one",
-                file.universe.instruments.len()
-            ),
-        });
-    }
+    validate_pooling(&file)?;
     if file.universe.timeframes.len() != 1 {
         return Err(ConfigError::Field {
             field: "universe.timeframes",
@@ -774,6 +794,9 @@ impl LoadedConfig {
                 "[funnel] — stages, the cost sweep and the kill criteria; run `crucible funnel`",
             );
         }
+        if self.file.pooling.is_some() && consumer != Consumer::Funnel {
+            out.push("[pooling] — one verdict over many contracts; run `crucible funnel`");
+        }
         if consumer == Consumer::Combo {
             out.push(
                 "[run].seed — nothing reads it here; `walk-forward` derives per-fold seeds from it",
@@ -792,4 +815,106 @@ pub enum Consumer {
     WalkForward,
     /// `crucible funnel` — everything.
     Funnel,
+}
+
+/// Every refusal `[pooling]` owns, and the single-instrument rule it relaxes.
+///
+/// Separated from `load` so the rules read as a list rather than as control
+/// flow, and so the tests can point at one function. All of it is **inert**:
+/// this validates a declaration and nothing consumes it yet, which is the same
+/// reader-first ordering §8 requires of a persisted shape — the parser and its
+/// refusals land before the orchestration that will depend on them.
+fn validate_pooling(file: &ConfigFile) -> Result<(), ConfigError> {
+    let instruments = &file.universe.instruments;
+    let Some(pooling) = file.pooling.as_ref() else {
+        // No `[pooling]`: the original rule, unchanged, with the remedy named.
+        if instruments.len() != 1 {
+            return Err(ConfigError::Field {
+                field: "universe.instruments",
+                message: format!(
+                    "{} instruments declared without a `[pooling]` block. `combo` and \
+                     `walk-forward` run one instrument, and running only the first would \
+                     report a partial answer as a whole one. To pool contracts of one root \
+                     into a single verdict, declare `[pooling].root` — that is the only \
+                     thing that makes more than one instrument legal",
+                    instruments.len()
+                ),
+            });
+        }
+        return Ok(());
+    };
+
+    let root = pooling.root.trim();
+    if root.is_empty() {
+        return Err(ConfigError::Field {
+            field: "pooling.root",
+            message: "the root every pooled contract belongs to must be named, not inferred \
+                      from the symbols: inferring it lets a typo'd contract silently define \
+                      its own root"
+                .to_owned(),
+        });
+    }
+
+    // Pooling one contract is not pooling. It would charge the same trial, read
+    // the same sessions and print a pooled-run header over a single-contract
+    // result, which is a report that claims more than it did.
+    if instruments.len() < 2 {
+        return Err(ConfigError::Field {
+            field: "universe.instruments",
+            message: format!(
+                "`[pooling]` declared over {} instrument(s). Pooling needs at least two \
+                 contracts; with one there is nothing to pool and the report would claim a \
+                 pooled sample it does not have. Drop `[pooling]` to run the single contract",
+                instruments.len()
+            ),
+        });
+    }
+
+    let mut seen: BTreeMap<&str, ()> = BTreeMap::new();
+    for instrument in instruments {
+        let symbol = instrument.trim();
+
+        // The double-count in its most direct form, refused before any replay:
+        // the same contract twice doubles its sessions in a naive pool and
+        // charges two trials for one run. `crucible-funnel::pooling` refuses it
+        // again on the day keys (D-0114); this is the earlier, cheaper refusal.
+        if seen.insert(symbol, ()).is_some() {
+            return Err(ConfigError::Field {
+                field: "universe.instruments",
+                message: format!(
+                    "{symbol} appears twice in the pool. Pooling a contract with itself \
+                     doubles its sessions and charges two trials for one run"
+                ),
+            });
+        }
+
+        // D-0076 stands. A continuous alias is a stitched series, and pooling
+        // exists so that a long sample does not require stitching; letting one
+        // into a pool would enable back-adjusted grids by the back door, which
+        // is a supersession and not an implementation detail.
+        if symbol.contains(".v.") || symbol.contains(".c.") {
+            return Err(ConfigError::Field {
+                field: "universe.instruments",
+                message: format!(
+                    "{symbol} is a continuous alias. A pool replays real contracts — that is \
+                     the whole reason pooling is the sanctioned route to a long sample \
+                     (D-0076). Enabling back-adjusted series for grids is a supersession of \
+                     D-0076, not a pooling declaration"
+                ),
+            });
+        }
+
+        if !symbol.starts_with(root) {
+            return Err(ConfigError::Field {
+                field: "universe.instruments",
+                message: format!(
+                    "{symbol} is not a contract of the declared root {root:?}. A pool is a \
+                     claim that these contracts are one instrument across time; pooling two \
+                     roots is a cross-instrument claim, which is breadth rather than sample \
+                     size (D-0114)"
+                ),
+            });
+        }
+    }
+    Ok(())
 }

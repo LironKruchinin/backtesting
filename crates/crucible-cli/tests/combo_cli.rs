@@ -484,3 +484,167 @@ fn the_grammar_surface_config_expands() {
         assert!(text.contains(token), "{token} missing from:\n{text}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// `[pooling]` — block C's declaration surface. Inert: these assert what a
+// config may DECLARE, and nothing consumes the declaration yet (D-0114 lists
+// the orchestration as owed). The parser and its refusals land first, which is
+// the ordering §8 requires of any shape a later writer will depend on.
+// ---------------------------------------------------------------------------
+
+/// The converse, and it comes first: without it every refusal below could be
+/// satisfied by a parser that rejected `[pooling]` outright.
+#[test]
+fn a_well_formed_pool_of_one_root_is_accepted_by_the_parser() {
+    let dir = TempDir::new();
+    let path = dir.config(
+        &TEMPLATE
+            .replace(
+                r#"instruments = ["SYN:RW"]"#,
+                r#"instruments = ["ESH2024", "ESM2024"]"#,
+            )
+            .replace("[run]", "[pooling]\nroot = \"ES\"\n\n[run]"),
+    );
+    let out = run(&["combo", "--config", &path.to_string_lossy()]);
+    // `combo` does not consume a pool, so it must SAY so rather than run one.
+    // Whatever it exits with, the one thing it must not do is fail to parse.
+    assert!(
+        !stderr(&out).contains("unknown field"),
+        "`[pooling]` must parse: {}",
+        stderr(&out)
+    );
+    assert!(
+        !stderr(&out).contains("partial answer as a whole one"),
+        "a declared pool is exactly what makes >1 instrument legal: {}",
+        stderr(&out)
+    );
+}
+
+/// Pooling one contract is not pooling. It would read the same sessions and
+/// charge the same trial while printing a pooled-run header over a
+/// single-contract result.
+#[test]
+fn pooling_fewer_than_two_contracts_is_refused() {
+    let dir = TempDir::new();
+    let path = dir.config(&TEMPLATE.replace("[run]", "[pooling]\nroot = \"SYN\"\n\n[run]"));
+    let out = run(&["combo", "--config", &path.to_string_lossy()]);
+    assert_eq!(code(&out), 2);
+    assert!(
+        stderr(&out).contains("Pooling needs at least two contracts"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+/// The double-count in its most direct form, refused before any replay.
+/// `crucible-funnel::pooling` refuses it again on the day keys (D-0114); this
+/// is the earlier and cheaper of the two.
+#[test]
+fn the_same_contract_twice_in_a_pool_is_refused() {
+    let dir = TempDir::new();
+    let path = dir.config(
+        &TEMPLATE
+            .replace(
+                r#"instruments = ["SYN:RW"]"#,
+                r#"instruments = ["ESH2024", "ESH2024"]"#,
+            )
+            .replace("[run]", "[pooling]\nroot = \"ES\"\n\n[run]"),
+    );
+    let out = run(&["combo", "--config", &path.to_string_lossy()]);
+    assert_eq!(code(&out), 2);
+    assert!(
+        stderr(&out).contains("charges two trials for one run"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+/// D-0076 stands. Pooling exists so a long sample does not require stitching;
+/// letting a continuous alias into a pool would enable back-adjusted grids by
+/// the back door, and that is a supersession rather than a declaration.
+#[test]
+fn a_continuous_alias_inside_a_pool_is_refused_naming_d0076() {
+    for alias in ["ES.v.0", "ES.c.0"] {
+        let dir = TempDir::new();
+        let path = dir.config(
+            &TEMPLATE
+                .replace(
+                    r#"instruments = ["SYN:RW"]"#,
+                    &format!(r#"instruments = ["ESH2024", "{alias}"]"#),
+                )
+                .replace("[run]", "[pooling]\nroot = \"ES\"\n\n[run]"),
+        );
+        let out = run(&["combo", "--config", &path.to_string_lossy()]);
+        assert_eq!(code(&out), 2, "{alias}");
+        assert!(
+            stderr(&out).contains("D-0076"),
+            "the refusal must name the decision it upholds: {}",
+            stderr(&out)
+        );
+    }
+}
+
+/// A pool is a claim that these contracts are ONE instrument across time.
+/// Two roots is a cross-instrument claim — breadth, not sample size (D-0114).
+#[test]
+fn a_contract_outside_the_declared_root_is_refused() {
+    let dir = TempDir::new();
+    let path = dir.config(
+        &TEMPLATE
+            .replace(
+                r#"instruments = ["SYN:RW"]"#,
+                r#"instruments = ["ESH2024", "NQH2024"]"#,
+            )
+            .replace("[run]", "[pooling]\nroot = \"ES\"\n\n[run]"),
+    );
+    let out = run(&["combo", "--config", &path.to_string_lossy()]);
+    assert_eq!(code(&out), 2);
+    assert!(
+        stderr(&out).contains("breadth rather than sample size"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+/// `deny_unknown_fields` on the new struct, like every other config struct
+/// (§5.5). A typo'd pooling key must be a hard error, not a silent no-op.
+#[test]
+fn an_unknown_pooling_key_is_a_hard_error() {
+    let dir = TempDir::new();
+    let path = dir.config(
+        &TEMPLATE
+            .replace(
+                r#"instruments = ["SYN:RW"]"#,
+                r#"instruments = ["ESH2024", "ESM2024"]"#,
+            )
+            .replace(
+                "[run]",
+                "[pooling]\nroot = \"ES\"\ncontarcts = [\"ESH2024\"]\n\n[run]",
+            ),
+    );
+    let out = run(&["combo", "--config", &path.to_string_lossy()]);
+    assert_eq!(code(&out), 2);
+    assert!(
+        stderr(&out).contains("contarcts") || stderr(&out).contains("unknown field"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+/// The original rule is unchanged for configs without `[pooling]`, and the
+/// message now names the remedy rather than only the refusal.
+#[test]
+fn many_instruments_without_a_pooling_block_still_refuse_and_name_the_remedy() {
+    let dir = TempDir::new();
+    let path = dir.config(&TEMPLATE.replace(
+        r#"instruments = ["SYN:RW"]"#,
+        r#"instruments = ["ESH2024", "ESM2024"]"#,
+    ));
+    let out = run(&["combo", "--config", &path.to_string_lossy()]);
+    assert_eq!(code(&out), 2);
+    assert!(
+        stderr(&out).contains("declare `[pooling].root`"),
+        "{}",
+        stderr(&out)
+    );
+}

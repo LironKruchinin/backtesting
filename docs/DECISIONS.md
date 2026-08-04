@@ -4115,3 +4115,57 @@ propose a superseding entry — don't silently diverge.
   curated multi-contract data rather than a synthetic fixture. The arithmetic
   landed first deliberately: it is where the silently-wrong-result risk lives,
   and it is provable without the archive.
+- **D-0115** (2026-08-04) -- **`[pooling].root` is what makes more than one
+  instrument legal, and it is the only thing that does.** The declaration
+  surface of block C, landed **inert**: nothing consumes it yet, exactly as
+  D-0114's arithmetic landed before any caller. That ordering is §8's
+  reader-first rule applied to a config — the parser and its refusals reach
+  `main` before the orchestration that will depend on them, so a half-wired
+  pooling path can never produce a wrong pooled number in between.
+  **The contracts are `universe.instruments`, not a second list.** Two lists
+  that must agree are two lists that will eventually disagree; the block
+  carries the *policy* — which root they all belong to — and its presence is
+  the permission. Configs without it keep the original single-instrument
+  refusal, whose message now names the remedy instead of only the rule.
+  **The root is declared, never inferred.** Inferring it from the symbols
+  would let a typo'd contract silently define its own root, and a pool is a
+  claim that these contracts are one instrument across time — a claim the
+  config should have to make out loud.
+  **Four refusals, each with a reason a reader can check.** Fewer than two
+  contracts, because pooling one would print a pooled-run header over a
+  single-contract result. The same symbol twice, which is the double-count in
+  its most direct form — `crucible-funnel::pooling` refuses it again on the day
+  keys (D-0114), and this is the earlier and cheaper of the two. A contract
+  outside the declared root, because two roots is a cross-instrument claim and
+  that is breadth rather than sample size. And **a continuous alias inside a
+  pool**, which is D-0076 holding: pooling replays real contracts precisely so
+  that a long sample does not require stitching, and admitting `ES.v.0` here
+  would enable back-adjusted grids by the back door. That is a supersession and
+  Liron's call, not a pooling declaration.
+  **Controls, each watched failing in isolation under D-0113.** Removing each
+  of the four refusals failed exactly one test and no others — alias →
+  `a_continuous_alias_inside_a_pool_is_refused_naming_d0076`, duplicate →
+  `the_same_contract_twice_in_a_pool_is_refused`, root →
+  `a_contract_outside_the_declared_root_is_refused`, arity →
+  `pooling_fewer_than_two_contracts_is_refused`. The converse,
+  `a_well_formed_pool_of_one_root_is_accepted_by_the_parser`, comes first in
+  the file for the usual reason: without it a parser that rejected `[pooling]`
+  outright would satisfy every refusal above.
+  **A protocol mistake, recorded because D-0113 is one day old and this is its
+  first real exercise.** Restoring the first mutation with
+  `git checkout -- config.rs` reverted the file to `HEAD` and discarded the
+  entire uncommitted feature; the blob moved from `b4dace01` to `4da245fe` and
+  the loss was visible only because the protocol requires printing it. D-0113's
+  checkout branch is valid **only for a file whose working-tree state is
+  committed** — for uncommitted work the blob-proof branch is the one that
+  applies, and the two are not interchangeable. Nothing was lost beyond the
+  redo: the tests were in a second file and survived, and the four edits were
+  reapplied and re-proved. The remaining mutations used a single unconditional
+  copy with the blob printed after each restore, all four returning
+  `f786fca2fe0e8ad2924b35861624f03fd90c5109`.
+  **What block C still owes**, unchanged from D-0114 except for this item:
+  the CLI orchestration that loads N curated contracts and pools their
+  replays; the pooled-run determinism pin and its MILESTONES row; and the
+  acceptance run on real ES contracts. The archive holds 69 curated ES
+  contracts at `1m`, so the acceptance run is data-ready and blocked only on
+  the orchestration.
