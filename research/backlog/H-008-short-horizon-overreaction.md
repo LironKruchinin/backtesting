@@ -212,7 +212,7 @@ min_oos_return_pct_free_fills = 0.0
 min_oos_sharpe_after_costs = 0.5
 kill_if_dead_at_ticks = 1.0
 require_controls_beaten = true
-max_pbo = 0.5                         # declared; NOT evaluated (S3)
+max_pbo = 0.5                         # declared; EVALUATED since D-0109
 require_plateau = true                # declared; NOT evaluated (S3)
 
 [run]

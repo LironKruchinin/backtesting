@@ -153,7 +153,7 @@ min_oos_return_pct_free_fills = 0.0   # S1: dead cheaply if it loses cost-free
 min_oos_sharpe_after_costs = 0.5
 kill_if_dead_at_ticks = 1.0
 require_controls_beaten = true        # vs random-entry AND buy-and-hold
-max_pbo = 0.5                         # declared; NOT evaluated (S3)
+max_pbo = 0.5                         # declared; EVALUATED since D-0109
 require_plateau = true                # declared; NOT evaluated (S3)
 
 [run]
@@ -215,9 +215,13 @@ failure.
 
 **Test 3 — profitability (tertiary, and expected to fail).**
 - `min_oos_sharpe_after_costs = 0.5`, `kill_if_dead_at_ticks = 1.0`,
-  `require_controls_beaten = true`. `max_pbo` and `require_plateau` are
-  declared and echoed but **not evaluated by this build** (S3 is owed), and the
-  scorecard renders both as named holes.
+  `require_controls_beaten = true`. `max_pbo` and `require_plateau` were
+  declared and echoed but **not evaluated by the build this was registered
+  against** (S3 was owed), and the scorecard rendered both as named holes.
+  **Corrected 2026-08-04:** PBO/CSCV landed (D-0109), so `max_pbo` is now an
+  enforced gate at the value registered here — the threshold did not move, only
+  whether it bites. `require_plateau` is still a named hole. The run recorded
+  below predates that and says so in its own words.
 - Sample minimum before *any* profitability verdict: **200 round trips** and
   **250 trading sessions pooled across contracts**, encoded as `min_oos_trades`
   and `min_oos_sessions` above. A single-contract run reaches neither and will
