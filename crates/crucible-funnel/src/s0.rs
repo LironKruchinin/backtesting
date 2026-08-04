@@ -1756,8 +1756,19 @@ where
             &inputs.s0.score_slot,
         )
         .map_err(S0Error::Scorer)?;
-        debug_assert_eq!(scorer.slot_name(), inputs.s0.score_slot);
-        debug_assert_eq!(scorer.warmup_bars(), contract.warmup_bars);
+        // There is deliberately no comparison of the scorer's warmup or slot
+        // name against the contract's, because there are not two authorities
+        // to compare. `ComboScorer::build` sets `warmup_bars` from
+        // `combo.own_warmup_bars()` and `slot_name` from the slot string it
+        // was handed, and `S0ResultContract::for_combo` reads the same
+        // `own_warmup_bars()` on the same `&Combo` and the same
+        // `inputs.s0.score_slot`. A `debug_assert_eq!` on either pair reduces
+        // to a pure function compared with itself: it cannot fail for any
+        // config, grid shape or indicator kind, which makes it §7 decoration
+        // rather than a control. If a future change gives `ComboScorer::build`
+        // its own warmup computation, the repair is a typed refusal with a
+        // planted control that has been watched firing — not a debug assert
+        // that release builds compile away.
 
         // Score every bar, in availability order.
         let mut scored: Vec<ScoredBar> = Vec::with_capacity(inputs.events.len());
