@@ -3783,3 +3783,38 @@ propose a superseding entry — don't silently diverge.
   and the trial count reads `6` after both — the re-run charges nothing, which
   is D-0106's "one registration, one trial" measured rather than asserted.
   Both runs exit 5, which on the null harness is the correct answer (D-0075).
+- **D-0108** (2026-08-04) -- **A literal decision number already present in a
+  diff is treated as `D-TBD`: re-verified free at commit time, and on collision
+  the DIFF is renumbered, never the log.** §8.2 rules 1–4 describe a branch that
+  obeys the placeholder protocol, and rule 4's grep is the enforcement. That
+  grep can only fire on a branch that *complied*, because it searches for the
+  `D-TBD(` placeholder spelling and nothing else. A
+  branch that skipped the protocol and wrote a confident `D-0106` is invisible
+  to it. The failure the protocol exists to prevent therefore had an
+  unmonitored path straight to `main`, and rule 5 closes it.
+  **This was found by walking into it.** The S0-registration diff (D-0106) sat
+  unstaged for days carrying literal `D-0106` and `D-0107` — in code comments,
+  in the appended decision entry's own heading, and in the text promising the
+  repin would be recorded separately. No placeholder existed anywhere in the
+  tree, so rule 4's grep exited clean, which is the correct answer to the
+  question it asks and the wrong answer to the question that mattered. Both
+  numbers were still free against a log topping out at `D-0105`, so
+  verification cost one `git grep` and the commits stood.
+  **Free was luck, and the rule is written against the luck rather than the
+  outcome.** The branch had no way to know: §8.2's own motivating record is four
+  collisions, three of them on one number, every one discovered at merge by
+  someone who happened to read the log first. A diff that names its own number
+  is making the same unverifiable bet those four made; that this one paid is not
+  evidence the bet is sound, and a process that only records its collisions
+  learns half of what it could.
+  **Why the diff renumbers and not the log.** They are not symmetric. An entry
+  on `main` has been published to every later reader, code comment, test name
+  and commit message that cites it, and §8.1's third bullet is about exactly
+  the stale references that follow from moving one. An unmerged diff has one
+  reader and a mechanical, greppable rewrite. The asymmetry is why the rule can
+  be stated as an absolute instead of a judgement call.
+  **The check is a read, not a tool.** Re-read the log tail immediately before
+  committing — not at the time the diff was written, which may be days earlier
+  and is precisely the gap that lets two branches agree on a number. The report
+  says the number was pre-claimed and re-verified, so a reader can tell a
+  verified pre-claim from an allocation nobody checked.

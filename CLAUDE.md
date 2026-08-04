@@ -411,6 +411,26 @@ The protocol:
    assigned directly — the first run of it did exactly that. A check that fires
    on its own documentation gets ignored within a week, which is worse than not
    having one.
+5. **A literal number already in a diff is treated as `D-TBD`, not as
+   settled.** The check above catches a branch that *obeyed* the protocol; it
+   is silent on the branch that skipped it, because a diff carrying a confident
+   `D-0106` looks exactly like a diff whose number was assigned at merge. So
+   before committing any diff that names a decision number it did not receive
+   from a merge, **re-read the log tail and re-verify that number is still
+   free.** Free ⇒ commit it as written and say in the report that it was
+   pre-claimed and re-verified. Taken ⇒ **renumber the diff**, never the log:
+   the entry on `main` was published to every later reader and reference, and
+   moving it silently invalidates all of them, while the unmerged branch has
+   exactly one reader.
+
+   This is the §8.2 rule stated for the case §8.2 did not cover — a branch that
+   allocated its own number and got away with it. The 2026-08-04 S0-registration
+   diff carried literal `D-0106` and `D-0107` with no placeholder anywhere; both
+   happened to still be free against a log topping out at `D-0105`, so the
+   verification was cheap and the commit stood. **That it was free was luck, not
+   process** — the branch had no way to know, which is precisely what
+   placeholders exist to fix. Recording the near miss here is cheaper than
+   discovering the collided one.
 
 **The motivating record — four collisions, all on merge, all avoidable:**
 
