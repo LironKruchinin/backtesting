@@ -6,6 +6,7 @@ grade: TODO(human) — A/B/C is a cost judgement the drafter cannot make
 hypothesis_family: TODO(human) — one family for the whole idea, not one parameterization
 status: draft
 created: 2026-08-04
+doi: 10.2139/ssrn.7008318
 source_api: crossref
 harvested_from: crossref
 accessed: 2026-08-04

@@ -69,6 +69,12 @@ def draft_markdown(paper: Paper, *, topic: str, family_hint: str) -> str:
         if paper.abstract
         else "**the index carried no abstract** — the paper itself is the only source"
     )
+    # Machine-readable in the front matter as well as prose in the citation:
+    # the DOI is the corpus dedupe key, so a promotion step that wants to find
+    # this draft's record should not have to parse a sentence for it. `null`
+    # rather than an empty string, because a preprint legitimately has none and
+    # a blank would read as "not recorded".
+    doi_front = paper.doi or "null"
     doi_literal = repr(paper.doi)
     title_literal = repr(paper.title[:40])
 
@@ -80,6 +86,7 @@ grade: TODO(human) — A/B/C is a cost judgement the drafter cannot make
 hypothesis_family: {family_hint}
 status: draft
 created: {generated}
+doi: {doi_front}
 source_api: {paper.source}
 harvested_from: {", ".join(paper.extra.get("seen_in", [paper.source]))}
 accessed: {paper.accessed}
