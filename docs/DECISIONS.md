@@ -3925,3 +3925,52 @@ propose a superseding entry — don't silently diverge.
   hash-emitting CLI entry points (`funnel` is pinned against two configs) and
   four code-pinned digest assertions. D-0108's enumeration of eight stands as
   the count before this entry.
+- **D-0111** (2026-08-04) -- **Paper intake is API-only: Semantic Scholar,
+  OpenAlex, Crossref and arXiv, and Google Scholar and SSRN are never
+  scraped.** `research/intake` is a standard-library Python tool outside the
+  Cargo workspace, so §6's dependency policy is untouched and adding it costs
+  the Rust build nothing.
+  **The constraint is a terms-of-service one, not a technical one**, and it is
+  the same class of rule as this project's "never scrape CME". Both Google
+  Scholar and SSRN prohibit automated access. A research pipeline whose first
+  step violates a terms of service is not one anybody can publish from, and the
+  cost of obeying here is close to zero because the legitimate route is
+  strictly better: Crossref *is* the DOI registry and OpenAlex indexes SSRN
+  DOIs, so SSRN papers arrive **through** those APIs with structured metadata
+  attached — the first draft the tool produced was `10.2139/ssrn.7008318`,
+  reached exactly that way. PDFs are fetched by a human, by hand.
+  **Enforcement is structural.** Every request passes through one function that
+  refuses any host outside a frozen allowlist; there is no second HTTP call
+  site and there are no dependencies, so auditing what the tool contacts is
+  reading one constant and one function rather than trusting a policy. A
+  convention would have been enough today and would not survive the first
+  contributor who adds a `requests` call in a hurry.
+  **The corpus is gitignored and the tool and drafts are committed.** Abstracts
+  are third-party text and the corpus is rebuildable from the APIs, so
+  committing it would put other people's copyrighted prose in this repository
+  to no benefit. It is append-only JSONL on D-0074's reasoning. Dedupe is by
+  DOI with a title+year fallback, because dropping the DOI-less records would
+  bias the corpus toward published work and away from the preprints this field
+  actually runs on; duplicates **merge** rather than first-wins, since Crossref
+  carries the DOI and venue while Semantic Scholar carries the abstract.
+  **A draft is not a registration, and the tool cannot promote one.** Drafts
+  land in `research/intake/drafts/` and a human moves them into
+  `research/backlog/` after reading the paper. The drafter allocates no `H-0NN`
+  id and no triage grade: the id is claimed against the backlog at promotion
+  time for the same reason §8.2 allocates decision numbers at merge, and the
+  grade is a cost judgement nobody who has not read the paper can make. Every
+  section the tool cannot fill carries an explicit `TODO(human)`, because a
+  blank mechanism paragraph reads like a considered one.
+  **The backlog's no-predicted-performance rule is enforced in the tool rather
+  than at review**, which is the only way it holds when someone is busy: the
+  drafter scans its own output and refuses to write a file that breaks it. The
+  quoted abstract is excluded from that scan — it is labelled third-party text
+  and routinely contains performance figures, so scanning it would make the
+  rule unsatisfiable for precisely the papers worth reading.
+  **The check fired on its own boilerplate first, and that is recorded rather
+  than quietly patched.** The template's own warning sentence named the banned
+  metrics, so every draft was refused by the rule's restatement of itself —
+  the identical failure §8.2 documents for a `D-TBD` grep that matches its own
+  documentation. The sentence is now worded without naming them. A check that
+  fires on its own boilerplate gets disabled within a week, which is worse than
+  not having one.

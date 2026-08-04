@@ -26,3 +26,9 @@
 
 # Agent worktrees — gitlinks to throwaway checkouts, never part of the tree
 .claude/worktrees/
+
+# Harvested paper metadata and abstracts — third-party text, rebuildable from
+# the APIs at any time (research/intake/README.md). The TOOL and the DRAFTS are
+# committed; the corpus is not.
+research/intake/corpus/
+research/intake/**/__pycache__/
