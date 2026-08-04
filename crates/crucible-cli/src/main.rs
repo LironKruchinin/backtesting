@@ -48,6 +48,7 @@ mod config;
 mod funnel;
 mod grain;
 mod layout_check;
+mod pooled;
 mod pull;
 mod qa;
 mod rolls;
