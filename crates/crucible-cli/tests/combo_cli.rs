@@ -657,3 +657,47 @@ fn many_instruments_without_a_pooling_block_still_refuse_and_name_the_remedy() {
         stderr(&out)
     );
 }
+
+// ---------------------------------------------------------------------------
+// C2 — the per-contract evaluation window. Inert like C0/C1: nothing supplies
+// a window yet (C3 does, from the `.v` roll table), and D-0117 still refuses
+// every pooled config at validation time.
+// ---------------------------------------------------------------------------
+
+/// The curated single-contract path still works through C1's delegation and
+/// C2's window seam.
+///
+/// A **regression** control, not a control on the window: no CLI surface
+/// supplies a window until C3, so nothing here can exercise one. What it does
+/// prove is that `collect_events` → `collect_events_for` →
+/// `collect_events_in_window(None)` still reads real curated bars — the chain
+/// C1 and C2 inserted between the caller and the archive.
+///
+/// C2's windowing behaviour is deliberately left without a behavioural control
+/// until C3 wires it, and C3 owes one. Asserting on the source text instead
+/// would be decoration (§7), so this file does not.
+#[test]
+fn the_curated_path_survives_the_window_seam() {
+    const SYNTHETIC: &str = "source = \"synthetic\"\nseed = 7\nbars = 300\nstart_price_points = \"5000\"\nvol_ticks = 4";
+    const CURATED: &str = "source = \"curated\"\nstart = \"2024-01-01\"\nend = \"2024-02-01\"";
+    assert!(
+        TEMPLATE.contains(SYNTHETIC),
+        "positive control (D-0118): the pattern must match before its absence means anything"
+    );
+    let dir = TempDir::new();
+    let path = dir.config(
+        &TEMPLATE
+            .replace(
+                r#"instruments = ["SYN:RW"]"#,
+                r#"instruments = ["ESH2024"]"#,
+            )
+            .replace(SYNTHETIC, CURATED),
+    );
+    let out = run(&["combo", "--config", &path.to_string_lossy(), "--run"]);
+    assert_eq!(
+        code(&out),
+        0,
+        "the curated single-contract path must still run: {}",
+        stderr(&out)
+    );
+}

@@ -255,6 +255,34 @@ pub(crate) fn collect_events_for(
     loaded: &LoadedConfig,
     instrument: &str,
 ) -> Result<Series, (i32, String)> {
+    collect_events_in_window(loaded, instrument, None)
+}
+
+/// One instrument over an *explicitly named* evaluation window (C2).
+///
+/// `window` is `Some((start, end))` to replace `[data].start`/`[data].end` for
+/// this contract alone — inclusive start, exclusive end, like the config's own
+/// pair — and `None` to use the config's window unchanged.
+///
+/// **Why the window is a parameter rather than "the whole curated span".**
+/// A pooled run does not replay each contract over its full curated life:
+/// ESH2024 carries 239 curated trading days but is *front month* for 64 of
+/// them, and the ruling recorded at C3 counts front-month sessions. Deferred
+/// bars are largely an echo of the front month's price process — they add `n`
+/// without adding information — and `spread_cross`'s half-spread is calibrated
+/// for the liquid contract, so replaying them under it assumes a book that was
+/// not there (§2.4). C3 supplies each contract's front window from the `.v`
+/// roll table; this function is the seam that accepts it.
+///
+/// Warmup is unaffected, deliberately: a contract's pre-front bars are its own
+/// real bars and remain legitimate warmup input, exactly as D-0062 already
+/// treats warmup before an eval window. The window governs evaluation, session
+/// counting and trade attribution — not what the indicators may warm on.
+pub(crate) fn collect_events_in_window(
+    loaded: &LoadedConfig,
+    instrument: &str,
+    window: Option<(&str, &str)>,
+) -> Result<Series, (i32, String)> {
     match &loaded.file.data {
         DataSource::Synthetic {
             seed,
@@ -262,6 +290,18 @@ pub(crate) fn collect_events_for(
             start_price_points,
             vol_ticks,
         } => {
+            // A generated series is defined by its seed and bar count; there
+            // is no calendar window to narrow. Silently ignoring one would let
+            // a pooled synthetic config believe it had per-contract windows it
+            // never got — a run of a different experiment than the one asked
+            // for, which is the D-0075 shape.
+            if window.is_some() {
+                return Err((
+                    EXIT_USAGE,
+                    "a synthetic data source has no calendar window to narrow: it is defined by                      its seed and bar count. A per-contract evaluation window is a curated-only                      concept (C2)"
+                        .to_owned(),
+                ));
+            }
             if instrument != "SYN:RW" {
                 return Err((
                     EXIT_USAGE,
@@ -306,6 +346,14 @@ pub(crate) fn collect_events_for(
             })
         }
         DataSource::Curated { start, end } => {
+            // A named window wins over the config's. Synthetic data has no
+            // window to narrow — a generated series is defined by its seed and
+            // bar count — so the override is curated-only and the synthetic arm
+            // refuses one rather than ignoring it.
+            let (start, end) = match window {
+                Some((s, e)) => (s, e),
+                None => (start.as_str(), end.as_str()),
+            };
             // Still refused, for a *different* reason than before D-0076.
             //
             // The old reason — nothing could say which of the two price series
