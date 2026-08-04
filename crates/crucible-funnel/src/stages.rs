@@ -19,14 +19,20 @@
 //!
 //! **S3 — the battery**: parameter perturbation (plateau, not spike), regime
 //! slices, deflated Sharpe, PBO/CSCV, permutation nulls, cross-instrument
-//! rhyme. **Not implemented** (see below).
+//! rhyme. **Partly implemented, and not declarable** (see below): deflated
+//! Sharpe and PBO/CSCV are evaluated here, so [`Stage::S3`] is a value
+//! `decided_at` can take, while [`Stage::is_implemented`] stays false for it
+//! because a config still may not *declare* the stage.
 //!
 //! ## What this build actually runs, and what it refuses
 //!
 //! S0, S1 and S2. A config that declares `s3` is **refused at load**, with a
 //! message naming what it needs, because the alternative is a run that prints a
 //! fold table under a heading the config asked a different question of.
-//! `crucible-funnel::stats` still owes S3's battery.
+//! What `crucible-funnel::stats` still owes is the *rest* of S3's battery:
+//! deflated Sharpe and PBO/CSCV are delivered and pinned (D-0109, D-0110), the
+//! permutation null and the truncation harness are delivered but reach no run,
+//! and the plateau test and the cross-instrument rhyme check are unwritten.
 //!
 //! **S0 landed 2026-07-31** (D-0085): [`crate::s0`] is the measurement — the
 //! forward-return join, the information coefficient, the quantile buckets and
@@ -39,10 +45,12 @@
 //! and significance without size is an effect too small to trade.
 //!
 //! **The consequence: this build cannot award [`Verdict::Graduate`].** The
-//! glossary defines Graduate as "survived the full battery", and the battery
-//! is what is missing, so the best verdict available is [`Verdict::Iterate`]
-//! — and every report says so, rather than letting a reader infer that nothing
-//! graduated because nothing was good enough.
+//! glossary defines Graduate as "survived the full battery", and the battery is
+//! only partly here — deflated Sharpe and PBO/CSCV are evaluated (D-0109), the
+//! permutation null and the truncation harness reach no run, and the plateau
+//! and rhyme checks are unwritten. So the best verdict available is
+//! [`Verdict::Iterate`] — and every report says so, rather than letting a
+//! reader infer that nothing graduated because nothing was good enough.
 //!
 //! ## Rule zero
 //!
@@ -102,7 +110,10 @@ pub enum Stage {
     S1,
     /// Walk-forward under costs, with the sweep and the controls.
     S2,
-    /// The overfitting battery. Not implemented.
+    /// The overfitting battery. Partly implemented and **not declarable**: a
+    /// combo can be *decided at* S3, because the deflated Sharpe and PBO
+    /// criteria are evaluated (D-0109), but a config may not name the stage
+    /// while the rest of the battery is missing — see [`Stage::is_implemented`].
     S3,
 }
 
@@ -117,8 +128,9 @@ impl Stage {
     const fn missing_because(self) -> &'static str {
         match self {
             Stage::S3 => {
-                "S3 is deflated Sharpe, PBO/CSCV, the permutation nulls and the cross-instrument \
-                 rhyme check — `crucible-funnel::stats`, which is still a module-doc spec"
+                "S3 needs the whole battery. Deflated Sharpe and PBO/CSCV are evaluated \
+                 already; the permutation null and the truncation harness exist but reach no \
+                 run, and the plateau test and cross-instrument rhyme check are unwritten"
             }
             Stage::Admission | Stage::S0 | Stage::S1 | Stage::S2 => "",
         }
@@ -190,18 +202,22 @@ pub struct Criteria {
     /// S0: the smallest `|IC|` at any declared horizon that counts as a
     /// relationship. `None` when the config did not declare `s0`.
     pub s0_min_abs_ic: Option<f64>,
-    /// **S3, and the first piece of the battery that is real**: the largest
-    /// permutation-null p-value that still counts as an edge. `None` when the
-    /// caller supplies no permutation result.
+    /// **S3**: the largest permutation-null p-value that still counts as an
+    /// edge. `None` when the caller supplies no permutation result — which is
+    /// every run today, because `crucible-cli` passes `None` unconditionally
+    /// and no config key sets it. The criterion is therefore **unreachable in
+    /// practice** and no scorecard has ever carried a p-value.
     ///
     /// Evaluated whenever an `Evidence` carries a p-value, rather than gated on
     /// `stages` containing `s3` — because `s3` as a *declarable stage* still
-    /// needs the rest of the battery (deflated Sharpe, PBO, truncation) and is
-    /// still refused at load (D-0075). This is the seam that lets the harness
-    /// be exercised by its acceptance test before the stage it belongs to
-    /// exists.
+    /// needs the rest of the battery (the permutation null on the run path, the
+    /// plateau test, the rhyme check) and is still refused at load (D-0075).
+    /// This is the seam that lets the harness be exercised by its acceptance
+    /// test before the stage it belongs to exists.
     pub max_permutation_p: Option<f64>,
-    /// S3, echoed and **not evaluated** by this build.
+    /// S3, and **evaluated** since D-0109: a combo fails when its PBO exceeds
+    /// this, and renders `ABSENT` — which also fails — when CSCV could not
+    /// produce one.
     pub max_pbo: f64,
     /// S3, echoed and not evaluated by this build.
     pub require_plateau: bool,
@@ -784,8 +800,11 @@ pub fn assess(
     }
 
     // Graduate is unreachable, and deliberately: the glossary defines it as
-    // "survived the full battery", and S3 — the battery — is not in this
-    // build. Awarding it on S1+S2 would just rename Iterate.
+    // "survived the full battery", and the battery is only partly here. Two of
+    // its criteria are evaluated just above (D-0109), which is why a passing
+    // combo is now *decided at* S3 — but the permutation null and the
+    // truncation harness reach no run, and the plateau and rhyme checks are
+    // unwritten. Awarding Graduate on what does run would just rename Iterate.
     Assessment {
         verdict: if failed {
             Verdict::Kill

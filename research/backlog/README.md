@@ -203,9 +203,9 @@ markdown.** In that order the lint is a formality rather than a discovery.
 Several files here pre-register a **predictor-first** gate — a no-trading
 measurement of forward returns conditional on the signal — ahead of any equity
 curve, per `docs/PROJECT_PLAN.md` §7.3. That gate is the funnel's **S0**, and
-S0 is **not implemented**: a config declaring it is refused at load, because
-*the combo grammar's rules produce positions, not a continuous score to bucket
-forward returns by* (`crucible-funnel::stages`).
+S0 **used to be unimplemented**: a config declaring it was refused at load,
+because *the combo grammar's rules produce positions, not a continuous score to
+bucket forward returns by* (`crucible-funnel::stages`).
 
 That gap is **closed** (D-0082, D-0085): the **S0 predictor seam** is a
 score-emitting evaluation path with forward-return joins — the M2.5 predictor
@@ -429,7 +429,9 @@ what that file asks for in Gate 0 and Gate 0b — forward returns bucketed at
 1/5/10/20 minutes, a block bootstrap over sessions, and the effect size in
 **ticks** so it can be compared against the spread — is half of what the seam
 has to do, the other half being the quantile/IC contract in
-`crucible-funnel::stages`' module doc. Both halves are owed.
+`crucible-funnel::stages`' module doc. **Both halves have landed** — D-0082 the
+measurement, D-0102 the evidence product — leaving only H-008's own Gate 0b
+unevaluated, for the separate reason D-0102 records.
 
 **H-007 is runnable now.** Its primary test reads the cost-sensitivity sweep and
 per-round-trip PnL out of S1/S2 and needs no S0 seam.

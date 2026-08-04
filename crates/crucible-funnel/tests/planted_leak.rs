@@ -393,10 +393,11 @@ fn the_planted_leak_is_caught_by_the_permutation_null() {
 /// same idea, fitted on nothing, is killed by the same criteria on the same
 /// bars.
 ///
-/// Without this, `the_planted_leak_survives_todays_gates` would be consistent
-/// with "the criteria pass everything", which is a different and much less
-/// interesting fact. With it, the pair says exactly what it means: the gates
-/// discriminate, and the thing they cannot see is the leak.
+/// Without this, `the_planted_leak_is_caught_by_the_permutation_null` would be
+/// consistent with "the criteria kill everything", which is a different and
+/// much less interesting fact. With it, the pair says exactly what it means:
+/// the criteria discriminate between the two strategies rather than refusing
+/// both on sight.
 #[test]
 fn the_same_criteria_kill_an_honest_strategy_on_the_same_data() {
     let events = events();

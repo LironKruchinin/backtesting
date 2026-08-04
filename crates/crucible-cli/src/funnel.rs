@@ -768,18 +768,28 @@ fn print_footer(loaded: &LoadedConfig, report: &FunnelReport) {
     );
     println!(
         "\n  NO COMBO ABOVE CAN BE `GRADUATE`. Graduate means \"survived the full battery\", and\n\
-         \x20 the battery is S3: deflated Sharpe, PBO/CSCV, the permutation nulls and the\n\
-         \x20 truncation-invariance harness. None of them is in this build, so the ceiling is\n\
-         \x20 ITERATE and every Sharpe printed here is the NAIVE one — an upper bound, with the\n\
-         \x20 trial count beside it but not yet applied to it."
+         \x20 the ceiling stays ITERATE (D-0075). The battery is no longer wholly\n\
+         \x20 absent, though, so the gap is worth naming exactly. Deflated Sharpe and\n\
+         \x20 PBO/CSCV are computed and judged (D-0109); their reasons print only for\n\
+         \x20 a combo that survived as far as S3, so a combo killed earlier shows\n\
+         \x20 none. The permutation null and the truncation harness are built and\n\
+         \x20 hash-pinned, and both caught the planted leak in their own suites — but\n\
+         \x20 neither runs on this path, and `max_permutation_p` cannot be set from a\n\
+         \x20 config at all, so no p-value appears anywhere above, ever. The plateau\n\
+         \x20 test and the cross-instrument rhyme check do not exist. Every Sharpe\n\
+         \x20 printed above is the NAIVE one, an upper bound; the deflated companion\n\
+         \x20 appears only in an S3 reason, with the trial count applied."
     );
     println!(
         "\n  A leaky reference strategy exists in this repository on purpose\n\
          \x20 (`crucible-strategies::controls::LeakyZScore`, a full-sample z-score — the exact\n\
-         \x20 lookahead §2.1 names), and the gates above do NOT catch it. That is recorded, not\n\
-         \x20 hidden: it is the honest baseline the permutation and truncation harnesses have to\n\
-         \x20 beat, and `crucible-funnel/tests/planted_leak.rs` asserts today's answer so the\n\
-         \x20 day it changes is a day somebody notices."
+         \x20 lookahead §2.1 names). The gates above still do NOT catch it, and that is\n\
+         \x20 recorded rather than hidden — but it is no longer the whole story. The\n\
+         \x20 block-permutation null caught it on 2026-07-31 at p = 0.2079 against a\n\
+         \x20 pre-registered 0.05, and the truncation harness caught it independently,\n\
+         \x20 4 divergences against SmaCross's 0. `crucible-funnel/tests/planted_leak.rs`\n\
+         \x20 asserts `Kill` for it and asserts that every gate before S3 still passes,\n\
+         \x20 so the day either changes is a day somebody notices."
     );
     println!("\n  not consumed by `funnel`:");
     let unconsumed = loaded.unconsumed_sections(Consumer::Funnel);

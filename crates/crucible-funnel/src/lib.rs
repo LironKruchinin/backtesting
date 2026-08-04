@@ -30,14 +30,25 @@
 //! pre-registered criteria. [`scorecard`] renders the result with the honesty
 //! box §2.4 and §2.5 require.
 //!
-//! **What is still spec**: [`stats`] — deflated Sharpe, PBO/CSCV, the
-//! permutation nulls and the truncation harness — and with it stage S3, which
-//! [`stages`] therefore **refuses** rather than skipping. Because S3 is what
-//! "survived the full battery" means, this build cannot award
-//! [`Verdict::Graduate`]; its ceiling is [`Verdict::Iterate`], and every report
-//! says so. `crucible-strategies::controls::LeakyZScore` is the planted defect
-//! those detectors will be measured against, and
-//! `tests/planted_leak.rs` records that today's gates do not catch it.
+//! **What [`stats`] has, and what it still owes**: deflated Sharpe (D-0097)
+//! and PBO/CSCV (D-0109) are implemented *and* judged on the run path. The
+//! block-permutation null (D-0087) and the truncation harness (D-0088) are
+//! implemented and hash-pinned but reach no run — `max_permutation_p` cannot be
+//! set from a config, so no scorecard carries a p-value and the truncation
+//! verdict is a test-suite fact rather than a reported one. The plateau test
+//! and the cross-instrument rhyme check are not written. S3 is therefore still
+//! undeclarable and [`stages`] **refuses** it rather than skipping; because S3
+//! is what "survived the full battery" means, this build cannot award
+//! [`Verdict::Graduate`], its ceiling is [`Verdict::Iterate`], and every report
+//! says so (D-0075).
+//!
+//! `crucible-strategies::controls::LeakyZScore` is the planted defect those
+//! detectors are measured against, and `tests/planted_leak.rs` asserts
+//! [`Verdict::Kill`] for it. The permutation null caught it on 2026-07-31 at
+//! p = 0.2079 against a pre-registered 0.05 — reached by building the harness
+//! and by no other route, which is the only route §9 permits. Every gate before
+//! S3 still passes and the test asserts that too, so the file cannot quietly
+//! stop measuring the detector.
 
 pub mod funnel;
 pub mod grid;

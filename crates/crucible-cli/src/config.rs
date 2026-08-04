@@ -381,12 +381,14 @@ pub struct FunnelCfg {
     /// (random-entry and buy-and-hold) on pooled out-of-sample return, or its
     /// number is the market's and not the strategy's.
     pub require_controls_beaten: bool,
-    /// S3 criterion. Parsed and echoed; **not evaluated** by this build, and
-    /// the report says so on every run — PBO needs the CSCV recombination
-    /// machinery that lands with the rest of `crucible-funnel::stats`.
+    /// S3 criterion, **evaluated** since D-0109: `crucible-funnel::stats::pbo`
+    /// runs CSCV over the fold plan's own folds, a combo fails when its PBO
+    /// exceeds this, and a PBO that could not be computed renders `ABSENT` and
+    /// **fails** rather than passing quietly.
     pub max_pbo: f64,
-    /// S3 criterion. Parsed and echoed; not evaluated by this build, for the
-    /// same reason.
+    /// S3 criterion. Parsed and echoed; **not evaluated** by this build — the
+    /// plateau test over the declared axes is not written, so the scorecard
+    /// still renders it as a named hole.
     pub require_plateau: bool,
 }
 
@@ -410,8 +412,12 @@ impl FunnelCfg {
             kill_if_dead_at_ticks: self.kill_if_dead_at_ticks,
             require_controls_beaten: self.require_controls_beaten,
             s0_min_abs_ic,
-            // Not configurable yet: the permutation harness ships with its
-            // acceptance test before it is wired to the run path.
+            // Not configurable, and this is the whole reason S3's permutation
+            // criterion never fires: the harness shipped with its acceptance
+            // test ahead of the wiring (D-0087) and no config key was ever
+            // added, so every run passes `None`, `Criteria` never sees a
+            // p-value, and no scorecard has carried one. Wiring it is a
+            // tracked M3 item, not an oversight discovered here.
             max_permutation_p: None,
             max_pbo: self.max_pbo,
             require_plateau: self.require_plateau,

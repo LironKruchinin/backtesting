@@ -360,13 +360,18 @@ impl Strategy for RandomEntry {
 /// edge at all, is the sharpest possible demonstration: any profit here is
 /// leakage by construction.
 ///
-/// It exists so the detectors that are still owed —
-/// `crucible-funnel::stats`'s permutation nulls and the truncation-invariance
-/// harness — have a defect whose detection can be *watched*, per §7's
-/// no-quality-exemption clause. Until they land, the honest record is that the
-/// funnel's S0–S2 gates do **not** catch it, and
-/// `crucible-funnel::tests::the_planted_leak_survives_todays_gates` is the
-/// test that says so out loud.
+/// It exists so the detectors have a defect whose detection can be *watched*,
+/// per §7's no-quality-exemption clause. **Both landed on 2026-07-31 and both
+/// caught it**: `crucible-funnel::stats::permutation` at p = 0.2079 against a
+/// pre-registered 0.05 (D-0087), because a strategy that re-fits on every
+/// permutation makes its observed run an ordinary draw from its own null; and
+/// `crucible-funnel::stats::truncation` with 4 divergences where `SmaCross`
+/// gives 0 (D-0088). The funnel's S0–S2 gates still do **not** catch it, which
+/// is the point rather than a gap — a statistic computed on the leaked run
+/// cannot tell a leaked edge from a real one. `planted_leak.rs`'s
+/// `the_planted_leak_is_caught_by_the_permutation_null` asserts both halves, so
+/// the leak dying earlier for some unrelated reason would surface as the file
+/// quietly ceasing to measure the detector.
 #[derive(Clone, Copy, Debug)]
 pub struct LeakyZScore {
     /// Mean close of the whole series, in points. **This is the leak.**

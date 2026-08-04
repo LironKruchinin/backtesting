@@ -1,9 +1,15 @@
 # M3-full — the plan from here to a reachable `Graduate`
 
-**Status:** plan, not code. Written 2026-07-31, after the S0 predictor seam
-landed (D-0082 measurement, D-0085 caller). **Precedence:** `docs/MILESTONES.md`
-remains the executable checklist; this file is the ordering and the reasoning
-behind it, and it gets corrected when a block lands rather than kept in parallel.
+**Status:** plan, partly executed. Written 2026-07-31, after the S0 predictor
+seam landed (D-0082 measurement, D-0085 caller); **corrected 2026-08-04, three
+blocks late.** Block A landed 2026-07-31 (D-0087 permutation, D-0088
+truncation), block B on 2026-08-04 (D-0109, pinned by D-0110), and block C is in
+flight — C0–C4a are on `main` (D-0114..D-0119) behind D-0117's standing refusal.
+**Precedence:** `docs/MILESTONES.md` remains the executable checklist; this file
+is the ordering and the reasoning behind it, and it gets corrected when a block
+lands rather than kept in parallel — a promise this file broke three times
+before 2026-08-04, which is why the status now carries dates rather than a
+claim.
 
 ## What M3 has, and what it owes
 
@@ -12,8 +18,11 @@ insert-before-run and void records (D-0074, D-0083), the rayon scheduler, S0/S1/
 with pre-registered criteria, the two mandatory controls, the cost sweep,
 account-evaluation *capture*, and HTML scorecards.
 
-Owed: `crucible-funnel::stats` — still a spec in module docs — plus registry
-pooling and the account-evaluation *evaluator*. Five blocks, in this order.
+Owed: the *rest* of `crucible-funnel::stats` — the permutation null and the
+truncation harness are implemented and hash-pinned but reach no run, and the
+plateau and cross-instrument rhyme checks are unwritten — plus the rest of
+registry pooling and the account-evaluation *evaluator*. Five blocks, in this
+order; A and B are done, C is in flight, D and E are untouched.
 
 The order is not preference. **Block A is first because every other block's
 numbers are worth less until it exists**: PBO and deflated Sharpe are statements
@@ -33,6 +42,14 @@ harness, `rand_chacha` and the D-0064 seed lineage.
 land*), an empirical p-value per run against the permutation null, and a
 truncation-invariance verdict. Both attach to the scorecard, which today renders
 the permutation null as a **named hole** (§9) — the hole is what this fills.
+
+**Landed 2026-07-31, and one clause of that did NOT land.** Both suites exist,
+both are hash-pinned, and both caught the planted leak. But neither reaches a
+run: `max_permutation_p` cannot be set from any config, so the scorecard's
+permutation hole is **still a hole**, and the suites are green locally rather
+than merge-blocking in CI as §7 requires the day they land. Block D's condition
+7 depends on that wiring, so the residue is not cosmetic; it is tracked in
+`docs/MILESTONES.md` as its own item.
 
 - **Permutation null:** re-run the exact pipeline on block-shuffled real returns
   (block length ≳ strategy horizon, so autocorrelation survives the shuffle) and

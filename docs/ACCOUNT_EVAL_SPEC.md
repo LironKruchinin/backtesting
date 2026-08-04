@@ -906,8 +906,10 @@ This battery is built on top of, and after:
   a replacement: a strategy that passes an evaluation on a mined parameter set
   passes an evaluation on a mined parameter set. The trial count from §4.6
   feeds the same deflation.
-- The DuckDB registry — `account_id` in the run identity, insert-before-run,
-  dedupe on `(config_hash, account_id, combo_index, fold)`.
+- The registry — `account_id` in the run identity, insert-before-run, dedupe on
+  `(config_hash, account_id, combo_index, fold)`. **Append-only JSONL, not
+  DuckDB** (D-0074): the `bundled` build fails on this toolchain, so the backend
+  changed and the five contract rules did not.
 - The rayon scheduler — bootstrap draws are embarrassingly parallel and merge by
   sorting on draw index, never on completion order (§2.2).
 - The scorecard's honesty box — an account section states mark grain, block

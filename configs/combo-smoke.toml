@@ -77,8 +77,9 @@ step_days = 2
 # would have to clear them. A run of this file that reports anything other than
 # KILL for every combo is a bug in the engine, not an edge.
 [funnel]
-# s0 (signal triage) and s3 (the overfitting battery) are NOT implemented, and
-# a config that names either is refused rather than silently skipped.
+# s0 (signal triage) runs since D-0085 — see s0-smoke.toml beside this file,
+# which declares it. s3 (the overfitting battery) is still NOT declarable, and a
+# config that names it is refused rather than silently skipped.
 stages = ["s1", "s2"]
 # Mandatory, all four levels (CLAUDE.md §2.4). Every entry must be a whole
 # number of half-ticks — a price grid has half-ticks, not tenths (D-0073).
@@ -89,8 +90,9 @@ min_oos_return_pct_free_fills = 0.0
 min_oos_sharpe_after_costs = 0.5
 kill_if_dead_at_ticks = 1.0
 require_controls_beaten = true
-# Declared and echoed; NOT evaluated by this build, which is why the scorecard
-# renders both as named holes rather than leaving them out.
+# max_pbo is EVALUATED since D-0109 and renders as a number. require_plateau is
+# declared and echoed but NOT evaluated, which is why the scorecard still
+# renders that one as a named hole rather than leaving it out.
 max_pbo = 0.5
 require_plateau = true
 

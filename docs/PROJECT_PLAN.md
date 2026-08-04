@@ -226,8 +226,9 @@ that counts. It is M3's first block; the exit criterion above is unchanged and
 is met by an S0 report.
 
 ### M3 — Funnel + statistics *(≈ 3–4 weeks)*
-Grid expansion + blake3 config identity; DuckDB registry (runs, hypotheses,
-trials, verdicts; insert-before-run; dedup/resume); rayon scheduler (dataset
+Grid expansion + blake3 config identity; append-only JSONL registry (runs,
+hypotheses, trials, verdicts; insert-before-run; dedup/resume — DuckDB was
+tried first and rejected on a measured build failure, D-0074); rayon scheduler (dataset
 semaphore, multi-instance pass: one replay feeding K combo instances);
 stages S0–S3 with config-declared kill criteria; deflated Sharpe, PBO/CSCV,
 block-permutation nulls; truncation-invariance harness in CI (with a planted

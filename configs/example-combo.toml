@@ -96,8 +96,9 @@ min_oos_return_pct_free_fills = 0.0   # S1: dead cheaply if it loses cost-free
 min_oos_sharpe_after_costs = 0.5      # S2, under the declared fill model
 kill_if_dead_at_ticks = 1.0  # ...and still, at this much half-spread
 require_controls_beaten = true        # vs matched random-entry AND buy-and-hold
-# Declared and echoed; NOT evaluated by this build (they are S3), and the
-# scorecard renders both as named holes rather than leaving them out.
+# Both are S3. max_pbo is EVALUATED since D-0109 and renders as a number;
+# require_plateau is declared and echoed but NOT evaluated, and the scorecard
+# renders that one as a named hole rather than leaving it out.
 max_pbo = 0.5
 require_plateau = true
 
