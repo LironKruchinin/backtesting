@@ -116,6 +116,19 @@ pub enum ContinuousError {
         /// Which invariant failed, and what was found instead.
         detail: String,
     },
+    /// A contract asked about is not in this table's chain.
+    ///
+    /// A caller error rather than a malformed table: the table is coherent,
+    /// the question was about something it does not describe. Distinguished so
+    /// a pooled run that names a contract outside the root's chain gets told
+    /// which chain it asked, instead of a refusal that reads as data
+    /// corruption.
+    ContractNotInChain {
+        /// The contract that was asked about.
+        symbol: String,
+        /// The root whose chain was searched.
+        root: String,
+    },
     /// A contract the roll table names has no curated bars.
     SegmentMissing {
         /// The contract that is front for that segment.
@@ -318,6 +331,10 @@ impl core::fmt::Display for ContinuousError {
                 "roll table is self-contradictory: {detail}. A table whose rows do not \
                  describe one chain of contracts cannot say which contract was front \
                  when, which is the only question it exists to answer"
+            ),
+            ContinuousError::ContractNotInChain { symbol, root } => write!(
+                f,
+                "{symbol} is not in the {root} roll table's contract chain"
             ),
             ContinuousError::SegmentMissing { contract, source } => write!(
                 f,

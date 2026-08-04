@@ -391,6 +391,77 @@ impl RollTable {
         })
     }
 
+    /// The window in which `contract` is the **front month**, as a half-open
+    /// `avail_ts` range (block C).
+    ///
+    /// This is the windowing primitive a pooled run cuts its evaluation on. A
+    /// contract is quoted for far longer than it leads: ES contracts carry
+    /// ~239 curated trading days each but are front for ~66 of them, and the
+    /// deferred bars are largely an echo of the front month's price process —
+    /// they add `n` without adding information, and `spread_cross`'s
+    /// half-spread is calibrated for the liquid contract, so replaying them
+    /// under it assumes a book that was not there (§2.4).
+    ///
+    /// **The boundary is exclusive-below and inclusive-above**, because that
+    /// is what [`RollRow::roll_ts`] means: the new contract is front for bars
+    /// whose `avail_ts` is *strictly after* the roll. Expressed half-open that
+    /// is `[roll_ts + 1ns, next_roll_ts + 1ns)`, and the `+ 1ns` is the whole
+    /// correctness content of this function — getting it wrong hands one
+    /// session to the wrong contract, silently, at every roll.
+    ///
+    /// The first contract opens at [`RollTable::first_ts_open`] and the last
+    /// closes at the availability end of the table, so **the windows tile**:
+    /// consecutive contracts abut exactly, with no gap and no overlap, and
+    /// every instant the table covers belongs to exactly one contract. That
+    /// makes double-counting inexpressible rather than corrected afterwards —
+    /// but it is a property of half-open consecutive intervals, not something
+    /// this function checks. What can still go wrong is the *table*, and
+    /// [`RollTable::validate`] is what refuses that: out-of-order rolls,
+    /// duplicate or backwards contracts, and rows that disagree with the
+    /// chain.
+    ///
+    /// # Errors
+    /// [`ContinuousError::ContractNotInChain`] if `contract` is not in the chain,
+    /// or [`ContinuousError::MalformedTable`] if the resulting window is not a
+    /// range — which [`RollTable::validate`] refuses first.
+    pub fn front_window(&self, contract: &str) -> Result<TsRange, ContinuousError> {
+        let index = self
+            .contracts
+            .iter()
+            .position(|c| c == contract)
+            .ok_or_else(|| ContinuousError::ContractNotInChain {
+                symbol: contract.to_owned(),
+                root: self.root.clone(),
+            })?;
+        // Exclusive-below: the roll INTO this contract hands it the first bar
+        // strictly after `roll_ts`, so the half-open window opens one
+        // nanosecond later.
+        let start = match index.checked_sub(1) {
+            Some(previous) => self.rows[previous].roll_ts.plus_ns(1),
+            None => self.first_ts_open,
+        };
+        // Inclusive-above: this contract keeps the bar stamped exactly at the
+        // roll OUT of it.
+        let end = match self.rows.get(index) {
+            Some(row) => row.roll_ts.plus_ns(1),
+            None => self.last_ts_open.plus_ns(self.tf.duration_ns()),
+        };
+        TsRange::new(start, end).map_err(|e| ContinuousError::MalformedTable {
+            detail: format!("{contract} has no front window: {e}"),
+        })
+    }
+
+    /// Every contract's front window, in chain order.
+    ///
+    /// # Errors
+    /// As [`RollTable::front_window`].
+    pub fn front_windows(&self) -> Result<Vec<(String, TsRange)>, ContinuousError> {
+        self.contracts
+            .iter()
+            .map(|c| self.front_window(c).map(|w| (c.clone(), w)))
+            .collect()
+    }
+
     /// `requested` narrowed to [`covered_range`](RollTable::covered_range), or
     /// `None` when the two do not overlap at all.
     ///
@@ -1587,7 +1658,7 @@ mod tests {
 
     // ------------------------------------------------------------ round trip
 
-    fn sample_table() -> RollTable {
+    pub(super) fn sample_table() -> RollTable {
         RollTable {
             schema_version: ROLL_TABLE_SCHEMA_VERSION,
             root: "ES".to_owned(),
@@ -1721,5 +1792,131 @@ mod tests {
         table.rows[0].to_contract = "NQM4".to_owned();
         let err = table.validate().expect_err("one table, one root");
         assert!(matches!(err, ContinuousError::RootMismatch { .. }), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod front_window_tests {
+    use super::tests::sample_table;
+    use super::*;
+
+    const DAY: i64 = 86_400_000_000_000;
+
+    /// Hand-derived, and the `+ 1ns` is the whole point.
+    ///
+    /// `sample_table` rolls ESH4 → ESM4 at `roll_ts = 2 * DAY`, spans
+    /// `first_ts_open = 0` to `last_ts_open = 3 * DAY`, on 1m bars. `roll_ts`
+    /// means the new contract is front for bars *strictly after* it, so:
+    ///
+    /// * ESH4 is front over `[0, 2*DAY + 1ns)` — it KEEPS the bar stamped
+    ///   exactly at the roll.
+    /// * ESM4 is front over `[2*DAY + 1ns, 3*DAY + 60s)` — the availability
+    ///   end of the last 1m bar.
+    ///
+    /// An off-by-one here hands one session to the wrong contract at every
+    /// roll, silently, and every pooled session count inherits it.
+    #[test]
+    fn a_front_window_is_exclusive_below_and_inclusive_above() {
+        let table = sample_table();
+        let h4 = table.front_window("ESH4").expect("ESH4 is in the chain");
+        let m4 = table.front_window("ESM4").expect("ESM4 is in the chain");
+
+        assert_eq!(h4.start_ts(), Ts(0));
+        assert_eq!(
+            h4.end_ts(),
+            Ts(2 * DAY + 1),
+            "the old contract keeps the bar stamped exactly at the roll"
+        );
+        assert_eq!(
+            m4.start_ts(),
+            Ts(2 * DAY + 1),
+            "the new contract starts strictly after the roll"
+        );
+        assert_eq!(
+            m4.end_ts(),
+            Ts(3 * DAY + TimeFrame::M1.duration_ns()),
+            "the last contract runs to the availability end of the last bar"
+        );
+    }
+
+    /// The windows tile: consecutive contracts abut exactly, so every instant
+    /// the table covers belongs to exactly one contract and double-counting is
+    /// inexpressible rather than corrected afterwards.
+    ///
+    /// Asserted on the *boundaries*, not on a sum-equals-union identity —
+    /// disjoint half-open consecutive intervals sum to their union
+    /// unconditionally, so that identity cannot fail and would be decoration
+    /// (§7). What can fail is a boundary computed from the wrong side of a
+    /// roll, and that is what this checks.
+    #[test]
+    fn consecutive_front_windows_abut_with_no_gap_and_no_overlap() {
+        let table = sample_table();
+        let windows = table.front_windows().expect("well-formed table");
+        assert_eq!(windows.len(), table.contracts.len());
+        for pair in windows.windows(2) {
+            let (before, after) = (&pair[0], &pair[1]);
+            assert_eq!(
+                before.1.end_ts(),
+                after.1.start_ts(),
+                "{} ends at {} but {} starts at {}",
+                before.0,
+                before.1.end_ts(),
+                after.0,
+                after.1.start_ts()
+            );
+        }
+        assert_eq!(windows[0].1.start_ts(), table.first_ts_open);
+    }
+
+    /// A contract outside the chain is a caller error, named as one.
+    #[test]
+    fn a_contract_outside_the_chain_is_refused_by_name() {
+        let error = sample_table()
+            .front_window("NQH4")
+            .expect_err("NQH4 is not in the ES chain");
+        assert!(
+            matches!(error, ContinuousError::ContractNotInChain { .. }),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("contract chain"), "{error}");
+    }
+
+    /// **The malformed-table fixture.** `RollTable::validate` — not a new
+    /// check — is what refuses a table whose windows would be nonsense, and
+    /// this proves it fires rather than assuming it.
+    ///
+    /// A sum-equals-union assertion was considered for this job and rejected:
+    /// it is provable-true for disjoint consecutive intervals, so it could
+    /// only ever fire on a table `validate` already refuses — the same
+    /// decoration this project deleted from C2.
+    #[test]
+    fn validate_refuses_the_malformed_tables_that_would_break_windowing() {
+        // Positive control (D-0118): the well-formed fixture must PASS, or a
+        // `validate` that refused everything would satisfy every case below.
+        sample_table()
+            .validate()
+            .expect("the fixture is well formed");
+
+        // Rolls out of order — the segments they bound would overlap.
+        let mut backwards = sample_table();
+        backwards.contracts.push("ESU4".to_owned());
+        backwards.rows.push(RollRow {
+            from_contract: "ESM4".to_owned(),
+            to_contract: "ESU4".to_owned(),
+            roll_ts: Ts(DAY), // BEFORE the previous roll at 2 * DAY
+            adjustment: Price::from_points(1),
+        });
+        let error = backwards.validate().expect_err("out-of-order rolls");
+        assert!(error.to_string().contains("strictly ordered"), "{error}");
+
+        // A duplicated contract — the chain must strictly advance in delivery.
+        let mut duplicated = sample_table();
+        duplicated.contracts[1] = "ESH4".to_owned();
+        duplicated.rows[0].to_contract = "ESH4".to_owned();
+        let error = duplicated.validate().expect_err("a repeated contract");
+        assert!(
+            error.to_string().contains("does not deliver before"),
+            "{error}"
+        );
     }
 }
