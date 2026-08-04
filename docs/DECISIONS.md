@@ -3736,3 +3736,50 @@ propose a superseding entry — don't silently diverge.
   shortcut even though its trial is outside the standing denominator. Whether
   void invalidates resume evidence is part of D-0105's reserved post-void
   semantics, not silently decided here.
+- **D-0107** (2026-08-04) -- **The S0 determinism pin moves from
+  `825356c88295ce94` to `e74766eb3f7becfc`; the other seven pinned gates do
+  not move.** This is a deliberate semantic repin, isolated from the D-0106
+  implementation commit that caused it, for the same reason D-0103 was
+  isolated from D-0102: one hash, one commit, so the diff that moves a gate
+  contains nothing a reader has to disentangle it from.
+  **The evidence is the failure, not an argument.** At the implementation
+  commit `88dfebd`, with the working tree byte-identical to the reviewed
+  eleven-file diff, `crucible funnel --config configs/s0-smoke.toml --out
+  <isolated> --hash-only` printed `e74766eb3f7becfc` against a documented
+  `825356c88295ce94`, and the four other doc-pinned gates printed their
+  documented values in the same checkout: demo `b55747513df596ed`, combo
+  `0e1ab52d474b862b`, walk-forward `711e1cb34a2ee2b4`, funnel
+  `2f430893d2a79a8f`. The three code-pinned gates asserted their own literals
+  green in `cargo test --workspace`: permutation `9fe41f6f5b3653e7`,
+  truncation `91b9ff5b9bbcdb25`, deflated Sharpe `dc7f94f25235df6c`. That
+  `configs/combo-smoke.toml` declares `stages = ["s1", "s2"]` and no `[s0]`
+  block is why the funnel gate is expected to hold and did: D-0106 leaves a
+  config without an S0 registration on its D-0012 identity, and the unmoved
+  funnel hash is the measurement of that claim rather than a restatement of
+  it.
+  **Why the bytes moved.** D-0106 binds the S0 declaration, the contract tick
+  and the delivered data window into the run identity, and replaces the
+  legacy-null writer with the typed D-0104 aggregate. The determinism hash
+  consumes the S0 report, and the report now carries its registration hash and
+  the exact persisted `S0RunMetrics` values rather than a separate renderer
+  aggregate. Both changes are semantic, so a gate that did *not* move would
+  have been the finding.
+  **Derived twice before it was written down**, from separate invocations into
+  separate fresh `--out` directories, both printing `e74766eb3f7becfc`. The
+  requirement is not ceremony: a registration hash that folded in the
+  delivered population would put nondeterminism directly into the identity
+  every future trial count and argmax reads, and a single observation cannot
+  tell a stable value from a lucky one.
+  **A third side names the resume path specifically.** `--hash-only` builds a
+  `Registry::ephemeral` and never opens the file (D-0083), so it can never
+  exercise `AlreadyDone` — three `--hash-only` runs agreeing is three
+  recomputes agreeing, which is a weaker statement than it looks. The resume
+  claim was therefore measured without it: two ordinary `funnel` runs into one
+  `--out` directory, where the second resumes S0 from the registry. The S0
+  stdout product is byte-identical across them (18,070 bytes, `cmp` clean),
+  both name registration
+  `83cd9d9b0894e60a85c64c03934098455442b861a13c801641d9a253b8845bcb`, the
+  registry holds six typed `metric_kind: "s0"` rows and zero `metrics: null`,
+  and the trial count reads `6` after both — the re-run charges nothing, which
+  is D-0106's "one registration, one trial" measured rather than asserted.
+  Both runs exit 5, which on the null harness is the correct answer (D-0075).

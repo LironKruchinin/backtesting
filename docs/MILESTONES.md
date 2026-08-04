@@ -356,20 +356,39 @@ The quant-research payload. Specs live in `crucible-funnel` module docs.
             evidence repins S0 to **`825356c88295ce94`** in the separate
             D-0103 commit; D-0085's old value remains
             historical.
-      - [ ] **Persist that typed S0 result.**
+      - [x] **Persist that typed S0 result.**
             - [x] Reader/model half (2026-08-01,
                   D-0104): the real JSONL
                   reader accepts the closed, tagged S0 aggregate while retaining
                   the original trading metrics bytes; historical `metrics: null`
                   is explicit legacy absence, and unknown metric shapes refuse.
-            - [ ] Writer half, only after this reader commit is on `main` and
-                  after the open run-identity ruling is resolved.
-            Reader/model support must merge
-            before the writer changes; successful production S0 runs still
-            finish with legacy `metrics: null` at this checkpoint. The writer
-            is additionally blocked on the §9 identity ruling recorded by
-            D-0102: today's run key does not bind the S0
-            declaration or contract tick.
+            - [x] Writer half (2026-08-04, D-0106), landed in that order: the
+                  reader was on `main` first, and the run-identity ruling it
+                  was blocked on is this same entry. A funnel declaring S0 now
+                  keys every row — the S0 row and all its downstream trading
+                  folds — on `blake3("crucible-s0-registration/1" || canonical
+                  fields)`, binding the S0 declaration, the contract tick and
+                  the delivered data window on top of the D-0012 strategy
+                  hash. `Registry::finish_s0` is crate-private and can write
+                  only a successful typed `S0RunMetrics`; the generic writer
+                  now refuses a **fresh** successful `metrics: null` while
+                  historical ones stay replay-readable. Resume is a read, not
+                  a reconstruction: `run_s0` branches on `AlreadyDone` before
+                  it builds a scorer. **One registration, one trial** — S0 and
+                  the folds share the effective hash, so a re-run charges no
+                  second trial. Configs without `[s0]` keep their D-0012
+                  identity and every existing pin, which the four unmoved
+                  gates below record.
+            Binding identity deliberately moves S0's determinism bytes: the
+            gate repins **`825356c88295ce94` → `e74766eb3f7becfc`** in the
+            separate D-0107 commit, derived twice from isolated `--out` dirs
+            before it was written down. D-0103's value remains historical, as
+            D-0085's does above it. The other seven pinned gates are unmoved
+            and were re-measured at the implementation commit: demo
+            `b55747513df596ed`, combo `0e1ab52d474b862b`, walk-forward
+            `711e1cb34a2ee2b4`, funnel `2f430893d2a79a8f`, permutation
+            `9fe41f6f5b3653e7`, truncation `91b9ff5b9bbcdb25`, deflated Sharpe
+            `dc7f94f25235df6c`.
 - [ ] Stats: deflated Sharpe, PBO/CSCV, block-permutation nulls, empirical
       p-values — cited implementations with property tests.
       - [x] **Block-permutation null + empirical p-values** (2026-07-31,
