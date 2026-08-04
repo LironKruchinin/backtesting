@@ -211,3 +211,237 @@ pub fn pool_sessions(contracts: &[ContractDays]) -> Result<PooledSessions, Pooli
 
 #[cfg(test)]
 mod tests;
+
+/// Why a contract contributed nothing to a pooled evaluation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SkipReason {
+    /// Its front window could not fit one whole fold at the declared geometry.
+    NoCompleteFold {
+        /// Trading sessions the contract's front window held.
+        sessions: usize,
+        /// Sessions one fold needs: `train_days + test_days`.
+        needed: usize,
+    },
+}
+
+impl std::fmt::Display for SkipReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoCompleteFold { sessions, needed } => write!(
+                f,
+                "{sessions} front-month session(s), but one fold needs {needed}"
+            ),
+        }
+    }
+}
+
+/// One contract's measured contribution to a pooled evaluation.
+///
+/// Every field is **measured from that contract's own replay**, never derived
+/// from a per-contract average. Front windows are not equal — ES 2024 measured
+/// 64, 70, 66 and 66 sessions over spans of 84 to 98 calendar days — so
+/// `N x constant` is wrong by construction, and it is exactly the extrapolation
+/// that produced the false claim "four contracts clear 250".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContractEvaluation {
+    /// Curated contract symbol.
+    pub instrument: String,
+    /// Trading-day keys of the contract's whole front window, ascending.
+    pub front_window_days: Vec<i64>,
+    /// Trading-day keys that fell in an out-of-sample window, ascending.
+    pub oos_day_keys: Vec<i64>,
+    /// Round-trips closed in those out-of-sample windows.
+    pub oos_trades: usize,
+    /// Complete folds the front window fitted. Zero means the contract is
+    /// skipped and contributes nothing.
+    pub folds: usize,
+    /// Sessions one fold needed, carried so a skip can say what it missed by.
+    pub fold_needs_sessions: usize,
+}
+
+/// A stretch of the pool's span that no evaluated contract covers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionGap {
+    /// First uncovered trading-day key.
+    pub from_day: i64,
+    /// Last uncovered trading-day key.
+    pub to_day: i64,
+    /// Contracts whose front windows bound the hole.
+    pub between: (String, String),
+}
+
+impl SessionGap {
+    /// Trading days the pool's span contains here and its contracts do not.
+    #[must_use]
+    pub fn days(&self) -> i64 {
+        self.to_day - self.from_day + 1
+    }
+}
+
+/// What a pooled run may present to the admission gate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PooledEvaluation {
+    /// **Out-of-sample sessions: the UNION.** What `min_oos_sessions` judges.
+    pub oos_sessions: usize,
+    /// **Out-of-sample round-trips: the SUM.** What `min_oos_trades` judges —
+    /// and the floor is two-part, so a pool clearing the session half has
+    /// cleared half a floor.
+    ///
+    /// Summed rather than unioned, and the asymmetry is real rather than an
+    /// oversight: two contracts can trade the *same session*, so sessions
+    /// double-count and must be unioned; a round-trip belongs to exactly one
+    /// contract's replay, so trades cannot double-count and summing is exact.
+    pub oos_trades: usize,
+    /// Contracts that contributed at least one complete fold.
+    pub contracts_evaluated: usize,
+    /// Contracts that contributed nothing, and why. **Reported even when
+    /// empty**, on D-0070's spread-filter pattern: a declared filter with a
+    /// number beside it, never a silent absence. A pool quietly dropping two
+    /// short contracts reports a smaller sample than it declared and nothing
+    /// on the page would say so.
+    pub skipped: Vec<(String, SkipReason)>,
+    /// Holes between evaluated contracts' front windows.
+    pub gaps: Vec<SessionGap>,
+    /// Per-contract `(instrument, oos sessions, oos trades)`, measured.
+    pub per_contract: Vec<(String, usize, usize)>,
+}
+
+impl PooledEvaluation {
+    /// Whether the evaluated contracts form one unbroken run of front months.
+    #[must_use]
+    pub fn is_contiguous(&self) -> bool {
+        self.gaps.is_empty()
+    }
+
+    /// The honesty line a pooled report prints.
+    #[must_use]
+    pub fn render(&self) -> String {
+        let mut line = format!(
+            "{} OOS session(s), {} OOS round-trip(s), {} contract(s) evaluated, {} skipped",
+            self.oos_sessions,
+            self.oos_trades,
+            self.contracts_evaluated,
+            self.skipped.len()
+        );
+        if self.gaps.is_empty() {
+            line.push_str("; contiguous");
+        } else {
+            let days: i64 = self.gaps.iter().map(SessionGap::days).sum();
+            line.push_str(&format!(
+                "; {} gap(s) totalling {days} trading day(s)",
+                self.gaps.len()
+            ));
+        }
+        line
+    }
+}
+
+/// Pools measured per-contract evaluations into the numbers admission judges.
+///
+/// # Path-dependent statistics must NOT be computed across this output
+///
+/// A pooled sample is many short, non-contiguous out-of-sample windows — not
+/// one long track record. Max drawdown, longest losing streak and time under
+/// water computed across the concatenation describe a path **no account ever
+/// walked**: the seams join windows that are months apart, so a drawdown
+/// measured across one is an artifact of the concatenation order. Each
+/// contract's replay starts and ends flat, so no spurious *return* appears at
+/// a seam — the trap is only in reading concatenated equity as one path.
+/// Path-independent aggregates — returns, trade counts, win rate, per-window
+/// Sharpe — pool correctly, and are what this returns.
+///
+/// # Errors
+/// [`PoolingError`] on [`pool_sessions`]'s terms: nonempty, distinct
+/// contracts, each with strictly ascending day keys.
+pub fn pool_evaluations(
+    contracts: &[ContractEvaluation],
+) -> Result<PooledEvaluation, PoolingError> {
+    if contracts.is_empty() {
+        return Err(PoolingError::NoContracts);
+    }
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for contract in contracts {
+        if contract.front_window_days.is_empty() {
+            return Err(PoolingError::EmptyContract {
+                instrument: contract.instrument.clone(),
+            });
+        }
+        if !seen.insert(contract.instrument.as_str()) {
+            return Err(PoolingError::DuplicateContract {
+                instrument: contract.instrument.clone(),
+            });
+        }
+        for keys in [&contract.front_window_days, &contract.oos_day_keys] {
+            let mut previous: Option<i64> = None;
+            for &key in keys {
+                if let Some(previous) = previous
+                    && key <= previous
+                {
+                    return Err(PoolingError::UnorderedDays {
+                        instrument: contract.instrument.clone(),
+                        key,
+                    });
+                }
+                previous = Some(key);
+            }
+        }
+    }
+
+    let mut oos_union: BTreeSet<i64> = BTreeSet::new();
+    let mut oos_trades = 0usize;
+    let mut skipped = Vec::new();
+    let mut per_contract = Vec::new();
+    let mut evaluated: Vec<&ContractEvaluation> = Vec::new();
+
+    for contract in contracts {
+        if contract.folds == 0 {
+            skipped.push((
+                contract.instrument.clone(),
+                SkipReason::NoCompleteFold {
+                    sessions: contract.front_window_days.len(),
+                    needed: contract.fold_needs_sessions,
+                },
+            ));
+            continue;
+        }
+        // Measured per contract and summed. Never N x a per-contract average:
+        // front windows are not equal, and that extrapolation is what produced
+        // the false claim "four contracts clear 250".
+        oos_union.extend(contract.oos_day_keys.iter().copied());
+        oos_trades = oos_trades.saturating_add(contract.oos_trades);
+        per_contract.push((
+            contract.instrument.clone(),
+            contract.oos_day_keys.len(),
+            contract.oos_trades,
+        ));
+        evaluated.push(contract);
+    }
+
+    // Holes are measured between consecutive evaluated contracts' FRONT
+    // windows, not between out-of-sample days: within one contract the
+    // out-of-sample days are already broken up by its training windows, and
+    // reporting those would bury the hole that matters — a contract missing
+    // from the middle of the pool.
+    let mut gaps = Vec::new();
+    for pair in evaluated.windows(2) {
+        let (before, after) = (pair[0], pair[1]);
+        let last = *before.front_window_days.last().expect("nonempty checked");
+        let first = *after.front_window_days.first().expect("nonempty checked");
+        if first > last + 1 {
+            gaps.push(SessionGap {
+                from_day: last + 1,
+                to_day: first - 1,
+                between: (before.instrument.clone(), after.instrument.clone()),
+            });
+        }
+    }
+
+    Ok(PooledEvaluation {
+        oos_sessions: oos_union.len(),
+        oos_trades,
+        contracts_evaluated: evaluated.len(),
+        skipped,
+        gaps,
+        per_contract,
+    })
+}

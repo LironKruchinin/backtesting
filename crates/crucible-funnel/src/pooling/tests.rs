@@ -255,3 +255,199 @@ fn the_pooled_count_is_deterministic_and_order_independent() {
         "the per-contract table follows declaration order and is a report"
     );
 }
+
+fn evaluation(
+    sym: &str,
+    front: (i64, i64),
+    oos: &[i64],
+    trades: usize,
+    folds: usize,
+) -> ContractEvaluation {
+    ContractEvaluation {
+        instrument: sym.to_owned(),
+        front_window_days: (front.0..=front.1).collect(),
+        oos_day_keys: oos.to_vec(),
+        oos_trades: trades,
+        folds,
+        fold_needs_sessions: 36,
+    }
+}
+
+/// Sessions union, trades sum — and the asymmetry is the point.
+///
+/// Two contracts trading the same session double-count it, so sessions must be
+/// unioned. A round-trip belongs to exactly one contract's replay, so trades
+/// cannot double-count and summing them is exact. Here the two contracts share
+/// OOS days 12 and 13: five distinct sessions, and 7 trades that are genuinely
+/// 7 because no trade is in both replays.
+#[test]
+fn oos_sessions_union_while_oos_trades_sum() {
+    let pooled = pool_evaluations(&[
+        evaluation("ESH2024", (10, 13), &[10, 11, 12, 13], 3, 1),
+        evaluation("ESM2024", (14, 17), &[12, 13, 14], 4, 1),
+    ])
+    .expect("poolable");
+    assert_eq!(pooled.oos_sessions, 5, "the union of the two OOS day sets");
+    assert_eq!(pooled.oos_trades, 7, "3 + 4; trades cannot double-count");
+    assert_eq!(pooled.contracts_evaluated, 2);
+}
+
+/// The floor is two-part, and clearing one half is not clearing it.
+///
+/// Written because "four contracts clear 250" addressed sessions alone while
+/// `min_oos_trades` is an equally real criterion. A pool can be session-rich
+/// and trade-poor — a rule firing once a fortnight over 250 sessions produces
+/// ~18 round-trips — and this asserts the two numbers are independent.
+#[test]
+fn a_session_rich_trade_poor_pool_clears_only_half_the_floor() {
+    let pooled = pool_evaluations(&[evaluation(
+        "ESH2024",
+        (0, 299),
+        &(0..300).collect::<Vec<_>>(),
+        18,
+        4,
+    )])
+    .expect("poolable");
+    assert_eq!(pooled.oos_sessions, 300);
+    assert_eq!(pooled.oos_trades, 18);
+    assert!(pooled.oos_sessions >= 250, "the session half clears");
+    assert!(pooled.oos_trades < 200, "the trade half does not");
+}
+
+/// A contract that fits no fold is SKIPPED WITH A COUNT, never dropped.
+///
+/// D-0070's spread-filter pattern: a declared filter with a number beside it.
+/// A pool that quietly lost a short contract would report a smaller sample
+/// than it declared, and nothing on the page would say so.
+#[test]
+fn a_contract_that_fits_no_fold_is_skipped_with_its_reason() {
+    let pooled = pool_evaluations(&[
+        evaluation("ESH2024", (0, 65), &(26..66).collect::<Vec<_>>(), 40, 4),
+        evaluation("ESM2024", (66, 85), &[], 0, 0),
+        evaluation("ESU2024", (86, 151), &(112..152).collect::<Vec<_>>(), 37, 4),
+    ])
+    .expect("poolable");
+    assert_eq!(pooled.contracts_evaluated, 2);
+    assert_eq!(pooled.skipped.len(), 1);
+    let (symbol, reason) = &pooled.skipped[0];
+    assert_eq!(symbol, "ESM2024");
+    assert_eq!(
+        *reason,
+        SkipReason::NoCompleteFold {
+            sessions: 20,
+            needed: 36
+        }
+    );
+    assert!(reason.to_string().contains("one fold needs 36"), "{reason}");
+    // A skipped contract contributes NOTHING — not its sessions, not its trades.
+    assert_eq!(pooled.oos_sessions, 80);
+    assert_eq!(pooled.oos_trades, 77);
+    // And the skip count renders even though it is the interesting case; the
+    // zero case is asserted by `the_skip_count_renders_even_when_zero`.
+    assert!(pooled.render().contains("1 skipped"), "{}", pooled.render());
+}
+
+/// The converse: the count is printed even when nothing was skipped.
+///
+/// Without this, a `render` that only mentioned skips when nonzero would pass
+/// the test above while making "nothing was dropped" indistinguishable from
+/// "the report forgot to say".
+#[test]
+fn the_skip_count_renders_even_when_zero() {
+    let pooled =
+        pool_evaluations(&[evaluation("ESH2024", (0, 65), &[10, 11], 4, 1)]).expect("poolable");
+    assert!(pooled.skipped.is_empty());
+    assert!(pooled.render().contains("0 skipped"), "{}", pooled.render());
+    assert!(
+        pooled.render().contains("contiguous"),
+        "{}",
+        pooled.render()
+    );
+}
+
+/// A non-consecutive pool is REPORTED, not refused.
+///
+/// Pooling ESH and ESU while skipping ESM leaves the OOS days disjoint and the
+/// session count unchanged — every arithmetic check still passes — while the
+/// sample carries a three-month hole. Deliberately non-consecutive pools are
+/// legitimate experiments (every March contract across years, for
+/// seasonality); a hole nobody can see is not.
+#[test]
+fn a_hole_in_the_middle_of_a_pool_is_reported_with_its_span_and_size() {
+    let pooled = pool_evaluations(&[
+        evaluation("ESH2024", (0, 65), &(26..66).collect::<Vec<_>>(), 40, 4),
+        evaluation(
+            "ESU2024",
+            (132, 197),
+            &(158..198).collect::<Vec<_>>(),
+            38,
+            4,
+        ),
+    ])
+    .expect("poolable");
+    assert!(!pooled.is_contiguous());
+    assert_eq!(pooled.gaps.len(), 1);
+    let gap = &pooled.gaps[0];
+    assert_eq!((gap.from_day, gap.to_day), (66, 131));
+    assert_eq!(gap.days(), 66, "one whole missing contract's front window");
+    assert_eq!(gap.between, ("ESH2024".to_owned(), "ESU2024".to_owned()));
+    assert!(
+        pooled.render().contains("66 trading day(s)"),
+        "{}",
+        pooled.render()
+    );
+    // The point: every count is still correct. Only the gap report reveals it.
+    assert_eq!(pooled.oos_sessions, 80);
+}
+
+/// Consecutive contracts report no gap — the converse that makes the hole
+/// control mean something. Front windows tile (C3a), so an adjacent pool is
+/// contiguous by construction.
+#[test]
+fn converse_consecutive_contracts_report_no_gap() {
+    let pooled = pool_evaluations(&[
+        evaluation("ESH2024", (0, 65), &(26..66).collect::<Vec<_>>(), 40, 4),
+        evaluation("ESM2024", (66, 131), &(92..132).collect::<Vec<_>>(), 41, 4),
+    ])
+    .expect("poolable");
+    assert!(pooled.is_contiguous(), "{:?}", pooled.gaps);
+    assert_eq!(pooled.oos_sessions, 80);
+    assert_eq!(pooled.oos_trades, 81);
+}
+
+/// Per-contract numbers are measured and summed, never extrapolated.
+///
+/// The contracts here deliberately differ — 64/70/66 sessions, as ES 2024
+/// actually measured — so any `N x constant` shortcut gives a different
+/// answer than the truth. This is the control on the specific error that
+/// produced "four contracts clear 250".
+#[test]
+fn unequal_contracts_are_summed_from_measurement_not_extrapolated() {
+    let pooled = pool_evaluations(&[
+        evaluation("ESH2024", (0, 63), &(0..24).collect::<Vec<_>>(), 20, 2),
+        evaluation("ESM2024", (64, 133), &(64..94).collect::<Vec<_>>(), 31, 3),
+        evaluation(
+            "ESU2024",
+            (134, 199),
+            &(134..160).collect::<Vec<_>>(),
+            26,
+            2,
+        ),
+    ])
+    .expect("poolable");
+    assert_eq!(pooled.oos_sessions, 24 + 30 + 26);
+    assert_eq!(pooled.oos_trades, 77);
+    assert_eq!(
+        pooled.per_contract,
+        vec![
+            ("ESH2024".to_owned(), 24, 20),
+            ("ESM2024".to_owned(), 30, 31),
+            ("ESU2024".to_owned(), 26, 26),
+        ]
+    );
+    let extrapolated = 3 * 24;
+    assert_ne!(
+        pooled.oos_sessions, extrapolated,
+        "N x the first contract's count is not the pooled count"
+    );
+}

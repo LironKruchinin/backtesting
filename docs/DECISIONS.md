@@ -4294,3 +4294,95 @@ propose a superseding entry — don't silently diverge.
   **Scope, fixed at ruling time**: one §7 clause and this entry. Sweeping the
   existing greps in the repository, building tooling, or adding a lint are
   separate items and go back to the queue.
+- **D-0119** (2026-08-04) -- **A pooled run counts FRONT-MONTH sessions, cuts
+  folds inside each contract's front window, unions sessions but sums trades,
+  and reports what it skipped.** The ruling half of block C. It is a semantic
+  choice affecting every pooled result and is reversible only by an explicit
+  superseding entry.
+  **The floor counts front-month sessions, not curated days.** ESH2024 carries
+  239 curated trading days (2022-12-26 .. 2024-03-14) and is front month for
+  64 of them. Four reasons, in binding order. *The direction test*: curated
+  days inflate the sample and make admission easier, front-month days make the
+  floor harder, and where a choice flatters the strategy this project takes the
+  other one. *The union does not fix it*: D-0114 corrects double-counting
+  between contracts on the same date and does nothing about counting a date on
+  which only deferred contracts traded thinly — four ES contracts' curated
+  union claims ~2 years where the tradeable reality is ~1. *Independence*,
+  which is what a sample-adequacy floor is for: a deep-deferred contract's bars
+  are largely an echo of the front month's price process, so they add `n`
+  without adding information. *§2.4*: `spread_cross`'s half-spread is
+  calibrated for the liquid contract, and replaying thin deferred bars under it
+  assumes a book that was not there.
+  **The mechanism is the existing `.v` volume roll table**, not a new
+  heuristic. The volume rule already answers "when was this contract where the
+  trading actually was", by measurement rather than calendar guess, and every
+  pooled report names which rule produced the attribution.
+  **This does NOT supersede D-0076**, and the distinction is the entry's job to
+  state so nobody reads it as a back door. Using the roll table to decide which
+  sessions belong to which contract is a **windowing** decision. Nothing is
+  stitched and nothing is back-adjusted; each contract is still replayed on its
+  own real tradeable prices. D-0076's concern is that a level on a
+  back-adjusted series is not a level — no level is transformed here.
+  **Warmup is unaffected.** A contract's pre-front bars are its own real bars
+  and remain legitimate warmup input, exactly as D-0062 already treats warmup
+  before an eval window. The window governs evaluation, session counting and
+  trade attribution, not what an indicator may warm on. That is also what makes
+  the geometry below affordable: the whole ~66-session front window is
+  available for train and test.
+  **Folds are cut INSIDE each contract's front window** — not across the pooled
+  concatenation, and not at contract granularity. The decisive reason is that
+  the alternative forces a roll-gap answer: cutting folds across the
+  concatenation puts 63 rolls inside windows, and a position carried across one
+  either books the raw gap as PnL — which §9 already refuses to let go silent —
+  or is flattened at every boundary, which is a **new named execution
+  assumption** that changes what the strategy does every ~3 months. Folds
+  inside a front window never contain a roll, so the question does not arise
+  and block C stays bounded. Contract-granularity folds were rejected against
+  D-0062: front windows run 84–98 calendar days, which is exactly the "a month
+  holds a number of sessions the holiday schedule picks" objection D-0062 was
+  written against. Folds across the concatenation remain available later as a
+  second pooling mode, with its own entry and its own execution assumption.
+  **No geometry is blessed.** A pooled run takes the config's declared
+  `train_days`/`test_days`/`step_days` and holds no opinion. `26 / 10 / 10` was
+  computed this session as *feasible* — four folds in a 66-session window — and
+  is deliberately not a default: it has no conventional source, it was chosen
+  to fit the data's shape, and inheriting an unsourced geometry is exactly how
+  H-007 and H-008 took combo-smoke's 5/2/2 and died at admission.
+  **Sessions union, trades sum, and the asymmetry is real.** Two contracts can
+  trade the same session, so sessions double-count and must be unioned; a
+  round-trip belongs to exactly one contract's replay, so trades cannot
+  double-count and summing is exact. **The floor is two-part** —
+  `min_oos_sessions` *and* `min_oos_trades` — so a pool clearing the session
+  half has cleared half a floor. A rule firing once a fortnight over 250
+  sessions produces ~18 round-trips.
+  **Measured per contract and summed, never extrapolated.** ES 2024 front
+  windows measured 64, 70, 66 and 66 sessions over 84–98 calendar days. `N ×
+  a constant` is wrong by construction, and that extrapolation is what produced
+  this session's false claim that four contracts clear 250.
+  **A contract fitting no complete fold is skipped with a count, printed even
+  when the count is zero** — D-0070's spread-filter pattern, a declared filter
+  with a number beside it rather than a silent absence. A pool quietly dropping
+  two short contracts reports a smaller sample than it declared and nothing on
+  the page would say so.
+  **Gaps are reported, not refused.** A deliberately non-consecutive pool is a
+  legitimate experiment — every March contract across years, for seasonality —
+  and a hole nobody can see is not. Each gap prints its span and size, between
+  the contracts that bound it, exactly as D-0114 prints the sum beside the
+  union.
+  **Path-dependent statistics must not be computed across the pooled
+  concatenation.** A pooled sample is many short non-contiguous out-of-sample
+  windows, not one long track record. Max drawdown, longest losing streak and
+  time under water across the seams describe a path no account ever walked, and
+  the seams join windows months apart. Each contract's replay starts and ends
+  flat, so no spurious *return* appears at a seam — the trap is only in reading
+  concatenated equity as one path. Path-independent aggregates pool correctly.
+  **What was NOT added, and why.** A `sum == union` invariant was proposed
+  twice — first as pooling arithmetic, then relabelled as a roll-table validity
+  check — and is in neither. Front-month windows are half-open and consecutive,
+  so the sum over disjoint sets equals the union unconditionally: the assertion
+  cannot fail, which makes it decoration by §7. As a validity check it could
+  only ever fire where `RollTable::validate` already fires, and would replace
+  that check's precise diagnosis — out-of-order rolls, a chain that goes
+  backwards in delivery — with a vaguer one. Fixtures point at the real check
+  instead. Before adding a validity check, find the one that already refuses
+  that input by name.
