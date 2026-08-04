@@ -4022,3 +4022,35 @@ propose a superseding entry — don't silently diverge.
   structural enforcement. None of the four endpoints redirects off-host, so
   this was never exploitable; it is fixed because "structural" has to mean the
   structure holds and not that the happy path happens to.
+- **D-0113** (2026-08-04) -- **A mutation control restores through git or
+  proves its restoration, runs one mutation at a time, and has no fallback in
+  its backup path.** §7 already required every control to be watched firing and
+  the record to say which mutation each one caught. It said nothing about *how*
+  to run one, and the protocol turns out to have a failure mode of its own.
+  **The motivating incident, 2026-08-04.** A backup written as
+  `cp f /tmp/f.bak 2>/dev/null || cp f f.bak` succeeded on its first branch —
+  Git Bash has a `/tmp` — so the fallback never created `f.bak`, every
+  subsequent `cp f.bak f` failed, and three mutations stacked on one file. The
+  run then showed a dozen failing tests after each mutation and could not say
+  which control had caught which defect: the second mutation's report already
+  contained the first's failures, and the third's contained both. Every
+  attribution had to be re-measured one mutation at a time.
+  **What that would have cost if nobody had re-run it.** The attribution table
+  is the deliverable — "a detector nobody has seen fire is decoration" is only
+  discharged by naming which control caught which mutation. A stacked run
+  produces a table that *looks* complete and is unfounded, and it would have
+  gone into a decision entry as measured fact. The wasted pass was cheap; the
+  entry would not have been.
+  **The rule, and why each clause is there.** Restore with
+  `git checkout -- <file>` where the file is committed, because git cannot
+  half-succeed at it the way a shell copy can; where it is not, print
+  `git hash-object` before and after and require the identical blob, which is
+  the proof the S0 registration commit already used. One mutation at a time,
+  because a stacked run's failures are unattributable and unattributable
+  failures are what the control exists to prevent. And no `||` in a restore
+  path — a fallback that silently does not run is the same class of defect as
+  §8.1's scripted edit that silently matches nothing, and both were found the
+  same way: by someone checking whether the thing had actually happened.
+  **The rule is written where it binds.** §7 governs the controls, so it lives
+  there rather than in §8's session workflow: the reader who needs it is the
+  one about to break a detector on purpose.

@@ -301,6 +301,19 @@ crate lands, delete its placeholder comment from the relevant `Cargo.toml`.
   This has **no quality exemption**: work that looks right and passes its
   gate is still unverified until each control has been broken deliberately
   and watched firing, and the record says which mutation each one caught.
+- **How a mutation is run, because the protocol has its own failure mode.**
+  Restore via `git checkout -- <file>`, or prove restoration with
+  `git hash-object` before and after and print both. **One mutation at a
+  time, never stacked** — and an attribution claim ("this control caught
+  that defect") may only come from a run where that mutation was the *only*
+  one applied. **No silent fallback in the backup path.** On 2026-08-04 a
+  backup written as `cp f /tmp/f.bak 2>/dev/null || cp f f.bak` succeeded on
+  its first branch, so the fallback never ran, the restore silently failed,
+  and three mutations stacked; the run could not say which control caught
+  which defect and every attribution had to be re-measured in isolation. The
+  cost was one wasted pass, and it would have been a wrong entry in the
+  decision log had nobody re-run it. A `||` in a restore path is the same
+  class of bug as a scripted edit that matches nothing (§8.1).
 - **When two things disagree, add the third case that makes them agree** —
   it turns a difference into a diagnosis. A test proving captured and
   reconstructed equity differ says only "something differs"; the companion
