@@ -1358,10 +1358,21 @@ impl S0RunMetrics {
         self.combo.validate()
     }
 
+    /// Canonical serialized bytes, for comparing a report value against the
+    /// registry-owned one it must equal.
     pub(crate) fn decision_bytes(&self) -> Vec<u8> {
-        self.validate()
-            .expect("invalid S0 metrics cannot be compared or rendered");
-        serde_json::to_vec(self).expect("validated S0 metrics must serialize")
+        self.validate().expect(
+            "INVARIANT: every value reaching decision_bytes has already validated — a report \
+             value at S0Report::validate before assessment, and a persisted value at \
+             Registry::apply, which refuses an invalid typed result instead of indexing it, so \
+             no unvalidated S0RunMetrics exists to be passed here",
+        );
+        serde_json::to_vec(self).expect(
+            "INVARIANT: serde_json fails only on a non-finite float or a non-string map key, and \
+             this tree can hold neither — BucketSet enforces finiteness in both its constructor \
+             and its Deserialize impl, validate() above enforces it for the IC and the \
+             unconditional interval, and every map here is a derived struct with string keys",
+        )
     }
 }
 
