@@ -331,6 +331,22 @@ fn the_planted_leak_is_caught_by_the_permutation_null() {
         .sharpe_naive,
         random_entry_return_pct: Some(random_oos_pct),
         permutation_p_value: Some(p_value),
+        // Block B's two S3 gates are handed values that PASS, deliberately.
+        // This test's whole claim is that the leak dies on the PERMUTATION
+        // NULL and on nothing else — if deflation or PBO were also failing
+        // here, the assertion below would still read `Kill` while having
+        // stopped measuring the detector it is named after. Giving the other
+        // two gates a clear pass is what keeps the permutation null the only
+        // thing that can produce this verdict.
+        deflated: Some(crucible_funnel::stats::deflated::Deflated {
+            observed_sharpe: 4.0,
+            expected_max_sharpe: 0.5,
+            standard_error: 0.1,
+            dsr: 0.999,
+            n_trials: 1,
+        }),
+        n_trials: 1,
+        pbo: Some(0.0),
         buy_and_hold_return_pct: Some(bnh.total_return_pct),
         // S0 did not run in this fixture: the leak is an equity-curve
         // phenomenon and this test is about the S1/S2 gates seeing it.
@@ -417,6 +433,17 @@ fn the_same_criteria_kill_an_honest_strategy_on_the_same_data() {
         // The honest strategy is judged by the same criteria, so it needs a
         // p-value too; it is killed at S2 long before S3 is reached.
         permutation_p_value: Some(0.5),
+        // Same reasoning as above, and the same care: this converse asserts the
+        // honest strategy dies at S2, so S3 must not be what kills it.
+        deflated: Some(crucible_funnel::stats::deflated::Deflated {
+            observed_sharpe: 4.0,
+            expected_max_sharpe: 0.5,
+            standard_error: 0.1,
+            dsr: 0.999,
+            n_trials: 1,
+        }),
+        n_trials: 1,
+        pbo: Some(0.0),
     };
     let assessment = assess(&criteria(), &evidence, None);
     assert_eq!(

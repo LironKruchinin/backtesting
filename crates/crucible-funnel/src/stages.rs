@@ -507,6 +507,20 @@ pub struct Evidence {
     /// below is simply not evaluated, and a config that wanted it says so by
     /// declaring `max_permutation_p`.
     pub permutation_p_value: Option<f64>,
+    /// This combo's Sharpe corrected for how many times the family has been
+    /// searched, or `None` when the correction has no inputs — no Sharpe, or a
+    /// window flat enough to have no higher moments. `None` is not a pass, on
+    /// the same terms as an absent control (D-0075).
+    pub deflated: Option<crate::stats::deflated::Deflated>,
+    /// The trial count the deflation divided by, read from the registry
+    /// (D-0083 excludes voided runs by construction). Carried beside the
+    /// number because a headline Sharpe without its trial count is not
+    /// reported anywhere in this project.
+    pub n_trials: usize,
+    /// The grid's probability of backtest overfitting, or `None` when CSCV
+    /// could not be computed. One value shared by every combo: PBO is a
+    /// property of the search, not of a combo.
+    pub pbo: Option<f64>,
 }
 
 /// One criterion, evaluated.
@@ -717,6 +731,58 @@ pub fn assess(
         reasons.extend(s3);
     }
 
+    // Deflated Sharpe and PBO — the rest of S3 that block B wires in. Both are
+    // evaluated whenever the stage is reached at all, rather than on an
+    // Option-shaped criterion, because both criteria are always declared: a
+    // config cannot opt out of being told how many times it searched.
+    if !failed {
+        decided_at = Stage::S3;
+        let s3 = vec![
+            check(
+                Stage::S3,
+                evidence
+                    .deflated
+                    .is_some_and(|d| d.beats_selection_benchmark()),
+                match evidence.deflated {
+                    Some(d) => format!(
+                        "deflated Sharpe: observed {:.4} against a selection benchmark of {:.4} \
+                         over {} trial(s) — the benchmark is where noise alone would have put \
+                         the maximum of a search this wide, so an observed Sharpe below it is \
+                         unremarkable however large it looks. P(true Sharpe > 0) = {:.4}",
+                        d.observed_sharpe, d.expected_max_sharpe, d.n_trials, d.dsr
+                    ),
+                    None => format!(
+                        "no deflated Sharpe could be computed over {} trial(s) — the combo has \
+                         no out-of-sample Sharpe, or its return window is flat enough to have \
+                         no higher moments. An absent correction is not a cleared bar (D-0075)",
+                        evidence.n_trials
+                    ),
+                },
+            ),
+            check(
+                Stage::S3,
+                evidence.pbo.is_some_and(|p| p <= criteria.max_pbo),
+                match evidence.pbo {
+                    Some(p) => format!(
+                        "PBO = {p:.4}, {:.4} required — the share of in-sample/out-of-sample \
+                         recombinations in which this grid's in-sample winner finished below \
+                         median out of sample. Near 0.5 means the selection carried no \
+                         information",
+                        criteria.max_pbo
+                    ),
+                    None => format!(
+                        "no PBO was computed, {:.4} required — CSCV needs at least two combos \
+                         and an even number of at least two folds. An absent estimate is not a \
+                         cleared bar (D-0075)",
+                        criteria.max_pbo
+                    ),
+                },
+            ),
+        ];
+        failed = s3.iter().any(|r| !r.passed);
+        reasons.extend(s3);
+    }
+
     // Graduate is unreachable, and deliberately: the glossary defines it as
     // "survived the full battery", and S3 — the battery — is not in this
     // build. Awarding it on S1+S2 would just rename Iterate.
@@ -824,6 +890,19 @@ mod tests {
             random_entry_return_pct: Some(0.5),
             buy_and_hold_return_pct: Some(1.0),
             permutation_p_value: None,
+            // Block B's two S3 gates are evaluated whenever the stage is
+            // reached, so a fixture meaning "everything passes" has to clear
+            // them too: a Sharpe comfortably above its selection benchmark,
+            // and a grid whose in-sample winner usually held up out of sample.
+            deflated: Some(crate::stats::deflated::Deflated {
+                observed_sharpe: 1.2,
+                expected_max_sharpe: 0.4,
+                standard_error: 0.1,
+                dsr: 0.99,
+                n_trials: 6,
+            }),
+            n_trials: 6,
+            pbo: Some(0.1),
         }
     }
 
@@ -1067,13 +1146,88 @@ mod tests {
 
     /// The ceiling this build imposes: everything passes, and the answer is
     /// still Iterate, because Graduate means "survived the full battery" and
-    /// the battery is S3.
+    /// the battery is not finished.
+    ///
+    /// `decided_at` reads **S3** rather than S2 since block B wired the
+    /// deflated Sharpe and PBO into the run path: part of the battery now
+    /// runs, so part of the battery is now the last stage reached. That is a
+    /// real change and is asserted rather than absorbed — but it moves the
+    /// *stage*, not the *ceiling*. Graduate stays unreachable while the
+    /// permutation null and the truncation harness are still unwired and the
+    /// plateau and regime tables are still holes (D-0075), and changing this
+    /// assertion to `Graduate` needs the superseding entry D-0075 demands, not
+    /// a longer reasons list.
     #[test]
     fn passing_everything_this_build_runs_is_iterate_and_never_graduate() {
         let a = assess(&criteria(), &passing(), None);
         assert_eq!(a.verdict, Verdict::Iterate);
-        assert_eq!(a.decided_at, Stage::S2);
+        assert_eq!(a.decided_at, Stage::S3);
         assert!(a.reasons.iter().all(|r| r.passed));
         assert!(a.reasons.len() >= 6, "{:?}", a.rendered_reasons());
+        assert!(
+            a.reasons
+                .iter()
+                .any(|r| r.stage == Stage::S3 && r.detail.contains("deflated Sharpe")),
+            "the deflated Sharpe must appear as an evaluated criterion: {:?}",
+            a.rendered_reasons()
+        );
+        assert!(
+            a.reasons
+                .iter()
+                .any(|r| r.stage == Stage::S3 && r.detail.contains("PBO")),
+            "PBO must appear as an evaluated criterion: {:?}",
+            a.rendered_reasons()
+        );
+    }
+
+    /// The two block-B gates must be able to KILL, not merely to appear.
+    ///
+    /// Written as the converse of the test above: same fixture, one field
+    /// moved at a time. A gate that only ever passes is decoration (§7), and
+    /// an absent estimate must fail rather than wave the combo through — the
+    /// same rule an absent control follows (D-0075).
+    #[test]
+    fn each_block_b_gate_kills_on_its_own() {
+        let mut deflation_failed = passing();
+        deflation_failed.deflated = Some(crate::stats::deflated::Deflated {
+            observed_sharpe: 0.3,
+            expected_max_sharpe: 0.9,
+            standard_error: 0.1,
+            dsr: 0.2,
+            n_trials: 24,
+        });
+        let a = assess(&criteria(), &deflation_failed, None);
+        assert_eq!(a.verdict, Verdict::Kill, "{:?}", a.rendered_reasons());
+        assert_eq!(a.decided_at, Stage::S3);
+
+        let mut deflation_absent = passing();
+        deflation_absent.deflated = None;
+        assert_eq!(
+            assess(&criteria(), &deflation_absent, None).verdict,
+            Verdict::Kill,
+            "an absent deflation is not a cleared bar"
+        );
+
+        let mut pbo_failed = passing();
+        pbo_failed.pbo = Some(0.9);
+        let a = assess(&criteria(), &pbo_failed, None);
+        assert_eq!(a.verdict, Verdict::Kill, "{:?}", a.rendered_reasons());
+
+        let mut pbo_absent = passing();
+        pbo_absent.pbo = None;
+        assert_eq!(
+            assess(&criteria(), &pbo_absent, None).verdict,
+            Verdict::Kill,
+            "an absent PBO is not a cleared bar"
+        );
+
+        // And the boundary is inclusive: a PBO exactly at the declared bar
+        // passes, so the criterion reads "at most" rather than "under".
+        let mut pbo_at_bar = passing();
+        pbo_at_bar.pbo = Some(criteria().max_pbo);
+        assert_eq!(
+            assess(&criteria(), &pbo_at_bar, None).verdict,
+            Verdict::Iterate
+        );
     }
 }

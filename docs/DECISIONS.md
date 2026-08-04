@@ -3818,3 +3818,75 @@ propose a superseding entry — don't silently diverge.
   and is precisely the gap that lets two branches agree on a number. The report
   says the number was pre-claimed and re-verified, so a reader can tell a
   verified pre-claim from an allocation nobody checked.
+- **D-0109** (2026-08-04) -- **The deflated Sharpe and PBO/CSCV are on the run
+  path; the CSCV blocks are the FOLD PLAN's folds and nothing else.** Block B of
+  `docs/plans/m3-full.md`. Two of the scorecard's named holes are now numbers,
+  and two of S3's criteria are evaluated instead of declared and ignored.
+  **The trial count comes from the registry or from nowhere.**
+  `trials_from_registry` is the only door, so D-0083's exclusion of voided runs
+  applies by construction rather than by anybody remembering it, and a local
+  recount cannot exist to disagree with it. `Evidence` carries `n_trials`
+  beside every deflated Sharpe because a headline ratio without its denominator
+  is the single most common way a backtest lies.
+  **A Sharpe cannot be deflated without the shape of the series it came from**,
+  so `crucible-engine::Summary` now carries `ReturnShape` — sample size, skew
+  and non-excess kurtosis — computed in the pass that already materializes the
+  returns. Deriving those moments later from a *different* series, daily marks
+  instead of per-bar say, would deflate one number using another number's
+  shape. A flat window reports `None` rather than zero, on D-0080's grounds: a
+  zero skew reads as "symmetric", which is a claim the data has not made.
+  **The blocks are folds.** `FoldPlan` is this codebase's sole authority on
+  which observations are out of sample (D-0062, D-0071), so `stats::pbo` takes
+  an already-blocked matrix and never cuts a sample itself. A second splitter —
+  bar counts, months, an even division of the row count — would be a second
+  attribution of out-of-sampleness, which is the class of bug D-0071 exists to
+  refuse. The per-cell metric is the fold's out-of-sample **return** rather than
+  its Sharpe: a fold with no trades has a return and no Sharpe, so a Sharpe
+  matrix would make PBO absent exactly on the quiet configs it is most useful
+  for, and D-0063 already rebases every per-fold percentage to declared capital
+  so combos and folds share one scale.
+  **Three refusals, no fallbacks.** An odd block count is refused rather than
+  trimmed to an even one — dropping a fold changes the sample the number
+  describes while the number keeps claiming to describe the run. A split count
+  above `MAX_SPLITS` is refused rather than subsampled, because a subsampled
+  CSCV is a different estimator under the same name (§9's no-silent-caps rule).
+  A non-finite cell is refused before any argmax, because a NaN would decide
+  the winner silently. Each renders as ABSENT with its reason, and an absent
+  estimate **fails** its criterion rather than passing quietly (D-0075).
+  **Resolution is stated, not smoothed.** PBO can only take values `k /
+  C(S, S/2)`; a four-fold plan gives sixths. The split count and the resolution
+  are printed beside the value so "about a half" can be read against the grid it
+  came from. Raising `S` until the number looks better is the fixture-fitting
+  this log already forbids.
+  **On the null harness PBO = 0.3333** — 2 of 6 splits, on 4 folds and 6
+  combos. The acceptance criterion asks for *near 0.5* and warns that *near
+  zero means the split is leaking*. 2/6 is one resolution step below the
+  coin-flip value and decisively **not** near zero: under a true PBO of 0.5,
+  `P(X <= 2)` on six splits is 22/64 ≈ 0.34, so the observation is an ordinary
+  draw; under a leaking split it would be near-impossible. **Six splits cannot
+  confirm 0.5 and this entry does not claim they do** — what they can do is
+  exclude the leak the criterion was written to catch, and that is what is
+  claimed. A longer fold plan would sharpen it and is not a reason to change
+  this one.
+  **`decided_at` moves from S2 to S3 for a config that passes everything**, and
+  the ceiling does not move with it. Part of the battery now runs, so part of
+  the battery is now the last stage reached; `Graduate` stays unreachable while
+  the permutation null and truncation harness are unwired and the plateau and
+  regime tables are still holes (D-0075). Changing that needs the superseding
+  entry D-0075 demands, not a longer reasons list.
+  **A control that survived its own mutation, recorded rather than patched.**
+  `the_same_run_scored_at_one_and_twenty_four_trials_differs_materially` did
+  **not** fail against an `expected_max_z` that ignored `n_trials` entirely,
+  because `n_trials <= 1` short-circuits to a zero benchmark before the mutated
+  line is reached — so the pair compared "no search" against "some search" and
+  would pass for any implementation distinguishing only those two states. Four
+  sibling controls did catch that mutation. A 2-vs-24 assertion now closes it,
+  both operands above the short-circuit, and it was re-run against the same
+  mutation and watched failing (`DSR@2 = DSR@24 = 0.379935`). This is the
+  truncation harness's lesson repeating: the mutation that survives is the one
+  worth writing down.
+  **Not decided here.** No effective-N shrinkage of the account dimension: the
+  raw product over-deflates, deliberately, because the preferred error is
+  against the strategy, and shrinking it needs its own entry and a control
+  showing it does not resurrect a known-spurious edge. The permutation null
+  remains unwired to the run path and is still rendered as a named hole.

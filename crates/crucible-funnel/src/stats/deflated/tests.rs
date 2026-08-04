@@ -204,6 +204,17 @@ fn the_selection_benchmark_grows_with_the_trial_count() {
 ///
 /// The same run scored at 1 trial and at 24 must give materially different
 /// answers. A deflated Sharpe that ignores its denominator is decoration.
+///
+/// **The 1-vs-24 pair alone is not enough, and this was measured rather than
+/// reasoned.** Block B planted an `expected_max_z` that ignored `n_trials`
+/// entirely — hardcoding `n = 2` — and this control **survived it**, because
+/// `n_trials <= 1` short-circuits to a zero benchmark before the mutated line
+/// is reached. The pair therefore compared "no selection at all" against "some
+/// selection" and would pass for any implementation that distinguished only
+/// those two states. The 2-vs-24 pair below closes it: both operands are above
+/// the short-circuit, so nothing but the trial count itself can separate them.
+/// Four sibling controls did catch that mutation; this one is the reason the
+/// gap is worth stating rather than quietly patching.
 #[test]
 fn the_same_run_scored_at_one_and_twenty_four_trials_differs_materially() {
     let mut rng = ChaCha8Rng::seed_from_u64(5);
@@ -235,6 +246,26 @@ fn the_same_run_scored_at_one_and_twenty_four_trials_differs_materially() {
         "the denominator must MOVE the number: {:.6} vs {:.6}",
         one.dsr,
         twenty_four.dsr
+    );
+
+    // Both operands above the `n_trials <= 1` short-circuit, so the only thing
+    // that can separate them is the trial count arriving at the arithmetic.
+    let two = at(2);
+    eprintln!(
+        "[sensitivity] DSR@2 = {:.6}  DSR@24 = {:.6}",
+        two.dsr, twenty_four.dsr
+    );
+    assert!(
+        two.dsr > twenty_four.dsr,
+        "twelve times the search must deflate further: {:.6} vs {:.6}",
+        two.dsr,
+        twenty_four.dsr
+    );
+    assert!(
+        two.expected_max_sharpe < twenty_four.expected_max_sharpe,
+        "the selection benchmark must rise with the trial count: {:.6} vs {:.6}",
+        two.expected_max_sharpe,
+        twenty_four.expected_max_sharpe
     );
 }
 

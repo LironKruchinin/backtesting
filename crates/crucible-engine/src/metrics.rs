@@ -25,6 +25,10 @@ pub struct Summary {
     /// Naive annualized Sharpe of per-bar equity returns; `None` if the
     /// return series is empty or has zero variance.
     pub sharpe_naive: Option<f64>,
+    /// Sample size and higher moments of the series `sharpe_naive` came from,
+    /// carried so the ratio can be deflated without re-deriving them from a
+    /// different series. See [`ReturnShape`].
+    pub return_shape: ReturnShape,
     pub fees_nano_usd: NanoUsd,
 }
 
@@ -68,6 +72,7 @@ impl Summary {
             }
         }
         let sharpe_naive = sharpe(&rets, bars_per_year);
+        let return_shape = ReturnShape::of(&rets);
 
         let wins = closed_trades.iter().filter(|t| t.net_nano_usd > 0).count();
         let win_rate = if closed_trades.is_empty() {
@@ -85,7 +90,79 @@ impl Summary {
             round_trips: closed_trades.len(),
             win_rate,
             sharpe_naive,
+            return_shape,
             fees_nano_usd,
+        }
+    }
+}
+
+/// The shape of the return series a naive Sharpe was computed on.
+///
+/// Retained because a Sharpe alone cannot be deflated: Bailey & López de
+/// Prado's correction needs the sample size and the third and fourth moments
+/// of the *same* series the ratio came from. Recomputing them later from a
+/// different series — daily marks instead of per-bar, say — would deflate one
+/// number using another number's shape, which is the kind of quiet mismatch
+/// this project treats as a wrong result rather than an approximation.
+///
+/// Computed in the pass that already materializes the returns, so it costs a
+/// second traversal of a vector that exists either way and no extra memory.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ReturnShape {
+    /// Returns the ratio was computed from: `equity.len() - 1` less any step
+    /// whose starting equity was not positive (D-0076's insolvent prefix).
+    pub n_returns: usize,
+    /// Fisher skewness. `None` when fewer than two returns, or when the
+    /// series has zero variance and the moment is undefined rather than zero.
+    pub skew: Option<f64>,
+    /// **Non-excess** kurtosis: 3.0 for a normal distribution, matching
+    /// `crucible-funnel::stats::deflated`'s convention. `None` on the same
+    /// terms as `skew`.
+    pub kurtosis: Option<f64>,
+}
+
+impl ReturnShape {
+    /// Sample size and standardized third and fourth moments of `rets`.
+    ///
+    /// Population moments (divide by `n`), not sample moments (divide by
+    /// `n - 1`), matching the Bailey & López de Prado formulation the deflated
+    /// Sharpe uses. At the sample sizes a backtest produces the difference is
+    /// far below the estimator's own error, but the convention is stated
+    /// because a reader comparing against a textbook needs to know which one.
+    #[must_use]
+    pub fn of(rets: &[f64]) -> ReturnShape {
+        if rets.len() < 2 {
+            return ReturnShape {
+                n_returns: rets.len(),
+                skew: None,
+                kurtosis: None,
+            };
+        }
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "bar counts fit f64 exactly at our scales"
+        )]
+        let n = rets.len() as f64;
+        let mean = rets.iter().sum::<f64>() / n;
+        let m2 = rets.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / n;
+        // A flat window has no third or fourth standardized moment: the
+        // denominator is zero and every candidate answer is a fabrication.
+        // `None` is what this codebase already means by "no opinion" (D-0080),
+        // and a zero here would read as "symmetric, normal-tailed".
+        if m2 <= 0.0 {
+            return ReturnShape {
+                n_returns: rets.len(),
+                skew: None,
+                kurtosis: None,
+            };
+        }
+        let m3 = rets.iter().map(|r| (r - mean).powi(3)).sum::<f64>() / n;
+        let m4 = rets.iter().map(|r| (r - mean).powi(4)).sum::<f64>() / n;
+        let sd = m2.sqrt();
+        ReturnShape {
+            n_returns: rets.len(),
+            skew: Some(m3 / sd.powi(3)),
+            kurtosis: Some(m4 / m2.powi(2)),
         }
     }
 }
@@ -154,5 +231,82 @@ mod tests {
     fn sharpe_none_on_flat_curve() {
         let s = Summary::compute(&eq(&[100, 100, 100]), &[], 0, 252.0);
         assert!(s.sharpe_naive.is_none());
+    }
+
+    // Hand-derived. rets = [1.0, 2.0, 3.0, 4.0]; mean = 2.5; deviations
+    // -1.5, -0.5, 0.5, 1.5.
+    //   m2 = (2.25 + 0.25 + 0.25 + 2.25) / 4 = 1.25
+    //   m3 = (-3.375 - 0.125 + 0.125 + 3.375) / 4 = 0      (symmetric)
+    //   m4 = (5.0625 + 0.0625 + 0.0625 + 5.0625) / 4 = 2.5625
+    //   skew     = m3 / m2^1.5 = 0
+    //   kurtosis = m4 / m2^2   = 2.5625 / 1.5625 = 1.64
+    // 1.64 is well below 3.0, which is right: four evenly spaced points are
+    // flatter-tailed than a normal, and a platykurtic reading here is the
+    // check that the convention really is non-excess.
+    #[test]
+    fn return_shape_moments_match_hand_arithmetic_on_a_symmetric_series() {
+        let shape = ReturnShape::of(&[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(shape.n_returns, 4);
+        assert_eq!(shape.skew, Some(0.0));
+        assert_eq!(shape.kurtosis, Some(1.64));
+    }
+
+    // Hand-derived. rets = [0.0, 0.0, 0.0, 4.0]; mean = 1.0; deviations
+    // -1, -1, -1, 3.
+    //   m2 = (1 + 1 + 1 + 9) / 4 = 3
+    //   m3 = (-1 - 1 - 1 + 27) / 4 = 6
+    //   m4 = (1 + 1 + 1 + 81) / 4 = 21
+    //   skew     = 6 / 3^1.5 = 2 / sqrt(3) = 1.1547005383792515
+    //   kurtosis = 21 / 9    = 2.3333333333333335
+    // The companion to the case above: one right tail must produce a positive
+    // skew, so a sign error cannot hide behind a symmetric fixture.
+    #[test]
+    fn return_shape_reports_a_positive_skew_for_a_right_tail() {
+        let shape = ReturnShape::of(&[0.0, 0.0, 0.0, 4.0]);
+        assert_eq!(shape.n_returns, 4);
+        let skew = shape.skew.expect("a series with variance has a skew");
+        assert!(
+            (skew - 2.0 / 3.0_f64.sqrt()).abs() < 1e-12,
+            "skew was {skew}"
+        );
+        let kurtosis = shape.kurtosis.expect("a series with variance has one");
+        assert!(
+            (kurtosis - 21.0 / 9.0).abs() < 1e-12,
+            "kurtosis was {kurtosis}"
+        );
+    }
+
+    // A flat window has no standardized third or fourth moment: the
+    // denominator is zero. `None` is "no opinion" (D-0080); a zero would read
+    // as "symmetric and normal-tailed", which is a claim the data cannot make.
+    #[test]
+    fn a_flat_or_too_short_series_has_no_higher_moments() {
+        let flat = ReturnShape::of(&[0.25, 0.25, 0.25]);
+        assert_eq!(flat.n_returns, 3);
+        assert_eq!(flat.skew, None);
+        assert_eq!(flat.kurtosis, None);
+
+        for short in [vec![], vec![0.5]] {
+            let shape = ReturnShape::of(&short);
+            assert_eq!(shape.n_returns, short.len());
+            assert_eq!(shape.skew, None);
+            assert_eq!(shape.kurtosis, None);
+        }
+    }
+
+    // The shape must describe the SAME series the ratio came from, which is
+    // what makes it safe to deflate with. `compute` drops a step whose
+    // starting equity was not positive, so the count follows the ratio's
+    // sample rather than the equity length.
+    #[test]
+    fn the_shape_counts_the_same_returns_the_naive_sharpe_used() {
+        let s = Summary::compute(&eq(&[100, 110, 120, 130]), &[], 0, 252.0);
+        assert_eq!(s.return_shape.n_returns, 3);
+        assert!(s.sharpe_naive.is_some());
+
+        let flat = Summary::compute(&eq(&[100, 100, 100]), &[], 0, 252.0);
+        assert!(flat.sharpe_naive.is_none());
+        assert_eq!(flat.return_shape.n_returns, 2);
+        assert_eq!(flat.return_shape.skew, None);
     }
 }

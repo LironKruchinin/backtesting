@@ -211,6 +211,10 @@ pub struct ComboOutcome {
     /// What the verdict was computed from.
     /// The verdict and every criterion behind it.
     pub assessment: Assessment,
+    /// This combo's deflated Sharpe, retained beside the verdict so a renderer
+    /// never has to rebuild it from a second copy of the evidence. `None` is
+    /// an absence, never a zero.
+    pub deflated: Option<crate::stats::deflated::Deflated>,
     /// What the registry said when this combo's rows were claimed.
     pub already_finished_runs: usize,
 }
@@ -222,6 +226,16 @@ pub struct FunnelReport {
     pub s0: Option<crate::s0::S0Report>,
     /// One entry per combo, in grid-index order — never rank order.
     pub combos: Vec<ComboOutcome>,
+    /// The grid's PBO, or the reason there is none.
+    ///
+    /// A `Result` rather than an `Option` because a scorecard that cannot show
+    /// the number must show why: "there wasn't one" and "it passed" have to be
+    /// distinguishable on the page, which is the whole argument behind the
+    /// named-holes section this replaces.
+    pub pbo: Result<crate::stats::pbo::Pbo, crate::stats::pbo::PboUnavailable>,
+    /// The trial count every deflated Sharpe on this report divided by, read
+    /// from the registry after this run's rows were claimed.
+    pub n_trials: usize,
     /// Trials charged to the family before this run.
     pub trials_before: usize,
     /// Trials charged after it. The number a deflated Sharpe will divide by.
@@ -232,6 +246,33 @@ pub struct FunnelReport {
     pub runs_already_done: usize,
     /// Rows found claimed-but-unfinished: crashes from an earlier run.
     pub runs_retried: usize,
+}
+
+/// Sample standard deviation of the grid's out-of-sample Sharpes.
+///
+/// This is the scale that turns `expected_max_z`'s dimensionless z-score into
+/// Sharpe units. `None` for fewer than two measurable combos, or for a grid
+/// whose Sharpes are identical: with no dispersion there is no spread for a
+/// maximum to be drawn from, and `deflated_sharpe` falls back to the combo's
+/// own standard error rather than being handed a zero.
+fn sharpe_dispersion(combos: &[ComboWalkForward]) -> Option<f64> {
+    let sharpes: Vec<f64> = combos
+        .iter()
+        .filter_map(|c| c.oos_pooled.sharpe_naive)
+        .filter(|s| s.is_finite())
+        .collect();
+    if sharpes.len() < 2 {
+        return None;
+    }
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "grid sizes are bounded well below f64's exact-integer range"
+    )]
+    let n = sharpes.len() as f64;
+    let mean = sharpes.iter().sum::<f64>() / n;
+    let variance = sharpes.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / (n - 1.0);
+    let sd = variance.sqrt();
+    (sd.is_finite() && sd > 0.0).then_some(sd)
 }
 
 /// Anything that stops a funnel run.
@@ -432,6 +473,50 @@ pub fn run_funnel(
         .collect();
     let oos_sessions: usize = inputs.plan.folds().iter().map(|f| f.test.n_days()).sum();
 
+    // ---- Block B's grid-level statistics, computed once, before any combo is
+    // assessed.
+    //
+    // PBO is a property of the **search**, not of a combo: it asks how often
+    // picking the in-sample winner would have been wrong out of sample, so
+    // every combo's assessment reads the same number. Computing it inside the
+    // loop would invite a per-combo variant, which is a statistic nobody can
+    // interpret.
+    //
+    // The trial count is read from the registry and nowhere else
+    // (`trials_from_registry`), so it already excludes voided runs by
+    // construction (D-0083) and already includes the rows this run just
+    // claimed. A local recount would be a second opinion about the
+    // denominator, and the denominator is the entire point.
+    let n_trials = crate::stats::deflated::trials_from_registry(registry, inputs.hypothesis_family);
+
+    // The CSCV blocks ARE the folds. `FoldPlan` is the sole boundary authority
+    // in this codebase (D-0062, D-0071); cutting a second set of blocks here
+    // would be a second answer to "which observations are out of sample".
+    //
+    // The per-cell metric is the fold's out-of-sample **return**, not its
+    // Sharpe, for two reasons. It is always defined — a fold with no trades has
+    // a return of zero and no Sharpe at all, so a Sharpe matrix would make PBO
+    // absent exactly on the quiet configs it is most useful for. And D-0063
+    // already rebases every per-fold percentage to the config's declared
+    // capital, so folds and combos are on one scale without further work.
+    let fold_performance: Vec<Vec<f64>> = report
+        .combos
+        .iter()
+        .map(|combo| {
+            combo
+                .folds
+                .iter()
+                .map(|fold| fold.oos.total_return_pct)
+                .collect()
+        })
+        .collect();
+    let pbo = crate::stats::pbo::probability_of_backtest_overfitting(&fold_performance);
+
+    // Dispersion of the grid's out-of-sample Sharpes, which is what turns the
+    // dimensionless expected-maximum z-score into Sharpe units. Absent for a
+    // grid of one, where there was no search to correct for.
+    let trial_sharpe_dispersion = sharpe_dispersion(&report.combos);
+
     let mut combos = Vec::with_capacity(report.combos.len());
     for costed in report.combos {
         let index = costed.id.combo_index;
@@ -484,6 +569,25 @@ pub fn run_funnel(
             // block A ships the harness and its acceptance test first
             // (docs/plans/m3-full.md).
             permutation_p_value: None,
+            // Deflated against the registry's trial count and the shape of the
+            // very series the Sharpe came from — never a shape recomputed from
+            // a different series (`ReturnShape`). `None` propagates: a combo
+            // with no Sharpe, or with a flat window that has no higher
+            // moments, has no deflated Sharpe either, and that is an absence
+            // rather than a zero.
+            deflated: costed.oos_pooled.sharpe_naive.and_then(|observed| {
+                let shape = costed.oos_pooled.return_shape;
+                crate::stats::deflated::deflated_sharpe(crate::stats::deflated::DeflationInputs {
+                    observed_sharpe: observed,
+                    skew: shape.skew?,
+                    kurtosis: shape.kurtosis?,
+                    n_observations: shape.n_returns,
+                    n_trials,
+                    trial_sharpe_dispersion,
+                })
+            }),
+            n_trials,
+            pbo: pbo.as_ref().ok().map(|p| p.value),
         };
         // `validate_s0_report` established exact contiguous grid identity
         // before any run was claimed, so assessment and rendering cannot pick
@@ -503,6 +607,7 @@ pub fn run_funnel(
             sweep,
             controls,
             oos_sessions,
+            deflated: evidence.deflated,
             assessment,
         });
     }
@@ -518,6 +623,8 @@ pub fn run_funnel(
         runs_already_done: claims.already_done,
         runs_retried: claims.retried,
         combos,
+        pbo,
+        n_trials,
     })
 }
 

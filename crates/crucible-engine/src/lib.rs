@@ -37,7 +37,7 @@ pub mod series;
 
 pub use bracket::{ActiveBracket, INTRABAR_CONVENTION, Outcome, Resolution, StopFirstIntrabar};
 pub use execution::{FreeFills, SpreadCrossFills};
-pub use metrics::Summary;
+pub use metrics::{ReturnShape, Summary};
 pub use portfolio::{ClosedTrade, FeeEvent, Portfolio};
 pub use replay::{BacktestParams, BacktestResult, EngineError, run, run_capturing};
 pub use series::{

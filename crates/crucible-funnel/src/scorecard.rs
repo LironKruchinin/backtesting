@@ -152,6 +152,7 @@ pub fn render(
     for combo in &report.combos {
         write_combo(&mut h, combo, criteria);
     }
+    write_battery(&mut h, report, criteria);
     write_gaps(&mut h, criteria);
     h.push_str("</body></html>\n");
     Ok(h)
@@ -300,15 +301,14 @@ fn write_honesty_box(h: &mut String, report: &FunnelReport, criteria: &Criteria,
          every Sharpe accordingly, and a bare total cannot tell a reader whether it is in \
          there. Voided runs are netted out by construction (D-0083)</dd>\
          <dt>naive Sharpe</dt><dd>reported per combo below</dd>\
-         <dt>deflated Sharpe</dt><dd><strong>not computed by this build — the estimator exists, \
-         the wiring does not.</strong> `crucible-funnel::stats::deflated` implements Bailey &amp; \
-         López de Prado (2014) with its converse and lucky-best-of-N controls and a pinned hash, \
-         and the trial count it needs is the one above. What is missing is the per-combo return \
-         series reaching it, so <em>this page</em> carries no deflated number and every Sharpe on \
-         it is the naive one, to be read as an upper bound. When it lands the correction will be \
-         deliberately conservative where trials are not independent — sixteen accounts are one \
-         signal under sixteen risk overlays, so the raw product over-deflates, and the preferred \
-         error is against the strategy</dd>\
+         <dt>deflated Sharpe</dt><dd>computed per combo below, over <strong>{trials}</strong> \
+         trial(s) read from the registry. Bailey &amp; López de Prado (2014), corrected for trial \
+         count and for the skew and kurtosis of the <em>same</em> out-of-sample series the naive \
+         Sharpe came from. The correction is deliberately conservative where trials are not \
+         independent — sixteen accounts are one signal under sixteen risk overlays, so the raw \
+         product over-deflates, and the preferred error is against the strategy. Nobody may \
+         shrink that denominator with an effective-N estimator without its own decision entry \
+         and a control showing it does not resurrect a known-spurious edge</dd>\
          <dt>strategy config hash</dt><dd class=\"mono\">{config}</dd>\
          <dt>registration/run hash</dt><dd class=\"mono\">{registration}</dd>\
          <dt>git sha</dt><dd class=\"mono\">{git}</dd>\
@@ -328,6 +328,7 @@ fn write_honesty_box(h: &mut String, report: &FunnelReport, criteria: &Criteria,
         after = report.trials_after,
         before = report.trials_before,
         composition = esc(&trial_composition_of(p, report).render()),
+        trials = report.n_trials,
         config = esc(&p.config_hash),
         registration = esc(&p.registration_hash),
         git = esc(&p.git_sha),
@@ -851,21 +852,107 @@ fn write_gaps(h: &mut String, criteria: &Criteria) {
          <div class=\"gap\"><strong>Permutation null and empirical p-value.</strong> The real \
          metric against a block-permutation distribution — and the alarm that fires when a \
          strategy keeps its edge on shuffled data, which is an engine-bug signal before it is a \
-         discovery. The config declares <span class=\"mono\">max_pbo = {pbo}</span> and PBO was \
-         <strong>not evaluated</strong> either. Both live in \
-         <span class=\"mono\">crucible-funnel::stats</span>, still a module-doc spec.</div>\
+         discovery. The harness exists, is controlled and is hash-pinned \
+         (<span class=\"mono\">crucible-funnel::stats::permutation</span>); what is missing is \
+         the run path reaching it, so no combo on this page carries a p-value.</div>\
          <p><strong>Because S3 did not run, no combo on this page can be GRADUATE.</strong> \
          Graduate means &ldquo;survived the full battery&rdquo;; the battery is what is missing, \
          so the best verdict this build can award is ITERATE. Nothing here graduated because \
          nothing <em>could</em> — not because nothing was good enough.</p>\
          <p class=\"dim\">There is also a strategy in this repository that cheats on purpose \
          (<span class=\"mono\">crucible-strategies::controls::LeakyZScore</span>, a full-sample \
-         z-score), and the gates above do <strong>not</strong> catch it. That is recorded as the \
-         honest baseline the permutation and truncation harnesses will have to beat.</p>\
+         z-score). The permutation null <strong>does</strong> catch it — that flip is recorded \
+         in D-0087 and asserted by \
+         <span class=\"mono\">crucible-funnel/tests/planted_leak.rs</span> — but it catches it \
+         in that test rather than on this page, because the null is not on the run path.</p>\
          </section>",
         plateau = criteria.require_plateau,
-        pbo = criteria.max_pbo,
     );
+}
+
+/// The block-B battery: one PBO for the search, and a deflated Sharpe per combo.
+///
+/// Rendered as a section of its own rather than folded into the per-combo table
+/// because PBO is a property of the **search** and belongs beside the trial
+/// count, not beside any one combo's numbers.
+fn write_battery(h: &mut String, report: &FunnelReport, criteria: &Criteria) {
+    let _ = write!(
+        h,
+        "<section><h2>Overfitting battery</h2>\
+         <p class=\"dim\">Both numbers here are corrections for having searched. They answer a \
+         question no statistic computed on a single run can: not &ldquo;was this good?&rdquo; but \
+         &ldquo;how good would the best of {trials} tries have looked anyway?&rdquo;</p>",
+        trials = report.n_trials
+    );
+    match &report.pbo {
+        Ok(pbo) => {
+            let _ = write!(
+                h,
+                "<p><strong>PBO = {value:.4}</strong> against a declared \
+                 <span class=\"mono\">max_pbo = {max:.4}</span>. Combinatorially symmetric \
+                 cross-validation over {splits} split(s) of {blocks} fold(s) and {combos} \
+                 combo(s): in {under} of them, the combo that won in sample finished below \
+                 median out of sample.</p>\
+                 <p class=\"dim\">The blocks are the fold plan's folds and nothing else — \
+                 <span class=\"mono\">FoldPlan</span> is this codebase's sole authority on which \
+                 observations are out of sample. With {splits} split(s) the estimate can only \
+                 land on multiples of {res:.4}, so read &ldquo;about a half&rdquo; rather than \
+                 the fourth decimal. A PBO near 0.5 on random data is the correct answer; a PBO \
+                 near <em>zero</em> on random data would mean the split is leaking.</p>",
+                value = pbo.value,
+                max = criteria.max_pbo,
+                splits = pbo.splits,
+                blocks = pbo.blocks,
+                combos = pbo.combos,
+                under = pbo.underperforming_splits,
+                res = pbo.resolution(),
+            );
+        }
+        Err(reason) => {
+            let _ = write!(
+                h,
+                "<div class=\"gap\"><strong>PBO ABSENT.</strong> {reason}. An absent estimate is \
+                 not a cleared bar: every combo on this page failed the \
+                 <span class=\"mono\">max_pbo = {max:.4}</span> criterion for want of a number, \
+                 rather than passing it quietly (D-0075).</div>",
+                reason = esc(&reason.to_string()),
+                max = criteria.max_pbo,
+            );
+        }
+    }
+    h.push_str(
+        "<table><thead><tr><th>combo</th><th>naive Sharpe</th><th>selection benchmark</th>\
+         <th>deflated: P(true Sharpe &gt; 0)</th><th>trials</th></tr></thead><tbody>",
+    );
+    for combo in &report.combos {
+        let _ = write!(h, "<tr><td class=\"mono\">{}</td>", esc(&combo.label));
+        match combo.deflated {
+            Some(d) => {
+                let _ = write!(
+                    h,
+                    "<td>{:.4}</td><td>{:.4}</td><td>{:.4}{}</td><td>{}</td>",
+                    d.observed_sharpe,
+                    d.expected_max_sharpe,
+                    d.dsr,
+                    if d.beats_selection_benchmark() {
+                        ""
+                    } else {
+                        " — below the benchmark"
+                    },
+                    d.n_trials
+                );
+            }
+            None => {
+                let _ = write!(
+                    h,
+                    "<td colspan=\"4\">ABSENT — no out-of-sample Sharpe, or a return window with \
+                     no higher moments. Not a cleared bar.</td>"
+                );
+            }
+        }
+        h.push_str("</tr>");
+    }
+    h.push_str("</tbody></table></section>");
 }
 
 #[cfg(test)]
@@ -903,6 +990,8 @@ mod tests {
             runs_claimed: 3,
             runs_already_done: 0,
             runs_retried: 0,
+            pbo: Err(crate::stats::pbo::PboUnavailable::TooFewCombos { combos: 0 }),
+            n_trials: 3,
         }
     }
 
@@ -1026,14 +1115,32 @@ mod tests {
             "trial-count composition",
             "combos ×",
             "deflated Sharpe",
-            // The estimator landed before its wiring, and the page must say so
-            // in those words rather than claiming a number it does not show.
-            "the estimator exists, the wiring does not",
+            // Block B wired the estimator to the run path, so the page now
+            // carries the correction itself and the trial count it divided by.
+            // The old "the estimator exists, the wiring does not" sentence is
+            // asserted ABSENT below: a page that still apologised for a number
+            // it now shows would be lying in the safe-looking direction.
+            "Overfitting battery",
+            "selection benchmark",
+            "effective-N estimator",
             "stop_first_intrabar",
             "git sha",
             "cost sweep",
         ] {
             assert!(html.contains(required), "missing {required}");
+        }
+        // Retired claims. A named hole that outlives the hole is worse than no
+        // hole marker at all: it tells a reader the page is missing something
+        // it is in fact showing, and the next person to read it will trust the
+        // apology over the table.
+        for retired in [
+            "the estimator exists, the wiring does not",
+            "PBO was <strong>not evaluated</strong>",
+        ] {
+            assert!(
+                !html.contains(retired),
+                "block B replaced this hole; the page must stop claiming it: {retired}"
+            );
         }
     }
 

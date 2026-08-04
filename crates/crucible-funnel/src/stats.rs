@@ -39,6 +39,7 @@
 //! every p-value is reproducible bit-for-bit.
 
 pub mod deflated;
+pub mod pbo;
 pub mod permutation;
 pub mod truncation;
 
