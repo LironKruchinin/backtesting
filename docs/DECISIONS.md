@@ -4386,3 +4386,45 @@ propose a superseding entry — don't silently diverge.
   backwards in delivery — with a vaguer one. Fixtures point at the real check
   instead. Before adding a validity check, find the one that already refuses
   that input by name.
+- **D-0120** (2026-08-04) -- **The rolling L1/L3 entitlement windows are allowed
+  to LAPSE, so every cost number this project reports rests on an assumed
+  one-tick half-spread — ES included — and for six of the seven roots it always
+  will.** M1's last open box was a monthly cron for `trades`, `tbbo` and `mbo`,
+  whose vendor entitlements roll (12 months for L1, one month for L3). It will
+  not be built. The box stays **unticked**, because the work was not done; what
+  changes is that it now says so and says why, instead of reading as pending.
+  **What the archive holds, so the bound is a number rather than a worry.**
+  Exactly one `tbbo` record and one `trades` record, both `ES.FUT`
+  2025-07-28..2026-07-28, and one `mbo`, `ES.FUT` 2026-06-28..2026-07-28 — the
+  full rolling windows as they stood on the blitz date. Those bytes are
+  immutable and already paid for (D-0017), so **nothing decays**; what lapses is
+  *extension*. Every month from 2026-07-28 forward is a month the archive will
+  never have.
+  **The consequence is not confined to the roots we did not buy.**
+  `docs/DATA_PLAN.md`'s L1 rows are `ES.FUT` only, so NQ, RTY, CL, GC, ZN and 6E
+  have no `tbbo` and no `trades` in this archive at all and can never acquire
+  any. M4's "measured half-spread by time of day replaces the hand-set 1 tick"
+  is therefore an **ES-only, single-window** claim even after it is done, and
+  until it is done every config in `configs/` declares `half_spread_ticks = 1` —
+  an assumption wearing the same field name a measurement would wear.
+  **So it is stated where it is read, not only here.** §4 already requires a
+  number derived by convention to carry its basis beside it rather than folded
+  into the value, and an unmeasured half-spread is exactly such a number. A
+  report quoting a non-ES cost sweep says so, on the same argument that makes
+  `initial_basis` its own field in `configs/accounts/`.
+  **Which direction the assumption errs is NOT known, and that is the point.**
+  ES is usually one tick wide, which would make a one-tick *half*-spread
+  pessimistic by roughly a factor of two — but that expectation is itself
+  unmeasured, it is the precise quantity the lapsed data would have settled, and
+  the six other roots are thinner in ways nobody here has quantified. Naming the
+  assumption is what is owed. Asserting its sign from the armchair would be the
+  convention hiding inside the number all over again, which is the failure §4's
+  basis rule exists to prevent.
+  **Why the trade is accepted.** The subscription month is spent
+  (`docs/RUNBOOK_BLITZ.md`), keeping a rolling window alive is a recurring cost
+  against a one-person portfolio project, and the sixteen-year `ohlcv` spine the
+  funnel actually replays is complete, verified and immutable. What is given up
+  is *calibration*, which is M4's; what is kept is every verdict M3 produces —
+  each of which now carries an execution assumption that is named rather than
+  measured, which is what §2.4 has demanded all along. The honest form of this
+  decision is a stated assumption, not a quiet one.

@@ -68,10 +68,20 @@ deadline-driven (see `crucible-data::ingest` module docs).
             died on an HTTP 504 mid-poll (exit 4) and re-running the identical
             command adopted all three jobs and submitted nothing twice — the
             resume path working exactly as D-0029/D-0034 designed it
-- [ ] Monthly archival job for the rolling L1/L3 windows — `trades`, `tbbo`,
-      `mbo`; `mbp-10` deliberately excluded (D-0023). Documented cron in
-      `docs/RUNBOOK_BLITZ.md`, later automated; runs `--max-cost-usd 0.00` so
-      it refuses rather than bills if the entitlement lapses
+- [ ] **Will not be built — the entitlement windows lapse deliberately**
+      (2026-08-04, D-0120). The monthly archival job for the rolling L1/L3
+      windows — `trades`, `tbbo`, `mbo`; `mbp-10` deliberately excluded
+      (D-0023) — was to run `--max-cost-usd 0.00` so it refused rather than
+      billed if the entitlement lapsed. The entitlement is now allowed to lapse
+      instead. What the blitz bought is what there will ever be: one `tbbo` and
+      one `trades` record, both `ES.FUT` 2025-07-28..2026-07-28, and one `mbo`,
+      `ES.FUT` 2026-06-28..2026-07-28. The bytes are immutable and paid for, so
+      nothing decays — what lapses is *extension*. The cost is carried
+      downstream and named there: `half_spread_ticks = 1` is an assumption
+      rather than a measurement in every config in `configs/`, and for the six
+      non-ES roots it can never become one from this archive. **The box stays
+      unticked because the work was not done and will not be**, which is what
+      an unticked box means
 - [x] `crucible transcode` (2026-07-28): DBN → curated Parquet, one file per
       (instrument, timeframe, source window), integer columns end to end,
       schema + transcoder versions in the file's own metadata (D-0036, D-0037)
@@ -225,11 +235,28 @@ the whole stitched sixteen years as `--instrument ES.v.0`.
       missing excursion reset) was joined by a fixture that does. **Capture
       only:** breach probability, the block bootstrap, P(pass) and payout
       cadence are spec §4 and land with the funnel in M3
-- [ ] Golden tests vs an external reference (NautilusTrader or hand-audited
-      runs) on identical data — the "why should anyone trust your engine"
-      answer
-- [ ] Indicator numerics: replace rolling sums with rebased/Welford updates
-- [ ] Criterion benches: bars/sec single-run baseline on the 5800X3D
+- [ ] Golden tests on identical data — the "why should anyone trust your
+      engine" answer. **The route is hand-audited fixtures, not NautilusTrader**
+      (chosen 2026-08-04): a small real-ES window whose fills, PnL and metrics
+      are derived by hand under `spread_cross` and D-0069's intrabar
+      convention, arithmetic in comments per `testdata/README.md`. The template
+      already exists — `controls`' `the_generator_is_pinned` asserts Vigna's
+      **published** SplitMix64 outputs rather than our own last run, which is
+      what makes it an external authority instead of a self-comparison. **The
+      limitation is stated rather than hidden:** a fixture derived by the same
+      hand that wrote the engine is weaker evidence than a second engine
+      agreeing, so the external cross-check is deferred, not cancelled
+- [ ] Indicator numerics: replace rolling sums with rebased/Welford updates.
+      Three naive accumulators compute variance as `sumsq/n − mean²` — `sma`,
+      `bollinger`, and the `rolling` window backing both `zscore` and `stdev`.
+      No test measures the drift and the one test that mentions it tolerates it
+      at `1e-9`, so the fix is owed **together with** a test where the naive
+      form provably diverges. It moves the combo, walk-forward, funnel and S0
+      hashes, so it carries a planned re-pin rather than a surprise one
+- [ ] Criterion benches: bars/sec single-run baseline on the 5800X3D.
+      **Deferred as throughput work** (2026-08-04), but it is a prerequisite
+      rather than an optional extra: §7 will not accept the multi-instance pass
+      without criterion evidence, so that item is blocked behind this one
 
 **Acceptance:** a combo defined purely in TOML backtests on real ES data
 with reproducible, externally-cross-checked results.
@@ -258,10 +285,15 @@ The quant-research payload. Specs live in `crucible-funnel` module docs.
       pool, merged by grid index by construction rather than by a sort, with
       `the_parallel_scheduler_agrees_with_the_serial_one` asserting the two
       reports are bit-identical including the captured account series. The
-      **dataset semaphore and the multi-instance pass are deferred**: one
-      config runs one instrument today so there is exactly one resident
-      dataset to bound, and the multi-instance pass is a throughput change,
-      which §7 wants criterion evidence for
+      **dataset semaphore and the multi-instance pass are deferred**, and the
+      semaphore's stated reason expired on 2026-08-04. It was "one config runs
+      one instrument, so there is exactly one resident dataset to bound";
+      block C's planner loads one `Series` per contract *plus* an `i64`
+      trading-day key per bar, all resident at once, so a pooled ES run holds N
+      datasets rather than one. Both stay deferred as throughput work, which §7
+      wants criterion evidence for — but the semaphore is now deferred with a
+      live consumer rather than for want of anything to bound, and pooling
+      makes it more relevant, not less
 - [x] Stages **S1–S2** with pre-registered kill criteria from config
       (2026-07-30). Criteria live in `[funnel]`, are read before the run and
       stored verbatim on the registry row inserted before the run. **S0 and S3
@@ -292,7 +324,7 @@ The quant-research payload. Specs live in `crucible-funnel` module docs.
       produce a file at all** when any honesty-box field is empty. The three
       sections this build cannot compute are rendered as named holes rather
       than omitted
-- [ ] **The S0 predictor seam — M3's first block** (D-0081). A score-emitting
+- [x] **The S0 predictor seam — M3's first block** (D-0081). A score-emitting
       evaluation path with forward-return joins: a signal emits a continuous
       score per bar, the seam joins it to the return over configured horizons
       ahead, buckets, and reports — no orders, no fills, no equity curve. This
@@ -389,6 +421,23 @@ The quant-research payload. Specs live in `crucible-funnel` module docs.
             `711e1cb34a2ee2b4`, funnel `2f430893d2a79a8f`, permutation
             `9fe41f6f5b3653e7`, truncation `91b9ff5b9bbcdb25`, deflated Sharpe
             `dc7f94f25235df6c`.
+      - [ ] **Two correctness defects, both on the run path and both gating**
+            (found 2026-08-04, unfixed). The seam is *built*, which is what the
+            tick above means; it is not yet *right*. First, the forward return
+            is the price ratio `exit / entry - 1.0`, guarded only against zero
+            and non-finite — but §9 records CL settling at **−$37.63** on
+            2020-04-20 and refuses a positivity check archive-wide (D-0070), so
+            a negative entry silently inverts the sign and a sign change gives
+            −200 % for a gain. Rank correlation is what the IC is, so inverted
+            signs scramble it; the bootstrap mean and every quantile bucket
+            inherit it. Second, the block bootstrap draws over *sessions*, so a
+            one-session sample resamples the identical block on every draw:
+            the interval collapses to a point, `excludes_zero()` is true for any
+            nonzero mean, and D-0085's two-part criterion silently degrades to
+            `|IC|` alone — the exact failure D-0085 was written to close. A
+            `DegenerateBootstrap` reason is already defined and unreachable.
+            Blocks any CL- or GC-based hypothesis until fixed; ES and NQ never
+            go negative, so nothing measured so far is affected
 - [ ] Stats: deflated Sharpe, PBO/CSCV, block-permutation nulls, empirical
       p-values — cited implementations with property tests.
       - [x] **Block-permutation null + empirical p-values** (2026-07-31,
@@ -454,6 +503,24 @@ The quant-research payload. Specs live in `crucible-funnel` module docs.
       2026-07-31** when the permutation null landed — the detector watched
       firing on a defect planted before it existed, which is what this line's
       acceptance test asked for
+      - [ ] **Wire the permutation null onto the run path.** This is why the
+            parent above is still unticked while both its children are done.
+            The harness exists, is pinned, and caught the planted leak — but
+            `crucible-cli::config` hardcodes `max_permutation_p: None` with the
+            comment that the harness "ships with its acceptance test before it
+            is wired to the run path", so **the criterion is unreachable from
+            any TOML** and no scorecard has ever carried a p-value. It is
+            condition 7 of the ten that `docs/plans/m3-full.md` block D gates
+            `Graduate` on, so block D cannot start while it is unreachable.
+            Owed with the wiring: the block-length sweep D-0087 mandates, a
+            draw-count and cost policy (a draw is a full grid replay), a
+            re-pin — and first, a guard on the observed statistic. Every
+            comparison `v >= observed` is false when `observed` is NaN, so a
+            non-finite observed scores `at_least = 0` and the p-value collapses
+            to its floor `1/(1+draws)`, which *passes*. The asymmetry is what
+            marks it an oversight rather than a choice: the null draws are
+            already filtered for finiteness, and both sibling statistics refuse
+            non-finite input by name (`stats::pbo`, `stats::deflated`)
 - [x] **Truncation-invariance harness** (2026-07-31, D-0088):
       `crucible-funnel::stats::truncation`. Decisions on `data[0..t]` compared
       **bit-for-bit** against the decisions `<= t` the full series made,
@@ -467,13 +534,105 @@ The quant-research payload. Specs live in `crucible-funnel` module docs.
       control, now closed by a content-only leak fixture. Pinned hash
       `91b9ff5b9bbcdb25`; the six existing hashes unmoved
       - [ ] Wire both harnesses into CI as merge-blocking (§7 makes them so the
-            day they land; they are green locally and not yet gated)
+            day they land; they are green locally and not yet gated). **Measured
+            2026-08-04, and the gap is wider than this line implies:** three of
+            the nine gates are not exercised by CI at all (combo, walk-forward,
+            S0), and the two CLI gates that do run compare a run only against a
+            *second run of itself* — never against the value in the table above.
+            Only the four code-pinned digests assert a literal. A per-gate step
+            with `--test-threads=1`, no-output detection and a documented-value
+            comparison is what the table's own third column already demands of a
+            human reader; `ci.yml` also shares one `--out` directory across both
+            funnel runs, which D-0107 required to be isolated
+- [ ] **Registry pooling across contracts — block C of `docs/plans/m3-full.md`**
+      (in flight). One pooled verdict over many contracts of a root, each
+      charged as a trial. What it removes is the single-contract verdict
+      ceiling: a grade-A config replays one contract's front-month life — ~66
+      sessions for ES — and `research/backlog/README.md` §6.2 is blunt that the
+      A column produces **no verdicts at all** until this lands, because no
+      sample-adequacy floor worth registering is satisfiable at 66 sessions.
+      **Landed inert-first, deliberately**, because a half-wired pooling path is
+      the one shape that must not exist on `main`: the arithmetic before any
+      caller, the declaration surface before any orchestration, and a blanket
+      refusal standing over all of it until C6
+      - [x] **The arithmetic** (2026-08-04, D-0114): pooled sessions are the
+            count of **distinct** trading days, never the sum. Two contracts of
+            one root trade the same calendar days for as long as both are
+            listed, and the admission floor, the deflated Sharpe's observation
+            count and the fold plan's session budget all read that number. The
+            sum is reported beside the union with the overlap named, and nothing
+            may consume it as a sample size — D-0061's suppressed-order device.
+            Cross-instrument breadth is **not** extra `n`: ES with NQ over the
+            same 250 sessions is one 250-session sample plus a rhyme-check
+            claim. Floors are met and never lowered, asserted both ways
+      - [x] **The declaration surface** (2026-08-04, D-0115): `[pooling].root`
+            is what makes more than one instrument legal, and the only thing
+            that does. Contracts stay in `universe.instruments` rather than a
+            second list that would eventually disagree with it, and the root is
+            declared rather than inferred, so a typo'd contract cannot define
+            its own. Four refusals — fewer than two contracts, the same symbol
+            twice, a contract outside the declared root, and a continuous alias
+            inside a pool, the last being D-0076 holding, because admitting
+            `ES.v.0` would enable back-adjusted grids by the back door
+      - [x] **The refusal that makes inert-first actually inert** (2026-08-04,
+            D-0117): D-0115 shipped the *permission* without it, and
+            `collect_events` read `instruments[0]`, so `crucible funnel` on a
+            curated pooled config would have replayed `ESH2024` alone and
+            printed the result under a config that asked for a pool — D-0075's
+            shape, and worse, because a single-contract verdict is plausible
+            rather than obviously missing. Found by measurement, not reasoning:
+            the first attempt refused only incidentally, on the synthetic feed's
+            instrument mismatch, and swapping the source to curated exposed it.
+            **This refusal stands until C6**
+      - [x] **C0–C4a, the orchestration seams** (2026-08-04, D-0118 and
+            D-0119): `collect_events_for(instrument)` as a pure refactor whose
+            no-hash-moved claim is checkable precisely because the commit
+            contains nothing else (C1); the per-contract evaluation window as a
+            parameter, **refused** on a synthetic source rather than ignored
+            (C2); `RollTable::front_window` — half-open
+            `[roll_ts + 1ns, next_roll_ts + 1ns)`, where the `+1ns` is the whole
+            correctness content, because an off-by-one hands one session to the
+            wrong contract at every roll and every pooled count inherits it
+            (C3a); `pool_evaluations` — union sessions, sum trades, skip a
+            contract that fits no complete fold **with** a count that prints
+            even when zero, and report gaps rather than refuse them (C3b); and
+            `crucible-cli::pooled`, the seam between the roll table, the
+            collector and the fold plan, computing one trading-day key per bar
+            **once** (C4a, the D-0071 device). Measured on the real ES table: 64
+            contracts with fully-determined front windows, 84–98 calendar days
+            each, ~66 sessions, every boundary tiling exactly
+      - [ ] **C4b–C8, and two defects already in the landed code.** C4b the
+            pooled replay (`oos_trades` follows its closing fill, D-0063) and
+            the calendar-shared-by-construction assertion; C4c pooled trial
+            identity; C5 the pooled report and scorecard, carrying block B's
+            over-deflation sentence and D-0119's rule that max drawdown, losing
+            streaks and time-under-water must **not** be computed across the
+            pooled concatenation; **C6 lifts D-0117's refusal**, alone, in the
+            commit its two planted-bug controls go green; C7 the tenth
+            determinism pin, alone and derived twice; C8 the acceptance run.
+            **The two defects are latent behind the refusal and live the moment
+            C6 lifts it** (found 2026-08-04): the planner round-trips the roll
+            table's nanosecond boundary through a civil date, so each contract's
+            window collapses onto UTC midnight — the middle of a CME session —
+            and the roll date is handed wholesale to the incoming contract,
+            which is exactly the off-by-one C3a's own test calls silent; and the
+            gap scan walks the evaluations in **declaration** order with nothing
+            sorting them, so a pool declared out of sequence either misses a
+            real hole and prints "contiguous" — the honesty device reporting the
+            opposite of the truth — or invents one another contract covers.
+            `pool_sessions` has an order-independence control; `pool_evaluations`
+            has none
 - [ ] Cross-instrument rhyme check (needs NQ/RTY archives from M1 tooling)
 - [ ] Multi-instance pass + dataset semaphore, with criterion evidence
 
-**Acceptance:** `crucible funnel configs/example-combo.toml` → scorecards +
-registry rows, unattended; a deliberately-leaky test strategy is caught by
-the permutation/truncation harnesses (negative-control test).
+**Acceptance:** `crucible funnel --config configs/combo-smoke.toml --out
+results` → scorecards + registry rows, unattended; a deliberately-leaky test
+strategy is caught by the permutation/truncation harnesses (negative-control
+test). *Corrected 2026-08-04: this line read `crucible funnel
+configs/example-combo.toml`, which was never a runnable command — there is no
+positional config argument, and `configs/example-combo.toml` declares `ES.v.0`,
+which the funnel refuses (D-0076). It now names the command the run recorded
+below actually used.*
 *First half met 2026-07-30:* `crucible funnel --config
 configs/combo-smoke.toml` runs unattended to 24 registry rows, 6 verdicts and
 a scorecard, killing all six combos of the null harness at S1 and exiting 5.
@@ -483,7 +642,16 @@ on a defect planted before it existed, reached by building the harness and by no
 other route. Its baseline had been measured rather than assumed, which is what
 made the flip evidence instead of a claim. Every gate before S3 still passes and
 the test asserts they do, so the file cannot silently stop measuring the
-detector. The **truncation-invariance** half of the clause is still open.
+detector. **The truncation half landed the same day** (D-0088) and caught the
+same strategy — `LeakyZScore` refit per prefix gives 4 divergences against
+`SmaCross`'s 0 — so both harnesses named in the clause have now been watched
+firing on the planted defect. *The sentence that stood here until 2026-08-04
+said the truncation half was "still open"; it was written in the window between
+the two commits and never revisited.* What neither harness does **yet** is run
+on the funnel's own path: `max_permutation_p` is hardcoded `None`, so no
+scorecard has ever carried a p-value, and the truncation verdict is a
+test-suite fact rather than a reported one. The clause is met; the reporting is
+not.
 
 ## M4 — Calibration + write-up (~3–4 weeks)
 
