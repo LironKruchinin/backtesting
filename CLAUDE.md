@@ -32,9 +32,12 @@ walk-forward with costs → S3 statistical battery) is described in
 `crucible-funnel`'s crate docs. Most ideas must die cheaply at S0–S1.
 
 **Current milestone:** M3 (funnel + statistics) — see `docs/MILESTONES.md`.
-`crucible funnel <config>` runs S0, S1 and S2 end to end today; what is still
-owed is the statistics battery (`crucible-funnel::stats`), which is why the
-build **cannot award `Graduate`** (D-0075).
+`crucible funnel <config>` runs S0, S1 and S2 end to end today, and part of S3:
+deflated Sharpe and PBO/CSCV are evaluated criteria (D-0109), so a combo passing
+everything is *decided at* S3. What is still owed is the **rest** of the battery
+— the permutation null and the truncation harness are built and hash-pinned but
+reach no run, and the plateau and cross-instrument rhyme checks are unwritten —
+which is why the build **cannot award `Graduate`** (D-0075).
 
 ---
 
@@ -137,8 +140,10 @@ Dependency edges (enforce in review; Cargo.tomls encode them):
   `ingest::BatchProvider` trait, gated on the non-default `databento`
   feature. `async fn`, `.await`, and `tokio` appear nowhere else in the
   workspace (D-0025, superseding D-0005's "bin targets" clause).
-- `funnel` → `core` + `engine` + `strategies` (+ rayon/duckdb when M3
-  starts). All parallelism lives here.
+- `funnel` → `core` + `engine` + `strategies` + `rayon` (landed 2026-07-30).
+  **Not `duckdb`** — §6 blessed it for this crate and then struck it out when
+  the bundled build failed (D-0074); the registry is append-only JSONL. All
+  parallelism lives here.
 - `cli` → everything, but stays thin: arg parsing, wiring, printing. Logic
   in the CLI is a smell — move it into the owning crate.
 
@@ -1075,9 +1080,12 @@ reference; supersede the decision if you disagree — don't hotfix.
   that failed to fire.
 - **`crucible funnel` can never print `GRADUATE`**, however good a combo looks
   (D-0075). §4 defines Graduate as "survived the full battery"; the battery is
-  S3 — deflated Sharpe, PBO/CSCV, permutation nulls — and S3 is not in this
-  build, so the ceiling is `Iterate` and every report and scorecard says so in
-  those words. A reader who saw no `GRADUATE` and no explanation would conclude
+  S3, and S3 is **partly** in this build — deflated Sharpe and PBO/CSCV are
+  evaluated (D-0109), while the permutation null and the truncation harness
+  reach no run and the plateau and rhyme checks are unwritten. So the ceiling is
+  `Iterate` and every report and scorecard says so in those words. A combo can
+  be *decided at* S3 without the stage being *declarable*, and the two are
+  different questions: `Stage::is_implemented` answers the second. A reader who saw no `GRADUATE` and no explanation would conclude
   nothing was good enough, which is a much more flattering claim than the true
   one. Do not "enable" it by relaxing the stage list.
 - **A config declaring `stages = ["s3", ...]` is REFUSED**, not run with the
@@ -1145,6 +1153,17 @@ reference; supersede the decision if you disagree — don't hotfix.
   tight, and half a tick is an average over sessions rather than a price any
   single print pays. Rounding it back to the grid deletes the sweep's middle
   row, which is the one that answers "does this edge die at half a tick?".
+- **The half-spread every cost number rests on is an ASSUMPTION, not a
+  measurement, and for six of the seven roots it always will be** (D-0120). The
+  rolling L1/L3 entitlement windows are allowed to lapse, so the archive holds
+  one `tbbo` and one `trades` record — both `ES.FUT`, 2025-07-28..2026-07-28 —
+  and one month of `mbo`; `docs/DATA_PLAN.md`'s L1 rows were `ES.FUT` only to
+  begin with, so NQ, RTY, CL, GC, ZN and 6E have no L1 in this archive and
+  cannot acquire any. Every config declares `half_spread_ticks = 1`, which is a
+  convention wearing the field name a measurement would wear, so §4's
+  basis rule applies to it. **Which direction it errs is deliberately not
+  asserted**: that is precisely the quantity the lapsed data would have settled,
+  and guessing its sign is the convention hiding inside the number again.
 - **The matched random-entry control is the median of 16 draws, not one draw.**
   A single seeded benchmark is a sample of size one, and a strategy that loses
   to it has lost a coin flip rather than a comparison. The count of draws the
@@ -1428,10 +1447,15 @@ coefficient, quantile buckets, session block bootstrap) and D-0085 the caller
 S1). **Block A of `docs/plans/m3-full.md` landed 2026-07-31**: the
 block-permutation null (D-0087) and the truncation-invariance harness (D-0088),
 both with converse controls and pinned hashes, and `planted_leak.rs` flipped
-from `Iterate` to `Kill` on the first of them. What M3 still owes is the rest of
-`crucible-funnel::stats` — **deflated Sharpe and PBO/CSCV** — plus registry
-pooling and the account evaluator. The plan is `docs/plans/m3-full.md`, blocks
-B through E.
+from `Iterate` to `Kill` on the first of them. **Block B landed 2026-08-04**
+(D-0109, pinned by D-0110 at `ef703dfd8d19fdd3`): deflated Sharpe and PBO/CSCV
+became evaluated criteria instead of named holes, and `decided_at` reaches S3.
+**Block C is in flight** — C0–C4a are on `main` (D-0114..D-0119) and D-0117
+refuses every well-formed `[pooling]` config until C6 lands the orchestration.
+What M3 still owes is the rest of block C, then blocks D and E, plus the two
+pieces of `stats` that exist without reaching a run: the permutation null (no
+config key sets `max_permutation_p`, so no scorecard has carried a p-value) and
+the truncation harness. The plan is `docs/plans/m3-full.md`.
 
 Known open questions (decide when reached, log when decided): margin
 modeling (M2); multi-instrument portfolio accounting (post-M4); Welford vs
