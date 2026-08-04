@@ -4169,3 +4169,43 @@ propose a superseding entry — don't silently diverge.
   acceptance run on real ES contracts. The archive holds 69 curated ES
   contracts at `1m`, so the acceptance run is data-ready and blocked only on
   the orchestration.
+- **D-0116** (2026-08-04) -- **A mutation is restored against its PRE-MUTATION
+  blob, by unconditional copy-back, and `git checkout -- <file>` is not a
+  sanctioned mechanism.** Amending D-0113's §7 bullet one day after it landed,
+  because that bullet listed the destructive mechanism first and unqualified,
+  and a session following it exactly destroyed an uncommitted feature.
+  **Recording the incident was not enough.** D-0115 recorded it, and
+  `DECISIONS.md` is append-only so that was the right home for the record — but
+  `CLAUDE.md` is the contract a future session trusts *without re-deriving*, it
+  is meant to be edited, and until this commit it still instructed the next
+  session to run `git checkout -- <file>`. That is §8.1's failure exactly: a
+  contract file saying the opposite of what the record knows.
+  **The reframing is what makes the trap inexpressible.** The reference is the
+  **pre-mutation blob**, printed before the edit; a restore is proven by
+  equality against *that*, never against `HEAD`. Say it that way and
+  `git checkout --` is obviously wrong on uncommitted work without anybody
+  having to remember a condition — it restores to `HEAD`, which equals the
+  pre-mutation state only by coincidence. Say it the old way and the mechanism
+  looks like a convenience. This is the same device as D-0090's
+  `max(ts_recv)`-not-`max(expiration)`: two spellings that agree on the common
+  case and differ silently on the one that matters, so the rule names the one
+  that is always right rather than the one that usually is.
+  **One mechanism, not two.** A mechanism safe only in a condition nobody
+  checks is a trap rather than an option, so the amended bullet has a single
+  procedure — unconditional copy, edit, copy back, print both blobs — and the
+  `||`, one-mutation-at-a-time and isolated-attribution clauses are unchanged.
+  **Both incidents are named in the rule**, as its siblings are: the
+  `2>/dev/null ||` backup whose fallback never ran and stacked three mutations,
+  and the `git checkout -- config.rs` that reverted an uncommitted feature,
+  `b4dace01` → `4da245fe`. Both were caught **only** because the protocol
+  prints what it did, which is the argument for printing.
+  **Gate names now sit beside gate hashes** (`docs/MILESTONES.md`). A batched
+  sweep that greps for a test name which does not exist prints nothing and
+  looks identical to a green gate; on 2026-08-04 a guessed
+  `the_truncation_hash_is_pinned` produced no output while the real name was
+  `the_truncation_sweep_is_pinned`, and eight of nine gates were nearly
+  reported as nine. The table's third column now names the exact command or
+  `#[test]` per gate, and the instruction beside it is to run them individually
+  and treat a gate that printed nothing as RED until proven otherwise. A
+  verification whose silence is indistinguishable from success is not a
+  verification.

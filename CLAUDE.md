@@ -302,18 +302,27 @@ crate lands, delete its placeholder comment from the relevant `Cargo.toml`.
   gate is still unverified until each control has been broken deliberately
   and watched firing, and the record says which mutation each one caught.
 - **How a mutation is run, because the protocol has its own failure mode.**
-  Restore via `git checkout -- <file>`, or prove restoration with
-  `git hash-object` before and after and print both. **One mutation at a
-  time, never stacked** — and an attribution claim ("this control caught
-  that defect") may only come from a run where that mutation was the *only*
-  one applied. **No silent fallback in the backup path.** On 2026-08-04 a
-  backup written as `cp f /tmp/f.bak 2>/dev/null || cp f f.bak` succeeded on
-  its first branch, so the fallback never ran, the restore silently failed,
-  and three mutations stacked; the run could not say which control caught
-  which defect and every attribution had to be re-measured in isolation. The
-  cost was one wasted pass, and it would have been a wrong entry in the
-  decision log had nobody re-run it. A `||` in a restore path is the same
-  class of bug as a scripted edit that matches nothing (§8.1).
+  **The reference is the PRE-MUTATION blob.** Print
+  `git hash-object <file>` *before* the edit; that value — not `HEAD`, not
+  "what the file looked like this morning" — is what a restore is proven
+  against, and it is printed again after. One mechanism and only one:
+  **take an unconditional copy, edit, then copy back and print both blobs.**
+  `git checkout -- <file>` is **not** a sanctioned restore: it restores to
+  `HEAD`, which equals the pre-mutation state only when the file happened to
+  be committed, and a mechanism that is safe only in a condition nobody
+  checks is a trap rather than a second option. **One mutation at a time,
+  never stacked** — an attribution claim ("this control caught that defect")
+  may only come from a run where that mutation was the *only* one applied.
+  **No `||` in a backup or restore path.** Two incidents, both on
+  2026-08-04, both caught only because the protocol prints what it did: a
+  backup written `cp f /tmp/f.bak 2>/dev/null || cp f f.bak` succeeded on its
+  first branch so the fallback never ran, three mutations stacked, and no
+  attribution survived; and a restore written `git checkout -- config.rs`
+  reverted an **uncommitted** feature to `HEAD` and destroyed it outright,
+  blob `b4dace01` → `4da245fe`, visible only because the blob was printed. A
+  `||` in a restore path, and a restore aimed at `HEAD` instead of at the
+  pre-mutation blob, are the same class of bug as a scripted edit that
+  matches nothing (§8.1).
 - **When two things disagree, add the third case that makes them agree** —
   it turns a difference into a diagnosis. A test proving captured and
   reconstructed equity differ says only "something differs"; the companion

@@ -426,17 +426,26 @@ The quant-research payload. Specs live in `crucible-funnel` module docs.
       once already (D-0108), and a table that lags the code re-creates exactly
       that:
 
-      | gate | hash | pinned in |
+      **The third column is load-bearing.** A batched sweep that greps for a
+      test name which does not exist prints nothing and looks exactly like a
+      green gate — on 2026-08-04 a guessed `the_truncation_hash_is_pinned`
+      silently produced no output while the real name was
+      `the_truncation_sweep_is_pinned`, and eight of nine gates were nearly
+      reported as nine. Run them individually (`--test-threads=1`, or one
+      invocation per gate) against the names below, and treat a gate that
+      printed nothing as RED until proven otherwise.
+
+      | gate | hash | produced by |
       |---|---|---|
-      | demo | `b55747513df596ed` | docs |
-      | combo | `0e1ab52d474b862b` | docs |
-      | walk-forward | `711e1cb34a2ee2b4` | docs |
-      | funnel (`combo-smoke`) | `2f430893d2a79a8f` | docs |
-      | S0 (`s0-smoke`) | `e74766eb3f7becfc` | docs, D-0107 |
-      | permutation null | `9fe41f6f5b3653e7` | `stats/permutation/tests.rs` |
-      | truncation | `91b9ff5b9bbcdb25` | `stats/truncation/tests.rs` |
-      | deflated Sharpe | `dc7f94f25235df6c` | `stats/deflated/tests.rs` |
-      | **block-B battery** | **`ef703dfd8d19fdd3`** | `stats/pbo/pinned.rs`, D-0110 |
+      | demo | `b55747513df596ed` | `crucible demo --hash-only` |
+      | combo | `0e1ab52d474b862b` | `crucible combo --config configs/combo-smoke.toml --run --hash-only` |
+      | walk-forward | `711e1cb34a2ee2b4` | `crucible walk-forward --config configs/combo-smoke.toml --hash-only` |
+      | funnel | `2f430893d2a79a8f` | `crucible funnel --config configs/combo-smoke.toml --out <tmp> --hash-only` |
+      | S0 | `e74766eb3f7becfc` | `crucible funnel --config configs/s0-smoke.toml --out <tmp> --hash-only` (D-0107) |
+      | permutation null | `9fe41f6f5b3653e7` | `stats::permutation::tests::the_permutation_null_is_pinned` |
+      | truncation | `91b9ff5b9bbcdb25` | `stats::truncation::tests::the_truncation_sweep_is_pinned` |
+      | deflated Sharpe | `dc7f94f25235df6c` | `stats::deflated::tests::the_deflated_sharpe_determinism_hash_is_pinned` |
+      | **block-B battery** | **`ef703dfd8d19fdd3`** | `stats::pbo::pinned::the_block_b_battery_is_pinned` (D-0110) |
 
       **The planted defect they were measured against already existed**:
       `controls::LeakyZScore` (a full-sample z-score, §2.1's named lookahead),
