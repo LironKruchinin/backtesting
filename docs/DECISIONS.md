@@ -4428,3 +4428,61 @@ propose a superseding entry — don't silently diverge.
   each of which now carries an execution assumption that is named rather than
   measured, which is what §2.4 has demanded all along. The honest form of this
   decision is a stated assumption, not a quiet one.
+- **D-0121** (2026-08-06) -- **A pooled contract is replayed over a LEAD-IN plus
+  its front window, and a contract whose own curated data cannot supply the
+  grid's warmup is SKIPPED with a count and a reason rather than evaluated on a
+  shorter window.** Implements D-0119's warmup clause, which was asserted and
+  never wired: that entry ruled that pre-front bars supply warmup so "the whole
+  ~66-session front window is available for train and test", and the collector
+  was handed the front window alone, so the front window was doing double duty
+  as both the warmup source and the evaluation window.
+  **The decisive reason is COUPLING, not the chain head.** Without a lead-in,
+  warmup is taken out of the front window, so the number of evaluable sessions
+  *falls as the grid's warmup rises*. "Does this pool clear 250 sessions?" then
+  depends on the indicator periods: a config with a 5,000-bar Bollinger needs
+  more contracts than one with a 20-bar SMA, for a reason nobody reading either
+  config would predict. With the lead-in wired, the evaluable window **is** the
+  front window and the pooled session count is a property of the pool alone —
+  which is what makes an admission floor answerable before the grid is chosen.
+  **Nothing measured so far is wrong, and the size of the old error is stated
+  rather than waved at**: at a 200-bar warmup it is ~0.15 of a session per
+  contract. It also retroactively repairs D-0119's geometry argument, whose
+  fourth reason was explicitly that the entire front window is available for
+  train and test — true only with the lead-in, so that table was approximately
+  right for a reason that had not been built.
+  **The lead-in comes from the contract's OWN curated partition, never the
+  previous contract's bars.** Reaching back past `front_start` into the outgoing
+  contract's series is stitching, which is D-0076 territory and needs a
+  supersession rather than an implementation detail. Reading one instrument's
+  partition makes that structural rather than arithmetic: there are no other
+  contract's bars in it to reach.
+  **When the lead-in suffices, evaluation begins exactly at `front_start`** —
+  not at the warmup's end. The third option is the wrong one and is named here
+  so it is not rediscovered as a convenience: letting evaluation start *late*
+  when the lead-in is short reintroduces exactly the grid-dependence above, for
+  precisely the contracts nearest the chain head, and does it without a count.
+  Skip-with-a-reason is right because it refuses to half-answer.
+  **`InsufficientWarmup { available, needed }` joins `NoCompleteFold`**, and
+  like it the count prints even when zero (D-0070's declared-filter pattern). A
+  pool quietly dropping a contract reports a smaller sample than it declared and
+  nothing on the page would say so.
+  **Measured before it was ruled**, on all 66 curated ES contracts: the chain
+  head `ESM2010` has **0** pre-front bars — its curated data and its front
+  window both begin 2010-06-06 — while every other contract has at least 5,043
+  and typically 13,000–29,000. `ESM2010` is also short (6,885 front-window bars,
+  ~5 sessions against ~64), so at any realistic geometry it is already skipped
+  as `NoCompleteFold`. **That it is caught today is a coincidence of this
+  archive, not a rule**, which is the same argument that decided the trailing
+  fragment: an archive head landing earlier in a contract's life gives a chain
+  head with ample sessions and no warmup at all.
+  **The converse control is the one that carries the attribution**, for the
+  third time in this block: a contract with ample lead-in must lose *nothing* —
+  no fewer evaluable sessions than its front window holds — because a lead-in
+  implementation that silently shortened every contract would pass the skip test
+  while being wrong everywhere. Written first, as in C4b-i's D4 fix and the
+  trailing-fragment drop.
+  **The lead-in range and the evaluation range stay distinct in the type**, not
+  one range plus a bar count. They answer different questions — what may be read
+  versus what may be judged — and D-0119 already separates them in prose; a
+  signature that conflated them would be the seam where the distinction gets
+  lost, which is why `eval_range` became a named seam in the first place.
