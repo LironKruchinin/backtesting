@@ -4860,3 +4860,54 @@ propose a superseding entry — don't silently diverge.
   for the reason D-0075 gives about absent numbers generally: a reader who meets
   "ten gates" before C7 lands would conclude the pooled pin exists, which is a
   more flattering claim than the true one.
+- **D-0129** (2026-08-07) -- **A pooled scorecard prints `max DD` as a NAMED
+  HOLE — "not pooled: path statistic (D-0119)" — never a blank, never a
+  per-contract number, and never a dropped column.**
+  The cost-sensitivity table is mandatory (§2.4) and has five columns; a pooled
+  run can honestly fill four of them. Returns and Sharpes come from the folded
+  sufficient statistics (D-0127) and fees are summed — a fee is charged per fill
+  and a fill belongs to exactly one contract, so summing double-counts nothing,
+  which is the trades-sum-sessions-union asymmetry (D-0114, D-0119) applied to a
+  third quantity. The drawdown is the one that cannot: a curve whose seams join
+  contracts months apart describes a path no account walked.
+  **Each of the three alternatives fails differently, which is why the hole
+  wins.** A blank cell reads as *not applicable*. A per-contract number wearing
+  a pooled label is the silent-corruption case D-0119 exists to prevent — the
+  most dangerous, because it is a plausible number rather than an obvious gap.
+  Dropping the column hides that the question was asked at all. The precedent is
+  this module's own: the plateau heatmap, the regime table and the permutation
+  null already render as named holes so a reader can tell "there wasn't one"
+  from "it passed".
+  **§9's honesty-box rule does not bite here, and the two rules look alike
+  enough to be worth separating.** The honesty box — config hash, git sha,
+  manifest ids, seed — ABORTS the render when a field is empty, and it is the
+  one place in this codebase where an omission does. `max DD` is not in it; it
+  is a cell in a results table, governed by the weaker but different rule that a
+  hole must be visible as a hole.
+  **The guarantee is in the TYPE, not in the renderer's discipline.**
+  `PooledCostLevel` has no `max_drawdown_pct` field, so a renderer holding one
+  cannot print a pooled drawdown by accident — there is nothing to print. Same
+  device as `PooledSeries` one layer down and `sharpe_and_shape` one below that
+  (D-0119's "a computed-then-discarded drawdown is one refactor away from being
+  surfaced").
+  **Controls, and they discriminate rather than firing together.** Four tests:
+  the hole appears once per row and the poolable numbers are printed; the row
+  keeps five cells, counted structurally rather than by header text, because a
+  header survives a column whose cells are gone; the cell is not blank; and the
+  cell carries no digits, with the digit scan asserted to match in the return
+  and fee cells of the same rows so its silence in the hole cells is evidence
+  rather than a broken pattern. Two mutations under D-0116 (pre-mutation blob
+  `d45dbe3e`, restored and re-printed identical after each): rendering a blank
+  failed three of the four, and rendering a plausible `12.34%` failed two — and
+  **not the same two**, which is the property being claimed. A blank and a
+  number are different defects and the suite tells them apart.
+  **What is still owed, named rather than left to be discovered.** The scorecard
+  also prints a "whole replay" column (`win_rate`, `max_drawdown_pct` over the
+  unsliced run) and a worst-day table. A pooled run has no single whole replay,
+  so that column needs the same treatment on the same precedent; the worst-day
+  records are per-day rather than per-path and pool as a set (D-0071), so they
+  do not. Wiring both is C6b-iii's, and this entry is where the obligation is
+  written down so the wiring cannot quietly skip it.
+  **Nothing renders this yet.** D-0117 still refuses every pooled config; the
+  renderer is reachable only from its tests, like every other pooled piece
+  before it.

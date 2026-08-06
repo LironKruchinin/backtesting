@@ -244,6 +244,87 @@ svg{display:block;max-width:100%;height:auto;margin:.5rem 0}
 </style></head><body>
 "#;
 
+/// The text a pooled run prints where a single-contract run prints a drawdown.
+///
+/// One constant, referenced by the renderer and by its tests, so a test cannot
+/// pass against a string the page stopped emitting.
+pub const POOLED_DRAWDOWN_HOLE: &str = "not pooled: path statistic (D-0119)";
+
+/// One cost-sweep level of a POOLED run, as a scorecard may honestly print it.
+///
+/// **There is no `max_drawdown_pct` field, and that is the type doing the
+/// work.** A drawdown over a curve whose seams join contracts months apart
+/// describes a path no account walked (D-0119), so the pooled level cannot
+/// offer one — the same device as `PooledSeries` one layer down and
+/// `sharpe_and_shape` one layer below that. A renderer holding this type
+/// cannot print a pooled drawdown by accident, because there is nothing to
+/// print.
+///
+/// What it does carry pools honestly: `total_return_pct` and `sharpe_naive`
+/// come from the folded sufficient statistics (D-0127), and `fees_nano_usd` is
+/// a sum — a fee is charged per fill, fills belong to exactly one contract, so
+/// summing double-counts nothing. That is the trades-sum-sessions-union
+/// asymmetry (D-0114, D-0119) applied to a third quantity.
+#[derive(Clone, Copy, Debug)]
+pub struct PooledCostLevel {
+    /// Half-spread in half-ticks, or `None` for the `free_fills` S1 screen row,
+    /// which is not a level of the sweep but is printed in the same table.
+    pub half_ticks: Option<i64>,
+    /// Pooled out-of-sample return.
+    pub total_return_pct: f64,
+    /// Pooled out-of-sample naive Sharpe.
+    pub sharpe_naive: Option<f64>,
+    /// Fees across every pooled contract.
+    pub fees_nano_usd: i64,
+}
+
+/// Renders the cost-sensitivity table for a POOLED run.
+///
+/// Column-for-column the single-contract table, with `max DD` rendered as a
+/// **named hole** rather than a number, a blank or a dropped column
+/// (ruled 2026-08-07, on the plateau-heatmap and permutation-null precedent
+/// this module's docs already set). Each alternative fails a different way: a
+/// blank reads as not-applicable, a per-contract number wearing a pooled label
+/// is the silent-corruption case D-0119 exists to prevent, and dropping the
+/// column hides that the question was asked at all.
+///
+/// §9's honesty-box rule does not bite here and the distinction is worth
+/// stating, because the two rules look alike. The honesty box — config hash,
+/// git sha, manifest ids, seed — ABORTS the render when a field is empty, and
+/// it is the one place an omission does. `max DD` is not in it; it is a cell in
+/// a results table, where the governing rule is that a reader must be able to
+/// tell "there wasn't one" from "it passed".
+#[must_use]
+pub fn pooled_cost_sweep_table(levels: &[PooledCostLevel], kill_half_ticks: i64) -> String {
+    let mut h = String::new();
+    h.push_str(
+        "<h3>Cost sensitivity <span class=\"dim\">(pooled)</span></h3><p class=\"dim\">Each          level is a separate replay of every pooled contract, not an adjustment to a finished          curve. Returns, Sharpes and fees pool across contracts; the drawdown does not, and says          so in its own column rather than being omitted.</p>         <div class=\"wrap\"><table><thead><tr><th>half-spread</th><th>OOS return</th>         <th>max DD</th><th>OOS Sharpe</th><th>fees</th></tr></thead><tbody>",
+    );
+    for level in levels {
+        let label = match level.half_ticks {
+            Some(ht) => {
+                let marker = if ht == kill_half_ticks {
+                    " <span class=\"dim\">← kill level</span>"
+                } else {
+                    ""
+                };
+                format!("{} tick{marker}", crate::stages::render_half_ticks(ht))
+            }
+            None => "free_fills <span class=\"dim\">(S1 screen)</span>".to_owned(),
+        };
+        let _ = write!(
+            h,
+            "<tr><td>{label}</td><td>{:+.2}%</td><td class=\"dim\">{}</td><td>{}</td>             <td>{}</td></tr>",
+            level.total_return_pct,
+            POOLED_DRAWDOWN_HOLE,
+            opt(level.sharpe_naive),
+            usd(level.fees_nano_usd),
+        );
+    }
+    h.push_str("</tbody></table></div>");
+    h
+}
+
 fn esc(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -1293,5 +1374,142 @@ mod tests {
         ] {
             assert!(html.contains(required), "missing {required}");
         }
+    }
+}
+
+#[cfg(test)]
+mod pooled_sweep_tests {
+    use super::{POOLED_DRAWDOWN_HOLE, PooledCostLevel, pooled_cost_sweep_table};
+
+    /// Four sweep levels and the S1 screen, all with DIFFERENT numbers, so a
+    /// renderer that printed one row five times could not pass.
+    fn levels() -> Vec<PooledCostLevel> {
+        vec![
+            PooledCostLevel {
+                half_ticks: Some(0),
+                total_return_pct: 4.25,
+                sharpe_naive: Some(1.11),
+                fees_nano_usd: 1_000_000_000,
+            },
+            PooledCostLevel {
+                half_ticks: Some(1),
+                total_return_pct: 2.50,
+                sharpe_naive: Some(0.77),
+                fees_nano_usd: 2_000_000_000,
+            },
+            PooledCostLevel {
+                half_ticks: Some(2),
+                total_return_pct: -0.75,
+                sharpe_naive: Some(-0.22),
+                fees_nano_usd: 3_000_000_000,
+            },
+            PooledCostLevel {
+                half_ticks: Some(4),
+                total_return_pct: -3.40,
+                sharpe_naive: None,
+                fees_nano_usd: 4_000_000_000,
+            },
+            PooledCostLevel {
+                half_ticks: None,
+                total_return_pct: 9.90,
+                sharpe_naive: Some(2.02),
+                fees_nano_usd: 0,
+            },
+        ]
+    }
+
+    /// **The named hole is present on every row**, and the pooled numbers that
+    /// CAN be printed are printed.
+    ///
+    /// What would this do if the thing it looks for were absent? A page that
+    /// rendered nothing at all would fail the positive half; a page that
+    /// rendered numbers everywhere would fail the hole half. Both halves are
+    /// asserted, which is why neither is satisfiable alone.
+    #[test]
+    fn every_pooled_row_names_the_hole_and_prints_what_pools() {
+        let html = pooled_cost_sweep_table(&levels(), 2);
+        assert_eq!(
+            html.matches(POOLED_DRAWDOWN_HOLE).count(),
+            5,
+            "one named hole per row, including the S1 screen: {html}"
+        );
+        for shown in [
+            "+4.25%", "+2.50%", "-0.75%", "-3.40%", "+9.90%", "1.11", "2.02",
+        ] {
+            assert!(
+                html.contains(shown),
+                "{shown} missing from:
+{html}"
+            );
+        }
+        assert!(
+            html.contains("← kill level"),
+            "the kill level must still be marked"
+        );
+        assert!(
+            html.contains("free_fills"),
+            "the S1 screen row shares the table"
+        );
+    }
+
+    /// **The column is not dropped**, which is one of the three wrong answers.
+    ///
+    /// Dropping it hides that the question was asked. Counted structurally —
+    /// five cells per row, the same as the single-contract table — rather than
+    /// by looking for a header string, because a header can survive a column
+    /// that no longer has cells under it.
+    #[test]
+    fn the_pooled_table_keeps_five_columns_per_row() {
+        let html = pooled_cost_sweep_table(&levels(), 2);
+        assert!(html.contains("<th>max DD</th>"), "the header stays");
+        for row in html.split("<tr>").skip(2) {
+            let cells = row.matches("<td").count();
+            if cells > 0 {
+                assert_eq!(cells, 5, "a pooled row must keep five cells: {row}");
+            }
+        }
+    }
+
+    /// **The hole is not a blank**, which is the second wrong answer: an empty
+    /// cell reads as not-applicable.
+    #[test]
+    fn the_hole_is_never_an_empty_cell() {
+        let html = pooled_cost_sweep_table(&levels(), 2);
+        assert!(
+            !html.contains("<td class=\"dim\"></td>"),
+            "an empty drawdown cell reads as not-applicable: {html}"
+        );
+    }
+
+    /// **The hole is not a number**, which is the third and worst wrong answer:
+    /// a per-contract drawdown wearing a pooled label is silent corruption.
+    ///
+    /// The check is that the drawdown cell carries no digits at all. It is a
+    /// positive control on itself: the same scan finds digits in the return
+    /// and fee cells of the very same rows, so the pattern is known to match
+    /// where numbers do exist.
+    #[test]
+    fn no_pooled_drawdown_cell_carries_a_number() {
+        let html = pooled_cost_sweep_table(&levels(), 2);
+        let mut hole_cells = 0;
+        let mut numeric_cells = 0;
+        for cell in html.split("<td").skip(1) {
+            let body = cell.split("</td>").next().unwrap_or("");
+            if body.contains(POOLED_DRAWDOWN_HOLE) {
+                hole_cells += 1;
+                let after = body.replace("D-0119", "");
+                assert!(
+                    !after.chars().any(|ch| ch.is_ascii_digit()),
+                    "a pooled drawdown cell must carry no measurement: {body}"
+                );
+            } else if body.chars().any(|ch| ch.is_ascii_digit()) {
+                numeric_cells += 1;
+            }
+        }
+        assert_eq!(hole_cells, 5);
+        assert!(
+            numeric_cells >= 10,
+            "the digit scan must be seen matching where numbers DO belong, or its              silence in the hole cells proves nothing: {numeric_cells}"
+        );
     }
 }
