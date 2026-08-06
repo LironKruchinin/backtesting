@@ -304,61 +304,69 @@ fn sharpe_dispersion(combos: &[ComboWalkForward]) -> Option<f64> {
     (sd.is_finite() && sd > 0.0).then_some(sd)
 }
 
-/// One contract's contribution to a combo's [`Evidence`], plus the artifacts
-/// the report needs beside it.
+/// One contract's contribution to a combo's pooled [`Evidence`], and the
+/// artifacts a report renders beside it.
 ///
-/// Four fields because [`ComboOutcome`] needs `free_fill_oos`, `sweep`,
-/// `controls` and `deflated` to render, while [`assess`] needs `evidence` — so
-/// the per-contract half cannot hand back evidence alone.
+/// Two halves, worth naming because different code reads them. The
+/// **sufficient statistics** — `free_fill_oos_stats`, `costed_oos_stats`,
+/// `oos_trades`, and the `ReturnStats` travelling inside each [`CostLevel`]
+/// and each [`Control`] — are what [`pool_contract_evidence`] folds across
+/// contracts. The **summaries** are what a scorecard prints; rendering a
+/// *pooled* run is C6b's problem and not this type's.
+///
+/// Nothing grid-level lives here: no trial count, no PBO, no deflated Sharpe.
+/// Those are properties of the search rather than of a contract, and a
+/// per-contract copy of one is a second opinion waiting to disagree with the
+/// first. They enter once, through [`PoolingInputs`], at the single point
+/// where N contributions become one [`Evidence`].
 struct ContractEvidence {
     free_fill_oos: crucible_engine::Summary,
-    /// Sufficient statistics of the S1 free-fill series, so C6 can pool the
-    /// screen across contracts the same way it pools everything else.
+    /// Sufficient statistics of the S1 free-fill series, so the screen pools
+    /// across contracts the same way everything else does.
     ///
     /// The sweep's and the controls' statistics need no field here: they travel
     /// inside [`CostLevel`] and [`Control`], beside the summaries they describe,
     /// which is where they cannot drift out of step with them.
-    #[expect(
-        dead_code,
-        reason = "the carrier lands one commit ahead of its consumer, as every                   other seam in Block C did. C6a-iii-b reads it when it pools N                   of these into one Evidence; until then nothing may, because                   D-0117 still refuses every pooled config."
-    )]
     free_fill_oos_stats: ReturnStats,
+    /// Sufficient statistics of the **costed** out-of-sample series — the one
+    /// the headline Sharpe, the deflation and both control comparisons are
+    /// about.
+    ///
+    /// Copied out of [`ComboWalkForward`] rather than borrowed from it, which
+    /// is what makes this type sufficient for pooling: a pooling step still
+    /// holding the walk-forward result would be one refactor away from reaching
+    /// for `max_drawdown_pct`, and a drawdown over a curve stitched across
+    /// contracts describes a path nobody walked (D-0119). Forty-eight bytes is
+    /// what that guarantee costs.
+    costed_oos_stats: ReturnStats,
+    /// Round-trips this contract closed inside its out-of-sample windows,
+    /// carried for the same reason and at the same price.
+    oos_trades: usize,
     sweep: Vec<CostLevel>,
     controls: [Control; 2],
-    evidence: Evidence,
 }
 
-/// Produces one contract's evidence **without assessing it**.
+/// Produces one contract's contribution **without assessing it**.
 ///
-/// This is the assess seam. What was missing was never that [`assess`] is a
-/// separate function — it already was — but that there was no way to obtain a
-/// contract's evidence on its own: the S1 screen, the cost sweep, both
-/// mandatory controls and the `Evidence` construction were inline in
-/// [`run_funnel`], which then assessed immediately. Block C needs N of these
-/// pooled into one `Evidence` and assessed **once** (C6a-iii-b); naming the
-/// boundary while it is still singular is what makes that a generalization
-/// rather than a rewrite.
+/// This is the assess seam, now carrying the load it was named for. C6a-iii-a
+/// lifted the S1 screen, the cost sweep and both mandatory controls out of
+/// [`run_funnel`] unaltered, so that a moved gate would have exactly one
+/// candidate cause. This step takes the other half of that promise: the
+/// `Evidence` construction moves **out** of here and into
+/// [`pool_contract_evidence`], because an `Evidence` is a statement about the
+/// pool and a contract is not the pool.
 ///
-/// A literal lift: the body below is the moved lines, unaltered. `costed`
-/// arrives by reference and `&costed` still coerces; `pbo` arrives as the
-/// whole `Result` so `pbo.as_ref().ok()` reads exactly as it did. Those
-/// choices exist so that nothing in the body had to be edited while being
-/// moved — a re-associated reduction here is D-0122's defect class in the
-/// function producing every Sharpe the funnel reports.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "a literal lift takes what the inline block read; bundling them               would edit the call shape in the commit whose only proof is that               nothing changed. C6a-iii-b revisits the signature when it pools."
-)]
+/// The grid-level argument list went with it. The trial count, the dispersion,
+/// the de-annualization and the PBO were only ever here to build a
+/// per-contract `Evidence` that nothing now assesses, so the
+/// `too_many_arguments` note that deferred this signature to C6a-iii-b is
+/// discharged by deletion rather than by a bundle: four arguments remain, and
+/// every one of them is genuinely per contract.
 fn contract_evidence(
     inputs: &FunnelInputs<'_>,
     index: usize,
     costed: &ComboWalkForward,
-    test_windows: &[std::ops::Range<usize>],
-    oos_sessions: usize,
-    n_trials: usize,
-    trial_sharpe_dispersion: Option<f64>,
-    deannualize: &dyn Fn(f64) -> f64,
-    pbo: &Result<crate::stats::pbo::Pbo, crate::stats::pbo::PboUnavailable>,
+    test_windows: &[Range<usize>],
 ) -> ContractEvidence {
     // Step 3: the S1 screen, cost-free. The only sanctioned FreeFills use.
     let (free_fill_oos, free_fill_oos_stats) =
@@ -393,18 +401,203 @@ fn contract_evidence(
         buy_and_hold_control(inputs, test_windows, costed.oos_stitched.total_return_pct),
     ];
 
-    let evidence = Evidence {
+    ContractEvidence {
+        free_fill_oos,
+        free_fill_oos_stats,
+        costed_oos_stats: costed.oos_stitched_stats,
         oos_trades: costed.oos_stitched.round_trips,
-        oos_sessions,
-        free_fill_return_pct: free_fill_oos.total_return_pct,
-        costed_return_pct: costed.oos_stitched.total_return_pct,
-        costed_sharpe: costed.oos_stitched.sharpe_naive,
-        sharpe_at_kill_level: sweep
-            .iter()
-            .find(|l| l.half_ticks == inputs.criteria.kill_if_dead_half_ticks)
-            .and_then(|l| l.oos_stitched.sharpe_naive),
-        random_entry_return_pct: controls[0].return_pct(),
-        buy_and_hold_return_pct: controls[1].return_pct(),
+        sweep,
+        controls,
+    }
+}
+
+/// What every contract in one pooled combo shares.
+///
+/// One struct rather than eight parameters, and it is the signature revision
+/// [`contract_evidence`]'s `too_many_arguments` note deferred to this step: the
+/// grid-level half of that argument list moved here, and the per-contract
+/// function stopped taking any of it.
+///
+/// Everything in it is shared **by construction**, which is what makes pooling
+/// something to do once rather than per contract and reconcile afterwards: PBO
+/// is a property of the search (D-0109), the trial count is the registry's and
+/// nobody else's (D-0083), and the deflation units come from the config
+/// (D-0125). There is no per-contract variant of any of them for a pooling step
+/// to invent.
+struct PoolingInputs<'a> {
+    /// **Distinct** out-of-sample trading days across every pooled contract —
+    /// the union, never the sum (D-0114).
+    ///
+    /// Supplied by the caller rather than derived here, and that is the design
+    /// rather than a shortcut. Sufficient statistics carry no day identity, so
+    /// two contracts' `ReturnStats` cannot tell this function they traded the
+    /// same Tuesday; **summing is the only thing it could do** if it derived
+    /// the number, and summing is precisely the defect D-0114 exists to
+    /// prevent. The union is computed where the day keys actually are, by
+    /// [`crate::pooling::PooledSessions`].
+    distinct_oos_sessions: usize,
+    /// Trials charged to the hypothesis family, read from the registry and
+    /// nowhere else, so voided runs are already excluded (D-0083).
+    n_trials: usize,
+    /// The grid's probability of backtest overfitting, or `None` when CSCV
+    /// could not be computed.
+    pbo: Option<f64>,
+    /// Dispersion of the grid's out-of-sample Sharpes, already converted to
+    /// per-observation units (D-0125).
+    trial_sharpe_dispersion: Option<f64>,
+    /// Annualized Sharpe to per-observation Sharpe, the other half of D-0125.
+    deannualize: &'a dyn Fn(f64) -> f64,
+    /// The sweep level the `kill_if_dead` criterion reads.
+    kill_if_dead_half_ticks: i64,
+    /// Declared capital. Every contract's stitched curve starts here, which is
+    /// what makes a pooled final equity `initial + Σ deltas` and therefore
+    /// exact in integer arithmetic (D-0127).
+    initial_cash_nano_usd: NanoUsd,
+    /// Annualization for the pooled Sharpe.
+    bars_per_year: f64,
+}
+
+/// A series pooled across contracts, and the two numbers such a series may
+/// honestly report.
+///
+/// Deliberately **not** a [`Summary`]. A `Summary` carries `max_drawdown_pct`,
+/// and a drawdown over a curve whose seams join contracts months apart
+/// describes a path no account walked (D-0119, D-0127). This type cannot
+/// express one — which is `crucible_engine::sharpe_and_shape`'s argument
+/// applied one level up: a computed-then-discarded drawdown is one refactor
+/// away from being surfaced, and whoever does that refactor sees a field
+/// sitting there looking available.
+struct PooledSeries {
+    /// The folded statistics themselves, retained because a deflation needs the
+    /// shape of the very series its Sharpe came from and never a shape
+    /// recomputed from another one.
+    stats: ReturnStats,
+    /// Pooled out-of-sample total return.
+    total_return_pct: f64,
+    /// Pooled out-of-sample naive Sharpe, absent on a series too short or too
+    /// flat to have one.
+    sharpe_naive: Option<f64>,
+}
+
+impl PoolingInputs<'_> {
+    /// Folds N contracts' statistics for one series into the pooled answer.
+    ///
+    /// **In declared contract order**, which is part of the definition rather
+    /// than an implementation detail (D-0127): `ReturnStats::combine` is not
+    /// associative in the last bits, so a fold in completion order would be a
+    /// different number — and §2.2 already requires parallel results to merge
+    /// by run identity rather than by whichever finished first.
+    ///
+    /// The total return is formed as **final over initial**, not delta over
+    /// initial. The same quantity arithmetically; not the same float
+    /// operations, and the first spelling is `Summary::compute`'s — so a pool
+    /// of one is bit-identical to the number that combo already reported.
+    /// That identity is what keeps this step inert while D-0117 holds every
+    /// pool to one contract, and it is asserted by
+    /// `a_pool_of_one_reproduces_the_contracts_own_numbers`.
+    ///
+    /// # Panics
+    /// On an empty iterator. Every call site builds it as
+    /// `once(first).chain(rest)`, so a pool of nothing is unrepresentable at
+    /// the call site and arriving here would be a wiring bug rather than a
+    /// data condition.
+    fn pooled_series(&self, series: impl Iterator<Item = ReturnStats>) -> PooledSeries {
+        let stats = series.reduce(ReturnStats::combine).expect(
+            "INVARIANT: pool_contract_evidence takes the first contract separately and chains \
+             the rest, so every fold reaching here has at least one operand",
+        );
+        let initial = self.initial_cash_nano_usd;
+        let total_return_pct = if initial == 0 {
+            0.0
+        } else {
+            (nano_usd_to_f64(initial + stats.net_delta_nano_usd) / nano_usd_to_f64(initial) - 1.0)
+                * 100.0
+        };
+        PooledSeries {
+            total_return_pct,
+            sharpe_naive: stats.sharpe(self.bars_per_year),
+            stats,
+        }
+    }
+}
+
+/// N contracts' contributions, pooled into the one [`Evidence`] a combo is
+/// judged on — so [`assess`] runs **once per combo**, never once per contract.
+///
+/// Assessing per contract and reconciling verdicts afterwards was the other
+/// option, and it is not a near miss. Every criterion in [`assess`] is a
+/// threshold on a pooled quantity, so a rule for combining N verdicts ("most
+/// of them", "all of them", "the worst") would be a second gate, unwritten and
+/// unregistered, sitting behind the pre-registered one. And it would not even
+/// work: Block C exists because one contract's ~60 sessions cannot clear a
+/// registered 250-session floor, and N contracts each failing that floor
+/// separately is the same answer at N times the cost.
+///
+/// The pool is `(first, rest)` rather than one slice because a pool of nothing
+/// is not a pool — [`crate::pooling::PoolingError::NoContracts`] refuses it
+/// upstream, and every number here would otherwise have to be invented from an
+/// empty fold. An invented zero return is exactly the "zero that reads like a
+/// benchmark that was beaten" D-0075 refuses. Making emptiness unrepresentable
+/// costs one `&[]` at the call site.
+///
+/// # What is pooled, and how
+///
+/// **Trades are summed; sessions are not.** A round-trip belongs to exactly one
+/// contract, so two contracts' trade counts count disjoint events and adding
+/// them invents nothing. A trading day belongs to no contract: ESH2024 and
+/// ESM2024 trade the same Tuesday, so adding their session counts claims a
+/// sample twice the size of the one that exists (D-0114). That asymmetry is
+/// [`crate::pooling`]'s one arithmetic rule, and this is the function where it
+/// either holds or is quietly lost.
+///
+/// **An absent control on ANY contract makes the pooled control absent** —
+/// never "pool the ones that ran". That would compare a strategy measured over
+/// N contracts against a benchmark measured over N−1: a smaller denominator
+/// reported as a result, when D-0075 is already explicit that an absent control
+/// **fails** its criterion rather than passing it. A sweep level missing from
+/// any contract's sweep is governed by the same rule, for the same reason.
+///
+/// **Path statistics are not pooled at all**, and cannot be from here: what a
+/// fold yields is a [`PooledSeries`], which has no drawdown to offer (D-0119).
+fn pool_contract_evidence(
+    first: &ContractEvidence,
+    rest: &[ContractEvidence],
+    shared: &PoolingInputs<'_>,
+) -> Evidence {
+    let contracts = || std::iter::once(first).chain(rest.iter());
+
+    let costed = shared.pooled_series(contracts().map(|c| c.costed_oos_stats));
+    let free_fill = shared.pooled_series(contracts().map(|c| c.free_fill_oos_stats));
+
+    // `collect::<Option<Vec<_>>>` is the "any contract missing ⇒ absent" rule
+    // written as code: it short-circuits to `None` on the first contract whose
+    // sweep does not carry the level, rather than pooling the rest.
+    let sharpe_at_kill_level = contracts()
+        .map(|c| {
+            c.sweep
+                .iter()
+                .find(|l| l.half_ticks == shared.kill_if_dead_half_ticks)
+                .map(|l| l.oos_stitched_stats)
+        })
+        .collect::<Option<Vec<_>>>()
+        .and_then(|levels| shared.pooled_series(levels.into_iter()).sharpe_naive);
+
+    let control_return_pct = |which: usize| {
+        contracts()
+            .map(|c| c.controls[which].oos_stitched.as_ref().map(|(_, s)| *s))
+            .collect::<Option<Vec<_>>>()
+            .map(|stats| shared.pooled_series(stats.into_iter()).total_return_pct)
+    };
+
+    Evidence {
+        oos_trades: contracts().map(|c| c.oos_trades).sum(),
+        oos_sessions: shared.distinct_oos_sessions,
+        free_fill_return_pct: free_fill.total_return_pct,
+        costed_return_pct: costed.total_return_pct,
+        costed_sharpe: costed.sharpe_naive,
+        sharpe_at_kill_level,
+        random_entry_return_pct: control_return_pct(0),
+        buy_and_hold_return_pct: control_return_pct(1),
         // The permutation harness is not wired into the run path yet:
         // block A ships the harness and its acceptance test first
         // (docs/plans/m3-full.md).
@@ -415,26 +608,23 @@ fn contract_evidence(
         // with no Sharpe, or with a flat window that has no higher
         // moments, has no deflated Sharpe either, and that is an absence
         // rather than a zero.
-        deflated: costed.oos_stitched.sharpe_naive.and_then(|observed| {
-            let shape = costed.oos_stitched.return_shape;
+        //
+        // Pooling changes which series that is and nothing else: the shape
+        // comes off the same folded statistics the Sharpe above was read
+        // from, so the two cannot describe different samples.
+        deflated: costed.sharpe_naive.and_then(|observed| {
+            let shape = costed.stats.shape();
             crate::stats::deflated::deflated_sharpe(crate::stats::deflated::DeflationInputs {
-                observed_sharpe: deannualize(observed),
+                observed_sharpe: (shared.deannualize)(observed),
                 skew: shape.skew?,
                 kurtosis: shape.kurtosis?,
                 n_observations: shape.n_returns,
-                n_trials,
-                trial_sharpe_dispersion,
+                n_trials: shared.n_trials,
+                trial_sharpe_dispersion: shared.trial_sharpe_dispersion,
             })
         }),
-        n_trials,
-        pbo: pbo.as_ref().ok().map(|p| p.value),
-    };
-    ContractEvidence {
-        free_fill_oos,
-        free_fill_oos_stats,
-        sweep,
-        controls,
-        evidence,
+        n_trials: shared.n_trials,
+        pbo: shared.pbo,
     }
 }
 
@@ -706,30 +896,40 @@ pub fn run_funnel(
     let (deannualize, trial_sharpe_dispersion) =
         deflation_units(inputs.params.bars_per_year, trial_sharpe_dispersion);
 
+    // The grid-level half of every combo's evidence, built once. None of it
+    // varies by combo or by contract, which is the property that lets the pool
+    // below be assessed once rather than reconciled.
+    let shared = PoolingInputs {
+        distinct_oos_sessions: oos_sessions,
+        n_trials,
+        pbo: pbo.as_ref().ok().map(|p| p.value),
+        trial_sharpe_dispersion,
+        deannualize: &deannualize,
+        kill_if_dead_half_ticks: inputs.criteria.kill_if_dead_half_ticks,
+        initial_cash_nano_usd: inputs.params.initial_cash_nano_usd,
+        bars_per_year: inputs.params.bars_per_year,
+    };
+
     let mut combos = Vec::with_capacity(report.combos.len());
     for costed in report.combos {
         let index = costed.id.combo_index;
 
+        let contract = contract_evidence(inputs, index, &costed, &test_windows);
+        // `rest` is empty at the only call site in this build, and that is
+        // D-0117 holding rather than an omission: every well-formed `[pooling]`
+        // config is refused, so no funnel run has a second contract to pool.
+        // C6b is where the refusal lifts and this slice stops being empty.
+        //
+        // The single-contract path goes through the pooled one anyway, because
+        // a pool of one is bit-identical to it — which is what makes C6b a
+        // wiring change rather than a rewrite of the number five gates pin.
+        let evidence = pool_contract_evidence(&contract, &[], &shared);
         let ContractEvidence {
             free_fill_oos,
-            // Bound and discarded rather than elided with `..`: the field
-            // exists, and this is the single-contract path that has nothing to
-            // pool it with. C6a-iii-b is where it stops being discarded.
-            free_fill_oos_stats: _,
             sweep,
             controls,
-            evidence,
-        } = contract_evidence(
-            inputs,
-            index,
-            &costed,
-            &test_windows,
-            oos_sessions,
-            n_trials,
-            trial_sharpe_dispersion,
-            &deannualize,
-            &pbo,
-        );
+            ..
+        } = contract;
         // `validate_s0_report` established exact contiguous grid identity
         // before any run was claimed, so assessment and rendering cannot pick
         // different copies of a duplicate or silently miss one.
@@ -1174,5 +1374,446 @@ mod deflation_units_tests {
     fn an_absent_dispersion_is_not_invented() {
         let (_, dispersion) = deflation_units(525_949.0, None);
         assert!(dispersion.is_none());
+    }
+}
+
+#[cfg(test)]
+mod pooling_tests {
+    use super::*;
+    use crucible_engine::Summary;
+
+    /// Declared capital: $100,000, so a $1,000 move is exactly 1.00 %.
+    const CASH: NanoUsd = 100_000_000_000_000;
+    /// Daily annualization, so the Sharpes below are readable numbers.
+    const BPY: f64 = 252.0;
+    /// The sweep level `kill_if_dead` names in these fixtures.
+    const KILL: i64 = 2;
+
+    /// An equity curve from per-bar **dollar** steps, opening at [`CASH`].
+    ///
+    /// The same shape `RunTrace::pooled_with_stats` hands to `Summary::compute`
+    /// and `ReturnStats::of`, which is what makes the statistics below the ones
+    /// a real contract would actually contribute.
+    fn curve(steps: &[i64]) -> Vec<(Ts, NanoUsd)> {
+        let mut level = CASH;
+        let mut out = vec![(Ts(0), level)];
+        for (i, step) in steps.iter().enumerate() {
+            level += step * 1_000_000_000;
+            out.push((Ts(i64::try_from(i).expect("small test index") + 1), level));
+        }
+        out
+    }
+
+    /// A series' `Summary` and its `ReturnStats`, from one curve — exactly as
+    /// `pooled_of` produces them, so a test comparing one against the other is
+    /// comparing the two things the funnel really holds.
+    fn both(steps: &[i64]) -> (Summary, ReturnStats) {
+        let c = curve(steps);
+        (Summary::compute(&c, &[], 0, BPY), ReturnStats::of(&c))
+    }
+
+    /// The six series one contract contributes, deliberately all different.
+    ///
+    /// A pooling step that read the free-fill statistics where it meant the
+    /// costed ones — the likeliest defect in a function of this shape — would
+    /// produce a number that still looked entirely plausible. Distinct series
+    /// are what make that mistake visible instead.
+    struct Series<'a> {
+        costed: &'a [i64],
+        free_fill: &'a [i64],
+        level_zero: &'a [i64],
+        kill_level: &'a [i64],
+        random_entry: &'a [i64],
+        buy_and_hold: &'a [i64],
+    }
+
+    fn contract(series: &Series<'_>, oos_trades: usize) -> ContractEvidence {
+        let (free_fill_oos, free_fill_oos_stats) = both(series.free_fill);
+        let (_, costed_oos_stats) = both(series.costed);
+        let control = |name: &'static str, steps: &[i64]| Control {
+            name,
+            oos_stitched: Some(both(steps)),
+            absent_because: None,
+            seed: None,
+            draws: 1,
+            draws_beaten: 0,
+        };
+        let level = |half_ticks: i64, steps: &[i64]| {
+            let (oos_stitched, oos_stitched_stats) = both(steps);
+            CostLevel {
+                half_ticks,
+                oos_stitched,
+                oos_stitched_stats,
+            }
+        };
+        ContractEvidence {
+            free_fill_oos,
+            free_fill_oos_stats,
+            costed_oos_stats,
+            oos_trades,
+            sweep: vec![level(0, series.level_zero), level(KILL, series.kill_level)],
+            controls: [
+                control("matched random-entry", series.random_entry),
+                control("buy-and-hold", series.buy_and_hold),
+            ],
+        }
+    }
+
+    /// Contract A. Every series moves, and none of them moves like another.
+    fn series_a() -> Series<'static> {
+        Series {
+            costed: &[400, -150, 260, -90, 510, -220, 330, 120, -60, 900],
+            free_fill: &[520, -110, 300, -40, 610, -170, 380, 160, -20, 970],
+            level_zero: &[560, -100, 320, -30, 640, -160, 400, 170, -10, 990],
+            kill_level: &[310, -190, 210, -140, 430, -280, 260, 80, -110, 810],
+            random_entry: &[120, 340, -260, 80, -410, 190, 270, -130, 60, 210],
+            buy_and_hold: &[-80, 250, 410, -320, 170, 90, -240, 380, -50, 140],
+        }
+    }
+
+    /// Contract B: a different length and a different spread, so pooling and
+    /// averaging cannot coincide — `ReturnStats::sharpe`'s own control makes
+    /// the same demand of its fixture, for the same reason.
+    fn series_b() -> Series<'static> {
+        Series {
+            costed: &[-1_100, 1_700, -300, 850, -1_250, 2_100, -400],
+            free_fill: &[-900, 1_850, -220, 960, -1_040, 2_280, -310],
+            level_zero: &[-860, 1_900, -200, 1_000, -1_000, 2_320, -290],
+            kill_level: &[-1_300, 1_520, -390, 720, -1_430, 1_960, -520],
+            random_entry: &[700, -1_400, 260, -880, 1_310, -520, 940],
+            buy_and_hold: &[-460, 620, -1_150, 1_480, -270, 830, -1_090],
+        }
+    }
+
+    /// The grid-level half, fixed. `deannualize` is the real D-0125 conversion
+    /// rather than the identity, so the deflation is exercised in the units it
+    /// is actually computed in.
+    fn shared<'a>(deannualize: &'a dyn Fn(f64) -> f64, sessions: usize) -> PoolingInputs<'a> {
+        PoolingInputs {
+            distinct_oos_sessions: sessions,
+            n_trials: 40,
+            pbo: Some(0.35),
+            trial_sharpe_dispersion: Some(0.02),
+            deannualize,
+            kill_if_dead_half_ticks: KILL,
+            initial_cash_nano_usd: CASH,
+            bars_per_year: BPY,
+        }
+    }
+
+    fn deannualizer() -> impl Fn(f64) -> f64 {
+        |annualized: f64| annualized / BPY.sqrt()
+    }
+
+    /// **The inertness proof.** A pool of one must reproduce, BIT-for-bit, the
+    /// numbers that contract's own `Summary`s already report — because those
+    /// are what every funnel gate on `main` pins today, and D-0117 holds every
+    /// pool in this build to exactly one contract.
+    ///
+    /// Deliberately labelled inertness and **not** correctness. N=1 is the case
+    /// where a fold is the identity and a summing bug cannot show, so with
+    /// respect to everything pooling actually does this test is satisfied by
+    /// construction. The tests below it are the ones that can fail.
+    ///
+    /// What would this do if the thing it looks for were absent? On a flat
+    /// fixture every field would be zero or `None` and the comparison would
+    /// hold for nothing — so the expected values are asserted live first.
+    #[test]
+    fn a_pool_of_one_reproduces_the_contracts_own_numbers() {
+        let a = series_a();
+        let (costed, _) = both(a.costed);
+        let (kill, _) = both(a.kill_level);
+        let (random_entry, _) = both(a.random_entry);
+        let (buy_and_hold, _) = both(a.buy_and_hold);
+        let one = contract(&a, 17);
+
+        assert!(
+            costed.total_return_pct != 0.0
+                && costed.sharpe_naive.is_some()
+                && kill.sharpe_naive.is_some(),
+            "the fixture must produce live numbers, or this test is vacuous"
+        );
+
+        let d = deannualizer();
+        let pooled = pool_contract_evidence(&one, &[], &shared(&d, 63));
+
+        let bits = f64::to_bits;
+        assert_eq!(
+            bits(pooled.costed_return_pct),
+            bits(costed.total_return_pct),
+            "the pooled costed return must be the contract's own, to the bit"
+        );
+        assert_eq!(
+            bits(pooled.free_fill_return_pct),
+            bits(one.free_fill_oos.total_return_pct)
+        );
+        assert_eq!(
+            pooled.costed_sharpe.map(bits),
+            costed.sharpe_naive.map(bits),
+            "and the pooled Sharpe likewise"
+        );
+        assert_eq!(
+            pooled.sharpe_at_kill_level.map(bits),
+            kill.sharpe_naive.map(bits)
+        );
+        assert_eq!(
+            pooled.random_entry_return_pct.map(bits),
+            Some(bits(random_entry.total_return_pct))
+        );
+        assert_eq!(
+            pooled.buy_and_hold_return_pct.map(bits),
+            Some(bits(buy_and_hold.total_return_pct))
+        );
+        assert_eq!(pooled.oos_trades, 17);
+        assert_eq!(pooled.oos_sessions, 63);
+    }
+
+    /// **The asymmetry, demonstrated rather than asserted** (D-0114).
+    ///
+    /// Trades track the contracts: 17 and 11 pool to 28. Sessions do not track
+    /// them at all — the same two contracts pooled under two different declared
+    /// session counts report those two counts, which is what "the caller
+    /// supplies the union" means operationally. A future `ContractEvidence`
+    /// that grew a session field, and a pooling step that summed it, would fail
+    /// the second half of this the day it was written.
+    #[test]
+    fn trades_are_summed_and_sessions_are_not_derived_from_the_contracts() {
+        let (a, b) = (contract(&series_a(), 17), contract(&series_b(), 11));
+        let d = deannualizer();
+
+        let pooled = pool_contract_evidence(&a, std::slice::from_ref(&b), &shared(&d, 96));
+        assert_eq!(
+            pooled.oos_trades, 28,
+            "17 + 11: round-trips are disjoint events"
+        );
+        assert_eq!(pooled.oos_sessions, 96);
+
+        // Same contracts, different declared union. Sessions follow the
+        // caller; trades do not move, because they genuinely are the
+        // contracts'.
+        let again = pool_contract_evidence(&a, std::slice::from_ref(&b), &shared(&d, 141));
+        assert_eq!(again.oos_sessions, 141);
+        assert_eq!(again.oos_trades, 28);
+    }
+
+    /// **The pooled total return, hand-derived** — and distinguishable from the
+    /// plausible wrong answer.
+    ///
+    /// Contract A's costed steps sum to +$2,000 and B's to +$1,600, on the
+    /// $100,000 of declared capital both start from (D-0127). The pooled
+    /// curve's final equity is `100,000 + 2,000 + 1,600 = 103,600`, so the
+    /// pooled return is exactly **+3.60 %**.
+    ///
+    /// COMPOUNDING the two contracts' own returns — `1.02 × 1.016 − 1` =
+    /// 3.632 % — is the wrong answer a reasonable implementation reaches for,
+    /// and it is 0.032 points away, so this test tells them apart. The
+    /// contracts do not compound: they are two windows measured from the same
+    /// capital, not one account run twice.
+    #[test]
+    fn the_pooled_return_is_the_delta_sum_over_declared_capital() {
+        let (sa, sb) = (series_a(), series_b());
+        assert_eq!(
+            sa.costed.iter().sum::<i64>(),
+            2_000,
+            "A's steps sum to $2,000"
+        );
+        assert_eq!(
+            sb.costed.iter().sum::<i64>(),
+            1_600,
+            "B's steps sum to $1,600"
+        );
+
+        let (a, b) = (contract(&sa, 17), contract(&sb, 11));
+        let d = deannualizer();
+        let pooled = pool_contract_evidence(&a, std::slice::from_ref(&b), &shared(&d, 96));
+
+        assert!(
+            (pooled.costed_return_pct - 3.60).abs() < 1e-9,
+            "expected +3.60 %, got {}",
+            pooled.costed_return_pct
+        );
+        let compounded = (1.02_f64 * 1.016 - 1.0) * 100.0;
+        assert!(
+            (pooled.costed_return_pct - compounded).abs() > 0.01,
+            "the delta sum and the compounded product must be distinguishable \
+             here, or this test cannot see the difference: {} vs {compounded}",
+            pooled.costed_return_pct
+        );
+    }
+
+    /// **Each pooled number reads its own series.** Three channels — the costed
+    /// run, the S1 free-fill screen and the kill-level sweep entry — are pooled
+    /// from three different sets of statistics, and the fixture makes all three
+    /// differ, so a copy-paste feeding one of them the wrong field could not
+    /// pass.
+    ///
+    /// The Sharpe is checked against `combine(..).sharpe(..)`, which IS the
+    /// definition (D-0127) — and that is the point. This proves the *wiring*
+    /// reaches the right statistics; `ReturnStats`' own tests prove the
+    /// definition is the right arithmetic. Splitting it that way is what keeps
+    /// neither test tautological.
+    #[test]
+    fn every_pooled_channel_reads_its_own_statistics() {
+        let (sa, sb) = (series_a(), series_b());
+        let (a, b) = (contract(&sa, 17), contract(&sb, 11));
+        let d = deannualizer();
+        let pooled = pool_contract_evidence(&a, std::slice::from_ref(&b), &shared(&d, 96));
+
+        let combined = |x: &[i64], y: &[i64]| {
+            ReturnStats::combine(ReturnStats::of(&curve(x)), ReturnStats::of(&curve(y)))
+        };
+        let costed = combined(sa.costed, sb.costed);
+        let kill = combined(sa.kill_level, sb.kill_level);
+
+        assert_eq!(
+            pooled.costed_sharpe.map(f64::to_bits),
+            costed.sharpe(BPY).map(f64::to_bits),
+            "the costed Sharpe is the fold of the costed statistics"
+        );
+        assert_eq!(
+            pooled.sharpe_at_kill_level.map(f64::to_bits),
+            kill.sharpe(BPY).map(f64::to_bits),
+            "and the kill level's is the fold of the kill level's"
+        );
+
+        // All three channels must be mutually distinguishable, or the
+        // assertions above would hold even if the function read one series
+        // three times over.
+        let free_fill = combined(sa.free_fill, sb.free_fill).net_delta_nano_usd;
+        assert!(
+            costed.net_delta_nano_usd != kill.net_delta_nano_usd
+                && costed.net_delta_nano_usd != free_fill,
+            "the fixture's three channels must genuinely differ"
+        );
+        assert!(
+            (pooled.free_fill_return_pct - pooled.costed_return_pct).abs() > 1e-9,
+            "the S1 screen and the costed run must not report one number"
+        );
+    }
+
+    /// **An absent control on ANY contract makes the pooled control absent**,
+    /// with its converse in the same test — without which a function that
+    /// always returned `None` would pass.
+    ///
+    /// And the two controls are independent: an absent random-entry must not
+    /// take buy-and-hold down with it, or a scorecard would report two holes
+    /// where the run produced one.
+    #[test]
+    fn an_absent_control_on_any_contract_makes_the_pooled_control_absent() {
+        let (sa, sb) = (series_a(), series_b());
+        let (a, mut b) = (contract(&sa, 17), contract(&sb, 11));
+        let d = deannualizer();
+        let facts = shared(&d, 96);
+
+        // The converse first: both present, both pooled.
+        let present = pool_contract_evidence(&a, std::slice::from_ref(&b), &facts);
+        assert!(
+            present.random_entry_return_pct.is_some() && present.buy_and_hold_return_pct.is_some(),
+            "with every contract's control built, both must pool — otherwise the \
+             absence below proves nothing"
+        );
+
+        b.controls[0].oos_stitched = None;
+        b.controls[0].absent_because = Some("no round-trip to match".to_owned());
+        let partial = pool_contract_evidence(&a, std::slice::from_ref(&b), &facts);
+        assert!(
+            partial.random_entry_return_pct.is_none(),
+            "pooling the contracts that DID run would benchmark N contracts \
+             against N-1 (D-0075)"
+        );
+        assert!(
+            partial.buy_and_hold_return_pct.is_some(),
+            "the other control still ran on every contract and must survive"
+        );
+    }
+
+    /// **A sweep level missing from any contract makes its pooled Sharpe
+    /// absent**, on the same terms and with the same converse.
+    ///
+    /// `None` here is not a pass: `assess` reads `sharpe_at_kill_level` as the
+    /// kill criterion, and an absent value fails it rather than clearing it.
+    #[test]
+    fn a_kill_level_missing_from_any_contract_makes_the_pooled_sharpe_absent() {
+        let (sa, sb) = (series_a(), series_b());
+        let (a, mut b) = (contract(&sa, 17), contract(&sb, 11));
+        let d = deannualizer();
+        let facts = shared(&d, 96);
+
+        let present = pool_contract_evidence(&a, std::slice::from_ref(&b), &facts);
+        assert!(
+            present.sharpe_at_kill_level.is_some(),
+            "with the level on every contract it must pool, or the absence \
+             below proves nothing"
+        );
+
+        b.sweep.retain(|l| l.half_ticks != KILL);
+        let partial = pool_contract_evidence(&a, std::slice::from_ref(&b), &facts);
+        assert!(
+            partial.sharpe_at_kill_level.is_none(),
+            "a level one contract never swept cannot be pooled across all of them"
+        );
+    }
+
+    /// The grid-level fields pass through untouched, and the deflation reads
+    /// the shape of the **pooled** series rather than of any one contract's.
+    ///
+    /// The shape check is the one that matters. Deflating a pooled Sharpe with
+    /// a single contract's skew and kurtosis would correct one number using
+    /// another number's sample, which §9 already calls a wrong result rather
+    /// than an approximation.
+    #[test]
+    fn the_deflation_reads_the_pooled_shape_and_the_grid_fields_pass_through() {
+        let (sa, sb) = (series_a(), series_b());
+        let (a, b) = (contract(&sa, 17), contract(&sb, 11));
+        let d = deannualizer();
+        let pooled = pool_contract_evidence(&a, std::slice::from_ref(&b), &shared(&d, 96));
+
+        assert_eq!(pooled.n_trials, 40);
+        assert_eq!(pooled.pbo, Some(0.35));
+        assert_eq!(pooled.permutation_p_value, None);
+
+        let deflated = pooled.deflated.expect("the fixture deflates");
+        let a_only = ReturnStats::of(&curve(sa.costed));
+        let combined = ReturnStats::combine(a_only, ReturnStats::of(&curve(sb.costed)));
+
+        // Ten steps and seven: 17 pooled returns, which is neither contract's.
+        assert_eq!(combined.shape().n_returns, 17);
+        assert_eq!(a_only.shape().n_returns, 10);
+
+        // `Deflated` does not echo its observation count, so the shape it used
+        // is established the only way it can be — by recomputing the estimator
+        // both ways and seeing which one the funnel produced.
+        let observed = (d)(pooled.costed_sharpe.expect("the fixture has a Sharpe"));
+        let deflate_with = |stats: ReturnStats| {
+            let shape = stats.shape();
+            crate::stats::deflated::deflated_sharpe(crate::stats::deflated::DeflationInputs {
+                observed_sharpe: observed,
+                skew: shape.skew.expect("the fixture has moments"),
+                kurtosis: shape.kurtosis.expect("the fixture has moments"),
+                n_observations: shape.n_returns,
+                n_trials: 40,
+                trial_sharpe_dispersion: Some(0.02),
+            })
+            .expect("the fixture deflates")
+        };
+        let from_pool = deflate_with(combined);
+        let from_a_alone = deflate_with(a_only);
+
+        assert_eq!(
+            deflated.standard_error.to_bits(),
+            from_pool.standard_error.to_bits(),
+            "the deflation must read the POOLED shape"
+        );
+        assert_eq!(deflated.dsr.to_bits(), from_pool.dsr.to_bits());
+        // The converse: had it read one contract's shape, this comparison would
+        // have caught it — so the agreement above is evidence rather than a
+        // coincidence of a fixture where the two happen to match.
+        assert!(
+            (from_pool.standard_error - from_a_alone.standard_error).abs() > 1e-9,
+            "pooled and single-contract shapes must give different standard \
+             errors here: {} vs {}",
+            from_pool.standard_error,
+            from_a_alone.standard_error
+        );
     }
 }

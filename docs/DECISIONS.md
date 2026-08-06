@@ -4767,3 +4767,86 @@ propose a superseding entry — don't silently diverge.
   `216e9196`, restored and re-printed identical).
   **Nothing calls it yet.** D-0117 still refuses every pooled config, and the
   combine reaches no run until C6b lifts that refusal. No gate moved.
+- **D-0128** (2026-08-07) -- **A combo is assessed ONCE, on evidence pooled
+  across its contracts — and the pooled session count is handed to the pooling
+  step rather than derived by it, because sufficient statistics cannot know that
+  two contracts shared a Tuesday.**
+  `contract_evidence` now produces a contract's *contribution*;
+  `pool_contract_evidence` folds N of them into the one `Evidence`; `assess`
+  runs once per combo. The `Evidence` construction moved out of the per-contract
+  function, which is what discharges the `too_many_arguments` note C6a-iii-a
+  deferred to this step: the trial count, the dispersion, the de-annualization
+  and the PBO were only ever there to build a per-contract `Evidence` that
+  nothing now assesses, so they moved to `PoolingInputs` and the per-contract
+  function went from nine arguments to four.
+  **Why not assess per contract and reconcile the verdicts.** Every criterion in
+  `assess` is a threshold on a pooled quantity, so a rule for combining N
+  verdicts — "most of them", "all of them", "the worst" — would be a second
+  gate, unwritten and unregistered, sitting behind the pre-registered one. It
+  also would not work: Block C exists because one contract's ~60 sessions cannot
+  clear a registered 250-session floor, and N contracts each failing that floor
+  separately is the same answer at N times the cost.
+  **Trades are summed; sessions are not.** A round-trip belongs to exactly one
+  contract, so two contracts' trade counts count disjoint events and adding them
+  invents nothing. A trading day belongs to no contract — ESH2024 and ESM2024
+  trade the same Tuesday — so adding session counts claims a sample twice the
+  size of the one that exists (D-0114). The asymmetry is deliberate and is
+  demonstrated rather than asserted: the same two contracts pooled under two
+  different declared session counts report those two counts, while their trade
+  count does not move.
+  **Why the session count is a PARAMETER, and this is structural rather than
+  disciplinary.** `ReturnStats` carries no day identity. Summing is therefore the
+  only thing `pool_contract_evidence` *could* do if it derived the number — the
+  honest answer is not available to it — and summing is precisely the defect
+  D-0114 exists to prevent. So the union is computed where the day keys actually
+  are, by `pooling::PooledSessions`, and passed in. `ContractEvidence` carries no
+  session count at all, which makes the wrong answer unwritable here rather than
+  merely discouraged.
+  **An absent control on ANY contract makes the pooled control absent**, and the
+  same rule governs a sweep level missing from any contract's sweep. Never "pool
+  the ones that ran": that compares a strategy measured over N contracts against
+  a benchmark measured over N−1, which is a smaller denominator reported as a
+  result, when D-0075 is already explicit that an absent control **fails** its
+  criterion rather than passing it.
+  **Path statistics cannot be pooled from here at all.** What a fold yields is a
+  `PooledSeries`, which has no drawdown to offer (D-0119) — `sharpe_and_shape`'s
+  argument one level up: a computed-then-discarded drawdown is one refactor away
+  from being surfaced, and whoever does that refactor sees a field sitting there
+  looking available.
+  **The pooled total return is formed final-over-initial, not
+  delta-over-initial.** The same quantity arithmetically; not the same float
+  operations, and the first spelling is `Summary::compute`'s — so a pool of one
+  is bit-identical to the number that combo already reported, which is what keeps
+  this step inert while D-0117 holds every pool to one contract.
+  **What the determinism gates can and cannot see here, measured in both
+  directions, because "no gate moved" would otherwise be read as more than it
+  is.** `verdict_hash` hashes the *per-contract* artifacts directly — the
+  walk-forward summary, the free-fill summary, each sweep level, each control's
+  return — and reaches the pooled `Evidence` only through the two-field
+  projection `(verdict, decided_at)`. So: adding 100 points to
+  `free_fill_return_pct` moved the funnel gate `2f430893d2a79a8f` →
+  `770bcd88157f18c3`, which proves the gate *reaches* this function; and swapping
+  the costed channel to read the free-fill statistics — a defect four unit tests
+  caught — left the gate at its pinned value exactly, because every combo in
+  `configs/combo-smoke.toml` dies at S1 on the free-fill number and the
+  projection is saturated before the costed quantities are consulted. **The unit
+  tests are the evidence for this function; the gates' silence is evidence about
+  `combo-smoke.toml` and nothing more.**
+  **Controls, each planted alone and restored by unconditional copy-back under
+  D-0116** (pre-mutation blob `2766ee49`, re-printed identical after all four):
+  deriving sessions from the contracts, dropping the other contracts' trades,
+  pooling only the controls that ran, and reading the wrong series for the costed
+  channel — caught by 2, 1, 1 and 4 tests respectively.
+  **One of those four is a near miss worth recording.** The session mutation was
+  `contracts().count() * 48`, which for the fixture's two contracts evaluates to
+  96 — *exactly* the session count the first assertion expected. The test caught
+  it only on its second call, which pools the same two contracts under a
+  different declared count of 141. A single-call version of that test would have
+  passed the planted defect while appearing to check the rule. That is the
+  by-construction trap in its fixture form: what made the check real was varying
+  the parameter, not asserting the value.
+  **Nothing reaches a pool of more than one.** D-0117 still refuses every
+  well-formed `[pooling]` config, so `rest` is empty at the only call site;
+  C6b lifts the refusal. The single-contract path goes through the pooled one
+  anyway, so C6b is a wiring change rather than a rewrite of the number five
+  gates pin.
