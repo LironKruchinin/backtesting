@@ -1,0 +1,11 @@
+{
+  "topic": "order-flow-microstructure-commodities",
+  "hypothesis_family_hint": "order-flow-price-impact",
+  "queries": [
+    "order flow imbalance price impact commodity futures",
+    "trade sign autocorrelation permanent price impact",
+    "price discovery order flow crude oil gold futures",
+    "informed trading probability futures microstructure",
+    "aggressive passive order flow currency futures returns"
+  ]
+}

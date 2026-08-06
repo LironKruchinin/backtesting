@@ -1,0 +1,11 @@
+{
+  "topic": "realized-vs-implied-volatility",
+  "hypothesis_family_hint": "realized-implied-volatility-gap",
+  "queries": [
+    "realized volatility forecast implied volatility commodity",
+    "variance risk premium crude oil gold currency",
+    "HAR model realized volatility futures forecasting",
+    "implied volatility index oil OVX predictive content",
+    "volatility risk premium term structure options futures"
+  ]
+}

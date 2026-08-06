@@ -1,0 +1,11 @@
+{
+  "topic": "limit-order-book-dynamics",
+  "hypothesis_family_hint": "order-book-state-signal",
+  "queries": [
+    "limit order book depth imbalance short horizon prediction",
+    "queue position adverse selection limit order futures",
+    "order book resiliency replenishment after large trade",
+    "hidden liquidity iceberg order futures market",
+    "book slope liquidity measure price prediction"
+  ]
+}

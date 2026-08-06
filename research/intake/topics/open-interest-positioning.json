@@ -1,0 +1,11 @@
+{
+  "topic": "open-interest-positioning",
+  "hypothesis_family_hint": "open-interest-positioning-signal",
+  "queries": [
+    "open interest change predicts futures returns",
+    "hedging pressure risk premium commodity futures",
+    "commitments of traders positioning futures return predictability",
+    "speculative pressure normal backwardation futures",
+    "volume open interest information content futures market"
+  ]
+}

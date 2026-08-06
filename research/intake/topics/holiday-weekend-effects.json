@@ -1,0 +1,11 @@
+{
+  "topic": "holiday-weekend-effects",
+  "hypothesis_family_hint": "session-boundary-calendar-effect",
+  "queries": [
+    "pre holiday effect returns futures markets",
+    "weekend effect Monday returns currency bond futures",
+    "day of the week effect gold currency Treasury futures",
+    "month end rebalancing flows bond futures returns",
+    "expiration week effect futures returns volume"
+  ]
+}

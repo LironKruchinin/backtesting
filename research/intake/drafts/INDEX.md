@@ -1,40 +1,197 @@
 # Candidate index — triage list
 
-61 candidates, drafted 2026-08-06 from `research/intake/corpus/` (four official APIs; see `research/intake/README.md`). **Nothing here is a registration** and nothing here has been run.
+**91 candidates across two harvests.** Wave 1 drafted 61 on 2026-08-06; wave 2
+added 30 on 2026-08-07, deliberately in seams wave 1 did not touch and weighted
+away from equity index. Both were built from `research/intake/corpus/` over the
+four official APIs (see `research/intake/README.md`). **Nothing here is a
+registration** and nothing here has been run.
 
-**Grade tally: 15 A · 22 B · 24 C.**
+**Combined grade tally: 19 A · 24 B · 48 C.**
+Wave 1: 15 A · 22 B · 24 C. Wave 2: **4 A · 2 B · 24 C.**
+
+Wave 2's grade distribution is much worse than wave 1's and that is the finding,
+not a shortfall. Wave 1 swept intraday, momentum, volatility and calendar seams —
+literatures stated in terms of a single series, which is what the combo grammar
+can read. Wave 2 swept storage, curve shape, carry, auctions, positioning,
+order flow and execution, and those literatures are stated in terms of objects
+this build has no way to form: a second maturity, a second venue, a cash leg, a
+position report, a release timestamp. **Twenty-four of thirty wave-2 candidates
+are C, and only one of the twenty-four is C because the idea is expensive; the
+rest are C because the sentence the paper wrote cannot be typed into a config.**
+
+## What wave 2 was for
+
+Liron owns sixteen years of CL (247 curated contracts), GC (221), 6E (149) and
+ZN (68), and almost nothing in `research/backlog/` touches them. Fifty
+variations of intraday momentum are one idea tested fifty times, and the trial
+count and the overfitting battery treat them that way — so mechanism diversity
+across genuinely different markets is what makes any eventual survivor
+believable. **Twenty-nine of wave 2's thirty candidates are non-equity-index**;
+the one that is not is included because its conclusion bounds what the others
+can claim.
 
 ## Read the A column correctly before you spend anything on it
 
-A grade states **cost to test, nothing else** (`research/backlog/README.md` §2). A grade-A idea can be worthless and a grade-C idea can be the best thing on the list.
+A grade states **cost to test, nothing else** (`research/backlog/README.md` §2).
+A grade-A idea can be worthless and a grade-C idea can be the best thing on the
+list.
 
-And **grade A means *runnable today*, not *answerable today***. `combo` and `walk-forward` replay **one raw contract** — continuous aliases are refused for the grid commands by design (§2.2) — which is roughly 60 sessions for ES. `research/backlog/README.md` §6.2 states the consequence plainly: **the A column produces no verdicts until registry pooling lands**, because no sample-adequacy criterion worth registering is satisfiable at that length, so today's A-grade runs are guaranteed to be killed for sample size — correctly, by the machine. That is the pre-registration working. It is not a result.
+And **grade A means *runnable today*, not *answerable today***. `combo` and
+`walk-forward` replay **one raw contract** — continuous aliases are refused for
+the grid commands by design (§2.2) — which is roughly 60 sessions for ES.
+`research/backlog/README.md` §6.2 states the consequence plainly: **the A column
+produces no verdicts until registry pooling lands**, because no sample-adequacy
+criterion worth registering is satisfiable at that length, so today's A-grade
+runs are guaranteed to be killed for sample size — correctly, by the machine.
+That is the pre-registration working. It is not a result.
 
-So the A column is a list of things that can be *stated and executed* now. The B and C columns each name the one piece that is missing, which is the more useful column if the question is what to build.
+Wave 2's four A candidates make that sharper rather than softer. Two of them
+(`early-close-session-effect`, `london-fix-overnight-gold`) count **events**
+rather than sessions — early closes happen about nine times a year — so one
+contract's life holds one or two observations, and their registered sample floors
+are deliberately set above the usual ones to say so.
 
-## What the B and C columns add up to
+So the A column is a list of things that can be *stated and executed* now. The B
+and C columns each name the one piece that is missing, which is the more useful
+column if the question is what to build.
 
-The grade says what a candidate costs. This says what the COSTS have in common — which is the more useful question if you are deciding what to build rather than what to run. Each candidate is counted once, under the first bucket its `missing piece` matches.
+## What the B and C columns add up to, across both waves
 
-| blocked candidates | the one piece they are waiting on |
-|---|---|
-| **8** | multi-instrument configs (two roots in one run) |
-| **7** | a macro / event calendar |
-| **7** | data the archive does not hold |
-| **5** | calendar predicates (day-of-week, day-of-month) |
-| **5** | a fitted-model indicator (regime-switching, EGARCH) |
-| **4** | continuous position sizing |
-| **4** | a rolling extremum (opening range, Donchian) |
-| **1** | a stitched series for the GRID commands |
-| **1** | arithmetic between operands |
-| **1** | an anchored reference price |
-| **1** | an open-interest series |
-| **1** | a contract-age operand |
-| **1** | a causal time-of-day normalizer |
+The grade says what a candidate costs. This says what the COSTS have in common —
+the more useful question if you are deciding what to build rather than what to
+run. Each candidate is counted once, under the first bucket its `missing piece`
+matches. Wave 1's assignments are carried through unchanged; wave 2's are
+assigned by the first blocker its Triage grade names.
 
-Two of those are worth reading twice. **A macro/event calendar is a static CSV**, not a purchase — it blocks more candidates here than any acquisition does. And **the whole `cross-asset-lead-lag` topic is grade C for one reason**: `combo` refuses a config declaring two instruments, so every lead-lag statistic — which is defined on a pair — is out of reach by a design rule rather than by a data gap.
+| blocked | wave 1 | wave 2 | the one piece they are waiting on |
+|---|---|---|---|
+| **16** | 7 | 9 | data the archive does not hold |
+| **13** | 7 | 6 | a macro / event calendar |
+| **9** | 8 | 1 | multi-instrument configs (two roots in one run) |
+| **6** | 5 | 1 | calendar predicates (day-of-week, day-of-month) |
+| **5** | 5 | — | a fitted-model indicator (regime-switching, EGARCH) |
+| **4** | 4 | — | continuous position sizing |
+| **4** | 4 | — | a rolling extremum (opening range, Donchian) |
+| **3** | — | 3 | **a multi-maturity curve reader** (two contracts of one root, one config) |
+| **3** | — | 3 | **a root the archive does not hold** (agriculturals, refined products, a second rates point) |
+| **2** | — | 2 | **quote / message-level data — unobtainable, not merely unbought** (D-0120) |
+| **1** | — | 1 | **a cost-input estimator over owned bars** |
+| **1** | 1 | — | a stitched series for the GRID commands |
+| **1** | 1 | — | arithmetic between operands |
+| **1** | 1 | — | an anchored reference price |
+| **1** | 1 | — | an open-interest series |
+| **1** | 1 | — | a contract-age operand |
+| **1** | 1 | — | a causal time-of-day normalizer |
+| **72** | 46 | 26 | total blocked (91 candidates − 19 grade A) |
 
-## Candidates
+### The cheapest unlocks, named
+
+1. **A macro / event calendar — a static CSV, free, and it blocks 13 candidates.**
+   It is the largest single unlock in the index and it is not a purchase. Wave 2
+   widens what it has to hold: FOMC and macro releases (wave 1), **plus a
+   petroleum inventory schedule, plus a Treasury auction schedule**. Two wave-2
+   candidates need **times only** and no contents
+   (`fx-news-arrival-activity-burst`, and the abstention arms elsewhere), which
+   makes a times-only v1 a genuinely useful first step rather than a stub.
+
+2. **A multi-maturity curve reader — the data is entirely owned.** Three wave-2
+   candidates name it as their first blocker and three more name it as a
+   component: wave 1's `wti-term-structure-forecast`, `equilibrium-forward-curves`
+   and `commodities-long-run-carry`, plus wave 2's
+   `contango-backwardation-comovement`, `curve-state-spot-futures-linkage`,
+   `carry-crash-risk-currency` and `spot-based-basis-momentum`. **Six candidates,
+   zero acquisitions**: CL has 247 curated contracts, GC 221, 6E 149. The
+   surprise wave 2 produced is that **FX carry is the same object** — the interest
+   differential is mechanically the 6E calendar spread — so one reader serves the
+   commodity and the currency literatures at once.
+   One design constraint arrives with it, free: `spot-based-basis-momentum`'s
+   source argues that using the front contract as a spot proxy is the *inferior*
+   measure, which is worth knowing before the definition is fixed rather than
+   after.
+
+3. **Calendar predicates (day-of-week, day-of-month) — one operand, 6 candidates.**
+   Wave 2 also found that **one** calendar predicate is already reachable without
+   it: `minutes_to_close < minutes_to_rth_close` is true exactly on a session the
+   exchange is closing early, because the grammar compares two operands as
+   readily as an operand and a constant, and the two clock readings disagree only
+   on an early close (D-0078). That is what `early-close-session-effect` runs on.
+   It does **not** retire the row — day-of-week, day-of-month and turn-of-month
+   remain unreachable — and it is recorded because a reader looking at
+   `research/backlog/README.md` §2.1's "Calendar predicates: not expressible" row
+   would otherwise not know that the holiday case falls out of two operands that
+   already exist.
+
+4. **An open-interest transcode path and operand — the data is already in `raw/`.**
+   The `statistics` schema is archived for all seven roots, 2010-06-06 →
+   2026-07-29, and nothing reads it. Two candidates
+   (`open-interest-volatility`, `hedging-pressure-risk-premium`) name it, and one
+   of them names it as a *separable* sub-unlock behind a much more expensive
+   blocker — so building it delivers value without the position data.
+
+5. **A low-frequency spread estimator — one candidate, and it improves every
+   other verdict.** The cost sweep is mandatory (§2.4) and its centre,
+   `half_spread_ticks = 1`, is a convention wearing a measurement's field name on
+   six of seven roots, permanently (D-0120). `high-low-spread-estimator` reads
+   only high, low and close — owned for 863 curated contracts over sixteen years —
+   and can be validated against the one `tbbo` year that exists for ES. It is the
+   only entry in this index whose payoff is to the denominator under everything
+   else.
+
+### Two walls, stated once
+
+**The order-flow wall.** Three candidates from three unrelated literatures —
+wave 1's `order-flow-imbalance-es`, wave 2's `auction-day-price-pressure-reversal`
+and `currency-momentum-order-flow` — stop at the same place. D-0120: the L1/L3
+entitlement windows were allowed to lapse, so the archive holds one `tbbo` and one
+`trades` record (ES only, one year of sixteen) and one month of `mbo`. This is
+**unobtainable, not unbought** — the vendor sells the past only through those
+windows. Any candidate whose mechanism is signed flow is permanently out of reach
+here, and it is better to say that once than to keep grading it C as though a
+budget would fix it.
+
+**The forecast wall.** Two candidates — wave 1's `crude-regime-switching-garch`
+and wave 2's `price-volatility-cojump-forecasting` — produce a *volatility
+forecast* rather than a position, and the funnel scores position rules. There is
+no criterion that reads forecast accuracy, so these cannot be judged even with
+perfect data. That is a limitation of the machine rather than of the archive, and
+it is the only one in this index that no acquisition touches.
+
+## Candidates — wave 2 (2026-08-07)
+
+| grade | asset | topic | mechanism | missing piece | draft |
+|---|---|---|---|---|---|
+| **A** | metals | `metals-lease-rates-carry` | hold gold from the afternoon London fixing to the next morning's, expressed as two session-clock constants | — | [london-fix-overnight-gold](DRAFT-london-fix-overnight-gold.md) |
+| **A** | metals | `realized-vs-implied-volatility` | a trailing volatility state is regime CONTEXT and not a directional trigger — registered expecting the null | — | [gold-volatility-regime-context](DRAFT-gold-volatility-regime-context.md) |
+| **A** | rates, FX | `liquidity-provision-market-making` | fade an outsized bar; the registered discriminator is the tick level at which the spread eats the reversal | — | [extreme-move-reversal-cost-barrier](DRAFT-extreme-move-reversal-cost-barrier.md) |
+| **A** | energy, metals, FX, rates | `holiday-weekend-effects` | the holiday-adjacent session, identified by `minutes_to_close < minutes_to_rth_close` — an early close, without a calendar operand | — | [early-close-session-effect](DRAFT-early-close-session-effect.md) |
+| **B** | energy | `crude-inventory-storage` | the minutes around a scheduled weekly petroleum release behave differently from ordinary minutes | calendar predicates (day-of-week) — the weekly cadence is a public constant and the bars are owned, so only the operand is missing; the holiday-shifted weeks additionally need a real release calendar | [eia-release-window-crude](DRAFT-eia-release-window-crude.md) |
+| **B** | all seven roots | `execution-cost-slippage` | estimate the bid-ask spread from high, low and close — the cost input every other candidate assumes | a low-frequency spread estimator over curated bars, and a `qa`-style report to put its output in; NOT a config field, and not a signal | [high-low-spread-estimator](DRAFT-high-low-spread-estimator.md) |
+| **C** | cross-asset | `crude-inventory-storage` | oil inventory surprises reprice equities, bonds and the dollar — with a sign that flipped once | a petroleum-inventory release calendar with an availability rule, plus multi-instrument configs | [oil-inventory-news-across-assets](DRAFT-oil-inventory-news-across-assets.md) |
+| **C** | energy, metals | `energy-roll-yield-timing` | curve slopes co-move across commodities, and gold's moves against the rest | a curve-slope feature — two maturities of one root in one config — then multi-root configs; the DATA is fully owned | [contango-backwardation-comovement](DRAFT-contango-backwardation-comovement.md) |
+| **C** | metals | `energy-roll-yield-timing` | whether cash and deferred legs track each other more tightly in contango than in backwardation (a published null) | a curve-state classifier (two maturities) AND a spot metals series — two blockers, only one of which a curve reader removes | [curve-state-spot-futures-linkage](DRAFT-curve-state-spot-futures-linkage.md) |
+| **C** | none owned | `commodity-seasonality-physical` | deterministic physical seasonality in commodity curves — harvest, heating, driving season | an instrument, not a feature: an agricultural or refined-product root. The only wave-2 blocker that is a purchase and nothing else | [agricultural-seasonality-storage](DRAFT-agricultural-seasonality-storage.md) |
+| **C** | metals | `gold-safe-haven` | gold's correlation with equities falls in calm periods and rises when political tension is extreme | a geopolitical-risk index with a stated availability rule, and multi-instrument configs | [gold-geopolitical-risk-safe-haven](DRAFT-gold-geopolitical-risk-safe-haven.md) |
+| **C** | metals | `metals-lease-rates-carry` | the lease rate is gold's convenience yield, and it falls as warehouse stocks rise | a gold lease-rate / forward-rate series and COMEX warehouse inventory — and the benchmark rate was discontinued mid-archive | [gold-lease-rate-convenience-yield](DRAFT-gold-lease-rate-convenience-yield.md) |
+| **C** | metals | `metals-lease-rates-carry` | the New York futures venue does more of gold's price discovery than the far larger London spot market | a London spot gold series — outside this archive's vendor, and no milestone unblocks it | [london-newyork-gold-price-discovery](DRAFT-london-newyork-gold-price-discovery.md) |
+| **C** | metals | `liquidity-provision-market-making` | the futures-to-spot spread in precious metals relaxes at several speeds at once | a spot metals series, quote-level GC data (unobtainable, D-0120), and the `queue_sim` fill model (M4) | [precious-metals-efp-market-making](DRAFT-precious-metals-efp-market-making.md) |
+| **C** | FX | `fx-carry-interest-differentials` | carry returns are payment for crash risk, and unwind together when funding tightens | an interest-differential feature — reachable as a two-maturity FX curve over data we fully own — plus a currency cross-section we do not own | [carry-crash-risk-currency](DRAFT-carry-crash-risk-currency.md) |
+| **C** | FX | `fx-intervention-central-bank` | official intervention works, and mostly in regimes and currencies the euro is not one of | intervention event dates, AND an instrument whose central bank intervenes — the euro is the wrong side of the paper's own boundary condition | [fx-intervention-effectiveness](DRAFT-fx-intervention-effectiveness.md) |
+| **C** | FX | `announcement-drift-commodities` | activity in FX bursts at a scheduled release even when the number is exactly as forecast | a release calendar (times only — the cheapest calendar dependency in either wave); the arrival-process half also needs a grain we do not hold | [fx-news-arrival-activity-burst](DRAFT-fx-news-arrival-activity-burst.md) |
+| **C** | FX | `order-flow-microstructure-commodities` | currency momentum is stronger when the buying pressure came through short-dated swaps, and from banks | signed order flow segmented by counterparty — which no exchange sells — and a currency cross-section | [currency-momentum-order-flow](DRAFT-currency-momentum-order-flow.md) |
+| **C** | FX | `futures-basis-cash-arbitrage` | the skewness of the futures-minus-spot basis predicts subsequent spot returns | a spot FX series (an acquisition) and a third-moment trailing indicator (a small, reusable build) | [currency-basis-skewness](DRAFT-currency-basis-skewness.md) |
+| **C** | rates | `treasury-auction-cycle` | dealers cover short futures hedges once an auction is placed, and the ten-year note future moves | a Treasury auction calendar — dates, tenors, result instant — with bid-to-cover as a separable second acquisition | [treasury-auction-zn-futures](DRAFT-treasury-auction-zn-futures.md) |
+| **C** | rates | `treasury-auction-cycle` | yields drift up before an auction and retrace after it, scaled by how constrained dealers are | the same auction calendar for the price half; the order-flow half needs ZN L1/L3 data that is unobtainable (D-0120) | [auction-day-price-pressure-reversal](DRAFT-auction-day-price-pressure-reversal.md) |
+| **C** | rates | `limit-order-book-dynamics` | what a bond future's order book actually contains — i.e. what an OHLCV bar throws away | limit-order-book data for a rates future, unobtainable here (D-0120) and on a different exchange besides. Listed as a NAMED HOLE, not as work to schedule | [bond-futures-order-book-stylized-facts](DRAFT-bond-futures-order-book-stylized-facts.md) |
+| **C** | rates | `yield-curve-duration` | whether curve-slope predictability of bond returns is partly a small-sample artifact of how it is estimated | a second point on the curve — an instrument, not a feature. The archive's only rates root is ZN | [yield-curve-slope-treasury-returns](DRAFT-yield-curve-slope-treasury-returns.md) |
+| **C** | rates, metals | `jump-detection-discontinuities` | Treasuries and precious metals jump at the same instant, which unconditional correlation hides | multi-instrument configs, a jump estimator, and silver — the data we DO hold is already the right pair at the right grain | [cojumps-rates-precious-metals](DRAFT-cojumps-rates-precious-metals.md) |
+| **C** | energy | `announcement-drift-commodities` | a published NULL: scheduled macro releases do not raise the jump arrival rate in energy futures | a macro announcement calendar with timestamps and surprise values. Registered for its null, which qualifies three other candidates | [energy-announcement-nonreaction](DRAFT-energy-announcement-nonreaction.md) |
+| **C** | energy | `volatility-transmission-commodities` | energy and agricultural volatilities are linked only in the turbulent regime | agricultural roots (a purchase), multi-instrument configs (a design rule) and a fitted regime-switching indicator (a build) | [energy-volatility-regime-linkage](DRAFT-energy-volatility-regime-linkage.md) |
+| **C** | energy, metals | `open-interest-positioning` | hedging pressure and the equity link determine the commodity futures risk premium | trader-position data with an availability rule, and multi-instrument configs — but it names a cheap separable unlock: open interest is ALREADY in `raw/` | [hedging-pressure-risk-premium](DRAFT-hedging-pressure-risk-premium.md) |
+| **C** | energy, metals | `futures-basis-cash-arbitrage` | basis and basis momentum measured against a real spot price rather than against the front contract | a spot price series per commodity, and a two-maturity curve reader — and it constrains how that reader should define the basis | [spot-based-basis-momentum](DRAFT-spot-based-basis-momentum.md) |
+| **C** | rates, energy | `futures-basis-cash-arbitrage` | the seller's timing and location choices are worth something, so the basis need not converge cleanly | a cash price for the deliverable and a delivery-option valuation. Its value is the note it leaves: ZN's convergence turns on a basket we cannot see | [delivery-options-basis-convergence](DRAFT-delivery-options-basis-convergence.md) |
+| **C** | equity index | `jump-detection-discontinuities` | a price jump matters for forecasting only when a volatility jump came with it | an options-implied volatility series, a jump estimator, and a criterion that scores a FORECAST rather than a position — the third is a funnel gap | [price-volatility-cojump-forecasting](DRAFT-price-volatility-cojump-forecasting.md) |
+
+## Candidates — wave 1 (2026-08-06)
 
 | grade | asset | topic | mechanism | missing piece | draft |
 |---|---|---|---|---|---|
@@ -99,4 +256,3 @@ Two of those are worth reading twice. **A macro/event calendar is a static CSV**
 | **C** | rates | `calendar-effects` | a strong, persistent year-end seasonality in one-month rate derivatives | the instrument itself — this is a short-rate/LIBOR phenomenon and the archive's only rates root is ZN, a 10-year Treasury note future; LIBOR is also discontinued | [year-end-rate-seasonality](DRAFT-year-end-rate-seasonality.md) |
 | **C** | rates | `cross-asset-lead-lag` | price discovery and volatility spillover between bond futures and interest-rate swaps | interest-rate swap data and multi-instrument configs; the archive's rates holding is ZN futures alone | [rates-price-discovery-spillover](DRAFT-rates-price-discovery-spillover.md) |
 | **C** | rates | `macro-announcements` | scheduled announcements produce most of the intraday jumps in rate-futures volatility and covariance | a macro announcement calendar, plus multi-instrument configs for the covariance half | [announcement-rates-covariance](DRAFT-announcement-rates-covariance.md) |
-

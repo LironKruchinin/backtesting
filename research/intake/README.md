@@ -166,6 +166,71 @@ short enough to catch a reproduced clause before it becomes a sentence; a run
 made only of stopwords is ignored. Watched failing against both a stubbed
 `[]` return and a threshold raised to twenty.
 
+### Re-checking the drafts a human edited
+
+`draft` runs `find_predictions` on **its own output**, and every draft in
+`drafts/` is then hand-written over that skeleton — so the check the tool
+performs is not the check the committed file needs. `check_drafts.py` re-runs
+both rules over the directory:
+
+```bash
+cd research/intake && python check_drafts.py                    # everything
+cd research/intake && python check_drafts.py --only A.md B.md   # this wave's files
+```
+
+Exit 0 clean, 4 if anything was found **or could not be checked**. The second
+half matters: `find_reproduced_prose` needs the abstract, the abstract lives only
+in the gitignored corpus, and a corpus is not rebuilt identically by a later
+harvest — so a wave can only answer for its own drafts, and everything else is
+reported `UNCHECKED` rather than silently passed. An unchecked draft that prints
+nothing looks exactly like a clean one, which is the unfired-detector failure
+CLAUDE.md §7 names.
+
+**One narrow exemption, and it was found by the check firing.** A citation must
+state the paper's title, so the title is the one span of third-party text a draft
+is *required* to reproduce. Two wave-1 drafts
+(`index-futures-return-dependence`, `inventories-and-oil-basis`) were flagged on
+runs that turned out to be their own citation lines, because both papers repeat
+their title inside their abstract. `without_cited_title` drops exactly the
+italicised `*<title>*` span the citation block writes, for exactly the record the
+draft was matched to, and nothing else — the alternative was mangling two
+citations to satisfy a checker, which is the direction §7 refuses. The exemption
+was verified not to disable the check: with it in place, a clause lifted verbatim
+from an abstract and planted in a draft's Mechanism section was still reported
+(seven overlapping runs), and the file restored to its pre-mutation blob
+`6438705d`, printed before and after.
+
+## Wave 2 (2026-08-07): twenty more topics, and what the throttle did
+
+The second sweep added twenty topic files aimed at seams the first did not
+touch — storage, curve shape, carry, auctions, positioning, order flow,
+execution, jumps — deliberately weighted away from equity index, because the
+archive's CL, GC, 6E and ZN holdings were almost untouched by the backlog. Five
+queries each, `--limit 30 --pages 1`, run back to back.
+
+**Running twenty topics in one pass is enough to get refused by three of the four
+sources.** Measured over the 100 (topic × query) pairs:
+
+| source | failed pairs |
+|---|---|
+| `crossref` | **0 / 100** |
+| `arxiv` | 51 / 100 |
+| `openalex` | 72 / 100 |
+| `semanticscholar` | 88 / 100 |
+
+Semantic Scholar's rate is the expected one and matches wave 1's experience.
+OpenAlex and arXiv failing at all is new, and it is a volume effect rather than a
+policy change: `THROTTLE_SECONDS = 1.1` is per host, and four sources rotating
+means each host is asked roughly every fourth request, which is fine for a
+handful of topics and not for a hundred consecutive pairs. A second pass over the
+thin topics with a 45-second gap between them recovered most of the loss.
+**Budget a gap between topics, not only between requests** — the throttle is
+sized for one topic at a time.
+
+Crossref answering 100/100 is worth recording too: it is the most reliable of the
+four by a wide margin and the only one that never refused, which is why the
+top-up pass excluded it.
+
 ## Tests
 
 ```bash
