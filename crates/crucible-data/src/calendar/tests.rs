@@ -1787,3 +1787,55 @@ fn the_halt_gate_is_asked_per_trading_day_not_per_calendar() {
         );
     }
 }
+
+/// **One root resolves to exactly one calendar**, and that is a property of
+/// the bundled tables rather than of anything structural.
+///
+/// [`Calendar::for_instrument`] returns the FIRST table whose `roots` list
+/// claims the symbol, so two tables claiming one root would resolve by table
+/// order — which is `BUNDLED`'s declaration order, a fact about a source file.
+/// Every consumer that resolves a calendar once and applies it to several
+/// contracts rests on this: a pooled run counts sessions, cuts folds and
+/// annualizes on one calendar, so if this ever fails the pooled denominator
+/// silently becomes order-dependent.
+///
+/// The remedy, if this fires: decide which table owns the root and delete it
+/// from the other, or split the root. Do NOT make `for_instrument` pick a
+/// "best" match — a tie-break is a second rule to keep in step with the tables,
+/// which is the mistake `matches_any`' doc comment already records for the
+/// symbol parser (D-0072).
+#[test]
+fn no_two_bundled_calendars_claim_the_same_root() {
+    let calendars = Calendar::all().expect("bundled tables parse");
+    assert!(
+        calendars.len() >= 2,
+        "a uniqueness check over fewer than two tables cannot fail — positive \
+         control on the check itself"
+    );
+
+    let mut owner: BTreeMap<&str, &str> = BTreeMap::new();
+    for calendar in &calendars {
+        for root in calendar.roots() {
+            if let Some(previous) = owner.insert(root.as_str(), calendar.id()) {
+                panic!(
+                    "root {root:?} is claimed by both {previous} and {}; \
+                     Calendar::for_instrument would resolve it by table order",
+                    calendar.id()
+                );
+            }
+        }
+    }
+
+    // The check has actually inspected something: every bundled root is in the
+    // map. A version that iterated nothing would pass silently (D-0118).
+    let declared: usize = calendars.iter().map(|c| c.roots().len()).sum();
+    assert_eq!(
+        owner.len(),
+        declared,
+        "every declared root must have been examined"
+    );
+    assert!(
+        owner.contains_key("ES"),
+        "positive control: the equity-index table declares ES"
+    );
+}

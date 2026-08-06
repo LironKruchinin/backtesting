@@ -35,6 +35,7 @@
     reason = "C4a builds the pooled planner behind D-0117's refusal; C4b wires               the replay and registry claims to it, and C6 lifts the refusal.               Landing it unreachable is the inert-first ordering D-0114 and               D-0115 already used — the alternative is a half-wired pooling               path, which is the one shape that must not exist on main."
 )]
 
+use crucible_core::prelude::*;
 use crucible_data::calendar::Calendar;
 use crucible_data::continuous::{ContinuousError, RollTable, read_roll_table};
 use crucible_data::ingest::window::days_from_civil;
@@ -166,6 +167,61 @@ pub(crate) fn plan_pool(
             )
         })?;
     let needs = fold_spec.train_days + fold_spec.test_days;
+
+    // One calendar governs the whole pool, and it is asserted rather than
+    // assumed.
+    //
+    // The calendar above is resolved from `loaded.spec.instrument`, which
+    // `config.rs` builds from `instruments[0]` — so a pool spanning two
+    // calendars would silently take its trading days, its session clock and
+    // its `bars_per_year` from whichever contract was typed first. Every
+    // pooled session count reads that calendar, so the error would be in the
+    // denominator of the admission floor.
+    //
+    // Two things have to hold, and only one of them is now structural. The
+    // config's root check guarantees a single *root* (C4b-ii) — but "one root
+    // resolves to one calendar" is a property of the bundled TABLES, not of
+    // that check: `Calendar::for_instrument` takes the FIRST table whose
+    // `roots` list claims the symbol, so two tables claiming one root would
+    // resolve by table order. `no_two_bundled_calendars_claim_the_same_root`
+    // in `crucible-data` is the tripwire for that half; this loop is the
+    // tripwire for a pool that reaches here spanning two of them anyway.
+    for instrument in contracts {
+        let id = InstrumentId::new(instrument);
+        let governing = Calendar::for_instrument(&id).map_err(|e| {
+            (
+                EXIT_USAGE,
+                format!("bundled calendar tables are broken: {e}"),
+            )
+        })?;
+        match governing {
+            Some(other) if other.id() == calendar.id() => {}
+            Some(other) => {
+                return Err((
+                    EXIT_USAGE,
+                    format!(
+                        "{instrument} is governed by calendar {other}, but the pool's calendar \
+                         is {ours} (taken from {first}). A pooled run counts sessions on one \
+                         calendar; two would make the admission floor's denominator depend on \
+                         which contract was declared first",
+                        other = other.id(),
+                        ours = calendar.id(),
+                        first = loaded.spec.instrument,
+                    ),
+                ));
+            }
+            None => {
+                return Err((
+                    EXIT_USAGE,
+                    format!(
+                        "no bundled calendar claims {instrument}, so its trading days cannot be \
+                         resolved and its contribution to the pooled session count would be a \
+                         guess"
+                    ),
+                ));
+            }
+        }
+    }
 
     let mut planned = Vec::with_capacity(contracts.len());
     for instrument in contracts {
