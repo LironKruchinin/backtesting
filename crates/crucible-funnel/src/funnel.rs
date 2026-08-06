@@ -275,6 +275,123 @@ fn sharpe_dispersion(combos: &[ComboWalkForward]) -> Option<f64> {
     (sd.is_finite() && sd > 0.0).then_some(sd)
 }
 
+/// One contract's contribution to a combo's [`Evidence`], plus the artifacts
+/// the report needs beside it.
+///
+/// Four fields because [`ComboOutcome`] needs `free_fill_oos`, `sweep`,
+/// `controls` and `deflated` to render, while [`assess`] needs `evidence` — so
+/// the per-contract half cannot hand back evidence alone.
+struct ContractEvidence {
+    free_fill_oos: crucible_engine::Summary,
+    sweep: Vec<CostLevel>,
+    controls: [Control; 2],
+    evidence: Evidence,
+}
+
+/// Produces one contract's evidence **without assessing it**.
+///
+/// This is the assess seam. What was missing was never that [`assess`] is a
+/// separate function — it already was — but that there was no way to obtain a
+/// contract's evidence on its own: the S1 screen, the cost sweep, both
+/// mandatory controls and the `Evidence` construction were inline in
+/// [`run_funnel`], which then assessed immediately. Block C needs N of these
+/// pooled into one `Evidence` and assessed **once** (C6a-iii-b); naming the
+/// boundary while it is still singular is what makes that a generalization
+/// rather than a rewrite.
+///
+/// A literal lift: the body below is the moved lines, unaltered. `costed`
+/// arrives by reference and `&costed` still coerces; `pbo` arrives as the
+/// whole `Result` so `pbo.as_ref().ok()` reads exactly as it did. Those
+/// choices exist so that nothing in the body had to be edited while being
+/// moved — a re-associated reduction here is D-0122's defect class in the
+/// function producing every Sharpe the funnel reports.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a literal lift takes what the inline block read; bundling them               would edit the call shape in the commit whose only proof is that               nothing changed. C6a-iii-b revisits the signature when it pools."
+)]
+fn contract_evidence(
+    inputs: &FunnelInputs<'_>,
+    index: usize,
+    costed: &ComboWalkForward,
+    test_windows: &[std::ops::Range<usize>],
+    oos_sessions: usize,
+    n_trials: usize,
+    trial_sharpe_dispersion: Option<f64>,
+    deannualize: &dyn Fn(f64) -> f64,
+    pbo: &Result<crate::stats::pbo::Pbo, crate::stats::pbo::PboUnavailable>,
+) -> ContractEvidence {
+    // Step 3: the S1 screen, cost-free. The only sanctioned FreeFills use.
+    let free_fill_oos = pooled_of(&replay(inputs, index, &mut FreeFills), inputs, test_windows);
+
+    // Step 4: the mandatory sweep.
+    let sweep: Vec<CostLevel> = inputs
+        .criteria
+        .cost_sweep_half_ticks
+        .iter()
+        .map(|&half_ticks| CostLevel {
+            half_ticks,
+            oos_stitched: pooled_of(
+                &replay(
+                    inputs,
+                    index,
+                    &mut inputs.costs.at_half_ticks(half_ticks, inputs.spec.tick),
+                ),
+                inputs,
+                test_windows,
+            ),
+        })
+        .collect();
+
+    // Step 5: the controls, under the declared costs.
+    let controls = [
+        random_entry_control(inputs, costed, test_windows),
+        buy_and_hold_control(inputs, test_windows, costed.oos_stitched.total_return_pct),
+    ];
+
+    let evidence = Evidence {
+        oos_trades: costed.oos_stitched.round_trips,
+        oos_sessions,
+        free_fill_return_pct: free_fill_oos.total_return_pct,
+        costed_return_pct: costed.oos_stitched.total_return_pct,
+        costed_sharpe: costed.oos_stitched.sharpe_naive,
+        sharpe_at_kill_level: sweep
+            .iter()
+            .find(|l| l.half_ticks == inputs.criteria.kill_if_dead_half_ticks)
+            .and_then(|l| l.oos_stitched.sharpe_naive),
+        random_entry_return_pct: controls[0].return_pct(),
+        buy_and_hold_return_pct: controls[1].return_pct(),
+        // The permutation harness is not wired into the run path yet:
+        // block A ships the harness and its acceptance test first
+        // (docs/plans/m3-full.md).
+        permutation_p_value: None,
+        // Deflated against the registry's trial count and the shape of the
+        // very series the Sharpe came from — never a shape recomputed from
+        // a different series (`ReturnShape`). `None` propagates: a combo
+        // with no Sharpe, or with a flat window that has no higher
+        // moments, has no deflated Sharpe either, and that is an absence
+        // rather than a zero.
+        deflated: costed.oos_stitched.sharpe_naive.and_then(|observed| {
+            let shape = costed.oos_stitched.return_shape;
+            crate::stats::deflated::deflated_sharpe(crate::stats::deflated::DeflationInputs {
+                observed_sharpe: deannualize(observed),
+                skew: shape.skew?,
+                kurtosis: shape.kurtosis?,
+                n_observations: shape.n_returns,
+                n_trials,
+                trial_sharpe_dispersion,
+            })
+        }),
+        n_trials,
+        pbo: pbo.as_ref().ok().map(|p| p.value),
+    };
+    ContractEvidence {
+        free_fill_oos,
+        sweep,
+        controls,
+        evidence,
+    }
+}
+
 /// Anything that stops a funnel run.
 #[derive(Debug)]
 pub enum FunnelError {
@@ -547,74 +664,22 @@ pub fn run_funnel(
     for costed in report.combos {
         let index = costed.id.combo_index;
 
-        // Step 3: the S1 screen, cost-free. The only sanctioned FreeFills use.
-        let free_fill_oos = pooled_of(
-            &replay(inputs, index, &mut FreeFills),
+        let ContractEvidence {
+            free_fill_oos,
+            sweep,
+            controls,
+            evidence,
+        } = contract_evidence(
             inputs,
+            index,
+            &costed,
             &test_windows,
-        );
-
-        // Step 4: the mandatory sweep.
-        let sweep: Vec<CostLevel> = inputs
-            .criteria
-            .cost_sweep_half_ticks
-            .iter()
-            .map(|&half_ticks| CostLevel {
-                half_ticks,
-                oos_stitched: pooled_of(
-                    &replay(
-                        inputs,
-                        index,
-                        &mut inputs.costs.at_half_ticks(half_ticks, inputs.spec.tick),
-                    ),
-                    inputs,
-                    &test_windows,
-                ),
-            })
-            .collect();
-
-        // Step 5: the controls, under the declared costs.
-        let controls = [
-            random_entry_control(inputs, &costed, &test_windows),
-            buy_and_hold_control(inputs, &test_windows, costed.oos_stitched.total_return_pct),
-        ];
-
-        let evidence = Evidence {
-            oos_trades: costed.oos_stitched.round_trips,
             oos_sessions,
-            free_fill_return_pct: free_fill_oos.total_return_pct,
-            costed_return_pct: costed.oos_stitched.total_return_pct,
-            costed_sharpe: costed.oos_stitched.sharpe_naive,
-            sharpe_at_kill_level: sweep
-                .iter()
-                .find(|l| l.half_ticks == inputs.criteria.kill_if_dead_half_ticks)
-                .and_then(|l| l.oos_stitched.sharpe_naive),
-            random_entry_return_pct: controls[0].return_pct(),
-            buy_and_hold_return_pct: controls[1].return_pct(),
-            // The permutation harness is not wired into the run path yet:
-            // block A ships the harness and its acceptance test first
-            // (docs/plans/m3-full.md).
-            permutation_p_value: None,
-            // Deflated against the registry's trial count and the shape of the
-            // very series the Sharpe came from — never a shape recomputed from
-            // a different series (`ReturnShape`). `None` propagates: a combo
-            // with no Sharpe, or with a flat window that has no higher
-            // moments, has no deflated Sharpe either, and that is an absence
-            // rather than a zero.
-            deflated: costed.oos_stitched.sharpe_naive.and_then(|observed| {
-                let shape = costed.oos_stitched.return_shape;
-                crate::stats::deflated::deflated_sharpe(crate::stats::deflated::DeflationInputs {
-                    observed_sharpe: deannualize(observed),
-                    skew: shape.skew?,
-                    kurtosis: shape.kurtosis?,
-                    n_observations: shape.n_returns,
-                    n_trials,
-                    trial_sharpe_dispersion,
-                })
-            }),
             n_trials,
-            pbo: pbo.as_ref().ok().map(|p| p.value),
-        };
+            trial_sharpe_dispersion,
+            &deannualize,
+            &pbo,
+        );
         // `validate_s0_report` established exact contiguous grid identity
         // before any run was claimed, so assessment and rendering cannot pick
         // different copies of a duplicate or silently miss one.
