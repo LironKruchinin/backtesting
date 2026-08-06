@@ -127,6 +127,166 @@ pub fn sharpe_and_shape(
     (sharpe_naive, return_shape)
 }
 
+/// **Sufficient statistics** for a run's out-of-sample return series, so a
+/// pooled statistic can be computed without retaining the series.
+///
+/// # Why this exists rather than a retained curve
+///
+/// Pooling across contracts needs the moments of the CONCATENATED series, and
+/// the obvious way to get them is to keep each contract's curve and join them.
+/// That is D-0071's refused case, not an analogy to it: a stitched curve is one
+/// `(Ts, NanoUsd)` per bar, so ~40 out-of-sample sessions at 1m is ~880 KB per
+/// combo per contract, and a 4,000-combo grid is ~3.5 GB for a single contract.
+/// D-0071 refused a retained per-bar series at 4.98 GiB and pinned the O(1)
+/// reducer's size by test; this is the same trade, and
+/// `a_return_stats_is_forty_eight_bytes` is the same pin.
+///
+/// # Sums, not averages
+///
+/// `m2`, `m3` and `m4` are Σ(r−μ)^k, **undivided**. [`sharpe`] wants
+/// `Σ(r−μ)²/(n−1)` and [`ReturnShape`] wants `Σ(r−μ)²/n`, so storing the sum
+/// lets both derive their own convention from one field. Storing either
+/// average would force the other consumer to multiply back, and a stored value
+/// whose divisor a reader has to remember is how two call sites end up
+/// disagreeing about what it meant.
+///
+/// # Bit-identity is by construction
+///
+/// [`ReturnStats::shape`] divides by `n`, takes the square root and forms the
+/// powers at exactly the points [`ReturnShape::of`] does, so the two agree
+/// bit-for-bit rather than to a tolerance. That is asserted, not hoped for:
+/// there are now two moment implementations and
+/// `return_stats_and_return_shape_agree_bit_for_bit` is the guard against them
+/// drifting.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReturnStats {
+    /// Returns the statistics were computed from.
+    pub n: usize,
+    /// Arithmetic mean of those returns.
+    pub mean: f64,
+    /// Σ(r−μ)² — undivided.
+    pub m2: f64,
+    /// Σ(r−μ)³ — undivided.
+    pub m3: f64,
+    /// Σ(r−μ)⁴ — undivided.
+    pub m4: f64,
+    /// Final minus initial equity, in nanodollars. Integer, so a pooled total
+    /// return carries no float error at all: the stitch is delta-based and
+    /// every contract starts from the same capital, so the pooled final is
+    /// `initial + Σ deltas`.
+    pub net_delta_nano_usd: NanoUsd,
+}
+
+impl ReturnStats {
+    /// Reduces an equity curve to its sufficient statistics in one pass over
+    /// the returns, retaining nothing per-bar.
+    ///
+    /// The return series is built exactly as [`sharpe_and_shape`] builds it,
+    /// including the `prev > 0.0` guard that drops steps out of an insolvent
+    /// prefix (D-0076).
+    #[must_use]
+    pub fn of(equity: &[(Ts, NanoUsd)]) -> ReturnStats {
+        let mut rets = Vec::with_capacity(equity.len().saturating_sub(1));
+        for w in equity.windows(2) {
+            let prev = nano_usd_to_f64(w[0].1);
+            let curr = nano_usd_to_f64(w[1].1);
+            if prev > 0.0 {
+                rets.push(curr / prev - 1.0);
+            }
+        }
+        let net_delta_nano_usd = match (equity.first(), equity.last()) {
+            (Some(&(_, a)), Some(&(_, b))) => b - a,
+            _ => 0,
+        };
+        if rets.is_empty() {
+            return ReturnStats {
+                n: 0,
+                mean: 0.0,
+                m2: 0.0,
+                m3: 0.0,
+                m4: 0.0,
+                net_delta_nano_usd,
+            };
+        }
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "bar counts fit f64 exactly at our scales"
+        )]
+        let n = rets.len() as f64;
+        // Same order as `ReturnShape::of`: mean first, then each power summed
+        // over the same iteration, written out per D-0122/D-0126.
+        let mean = rets.iter().sum::<f64>() / n;
+        let m2 = rets
+            .iter()
+            .map(|r| {
+                let d = r - mean;
+                d * d
+            })
+            .sum::<f64>();
+        let m3 = rets
+            .iter()
+            .map(|r| {
+                let d = r - mean;
+                d * d * d
+            })
+            .sum::<f64>();
+        let m4 = rets
+            .iter()
+            .map(|r| {
+                let d = r - mean;
+                let d2 = d * d;
+                d2 * d2
+            })
+            .sum::<f64>();
+        ReturnStats {
+            n: rets.len(),
+            mean,
+            m2,
+            m3,
+            m4,
+            net_delta_nano_usd,
+        }
+    }
+
+    /// The [`ReturnShape`] these statistics describe.
+    ///
+    /// Divides by `n`, takes the square root and forms the powers at exactly
+    /// the points [`ReturnShape::of`] does, which is what makes the two
+    /// bit-identical rather than merely close. The `< 2` and flat-window guards
+    /// are reproduced for the same reason.
+    #[must_use]
+    pub fn shape(&self) -> ReturnShape {
+        if self.n < 2 {
+            return ReturnShape {
+                n_returns: self.n,
+                skew: None,
+                kurtosis: None,
+            };
+        }
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "bar counts fit f64 exactly at our scales"
+        )]
+        let n = self.n as f64;
+        let m2 = self.m2 / n;
+        if m2 <= 0.0 {
+            return ReturnShape {
+                n_returns: self.n,
+                skew: None,
+                kurtosis: None,
+            };
+        }
+        let m3 = self.m3 / n;
+        let m4 = self.m4 / n;
+        let sd = m2.sqrt();
+        ReturnShape {
+            n_returns: self.n,
+            skew: Some(m3 / (sd * sd * sd)),
+            kurtosis: Some(m4 / (m2 * m2)),
+        }
+    }
+}
+
 /// The shape of the return series a naive Sharpe was computed on.
 ///
 /// Retained because a Sharpe alone cannot be deflated: Bailey & López de
@@ -268,6 +428,104 @@ fn sharpe(rets: &[f64], periods_per_year: f64) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A curve whose per-bar returns vary, so the third and fourth moments
+    /// exist. Deliberately not a straight line: on constant returns both
+    /// implementations return `None` and any agreement test passes vacuously.
+    fn skewed_curve() -> Vec<(Ts, NanoUsd)> {
+        let steps: [i64; 12] = [
+            1_000_000, -300_000, 250_000, -120_000, 900_000, -50_000, 70_000, -640_000, 30_000,
+            410_000, -220_000, 1_800_000,
+        ];
+        let mut level: NanoUsd = 1_000_000_000_000;
+        let mut out = vec![(Ts(0), level)];
+        for (i, s) in steps.iter().enumerate() {
+            level += s;
+            out.push((Ts(i as i64 + 1), level));
+        }
+        out
+    }
+
+    /// **The drift guard.** Two moment implementations now exist —
+    /// `ReturnShape::of` and `ReturnStats::shape` — and this asserts they agree
+    /// BIT-FOR-BIT, not to a tolerance, because both perform the same
+    /// operations in the same order (D-0126 having made both sides written-out
+    /// forms; before that this could only have been a one-ULP tolerance that
+    /// passed in release and failed in dev).
+    ///
+    /// What would this do if the thing it looks for were absent? On a constant
+    /// return series both sides yield `None` and every comparison below would
+    /// hold while proving nothing — so the fixture is asserted to produce
+    /// `Some` first. That assertion is the control on the control.
+    #[test]
+    fn return_stats_and_return_shape_agree_bit_for_bit() {
+        let eq = skewed_curve();
+        let (_, direct) = sharpe_and_shape(&eq, 252.0);
+        let derived = ReturnStats::of(&eq).shape();
+
+        assert!(
+            direct.skew.is_some() && direct.kurtosis.is_some(),
+            "the fixture must produce real moments, or this test is vacuous"
+        );
+        assert_eq!(derived.n_returns, direct.n_returns);
+        assert_eq!(
+            derived.skew.map(f64::to_bits),
+            direct.skew.map(f64::to_bits),
+            "skew must agree bit-for-bit: {:?} vs {:?}",
+            derived.skew,
+            direct.skew
+        );
+        assert_eq!(
+            derived.kurtosis.map(f64::to_bits),
+            direct.kurtosis.map(f64::to_bits),
+            "kurtosis must agree bit-for-bit: {:?} vs {:?}",
+            derived.kurtosis,
+            direct.kurtosis
+        );
+    }
+
+    /// The flat window still agrees, and is a SEPARATE test rather than folded
+    /// into the one above — there it would be the degenerate case that hides a
+    /// real disagreement, here it is the behaviour under test.
+    #[test]
+    fn both_moment_paths_report_no_opinion_on_a_flat_window() {
+        let eq: Vec<(Ts, NanoUsd)> = (0..8).map(|i| (Ts(i), 1_000_000_000_000)).collect();
+        let (_, direct) = sharpe_and_shape(&eq, 252.0);
+        let derived = ReturnStats::of(&eq).shape();
+        assert!(direct.skew.is_none() && direct.kurtosis.is_none());
+        assert_eq!(derived.skew, direct.skew);
+        assert_eq!(derived.kurtosis, direct.kurtosis);
+    }
+
+    /// The net delta is exact integer arithmetic, so a pooled total return
+    /// carries no float error.
+    #[test]
+    fn the_net_delta_is_the_exact_integer_difference() {
+        let eq = skewed_curve();
+        let stats = ReturnStats::of(&eq);
+        assert_eq!(
+            stats.net_delta_nano_usd,
+            eq.last().expect("nonempty").1 - eq.first().expect("nonempty").1
+        );
+        assert_ne!(
+            stats.net_delta_nano_usd, 0,
+            "the fixture must actually move"
+        );
+    }
+
+    /// **The size pin**, in `a_day_record_is_fifty_six_bytes`' shape (D-0071).
+    ///
+    /// The whole reason this type exists is that retaining the curve costs
+    /// ~880 KB per combo per contract. Growing it back should be a failing test
+    /// rather than a memory regression nobody measures.
+    #[test]
+    fn a_return_stats_is_forty_eight_bytes() {
+        assert_eq!(
+            std::mem::size_of::<ReturnStats>(),
+            48,
+            "ReturnStats is the O(1) reducer that replaced a retained per-bar              curve (D-0071's trade). If this grew, say why in a decision entry."
+        );
+    }
 
     fn eq(points: &[i64]) -> Vec<(Ts, NanoUsd)> {
         points
