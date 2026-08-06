@@ -567,3 +567,135 @@ fn hash_text(hasher: &mut blake3::Hasher, text: &str) {
     hasher.update(&len.to_le_bytes());
     hasher.update(bytes);
 }
+
+/// Everything a pooled run must say about its own sample, in one block.
+///
+/// # Path-dependent statistics are absent BY CONSTRUCTION, not by convention
+///
+/// Max drawdown, longest losing streak and time-under-water across the pooled
+/// concatenation describe a path no account ever walked — the seams join
+/// windows months apart (D-0119). This report cannot compute them, and not
+/// because it declines to: [`ContractEvaluation`] and [`PooledEvaluation`]
+/// carry no equity curve, no [`Summary`](crucible_engine::Summary) and no
+/// per-bar series, so there is nothing to concatenate. The inputs are day
+/// keys and counts, all path-independent.
+///
+/// `the_pooled_types_carry_nothing_path_dependent` is the tripwire: it fails
+/// if a field whose name suggests a path is ever added, so the guarantee stops
+/// being a property someone has to re-check by reading.
+pub struct PooledReport<'a> {
+    /// Declared root, e.g. `ES`.
+    pub root: &'a str,
+    /// Union / sum / overlap (D-0114).
+    pub sessions: &'a PooledSessions,
+    /// Admission's numbers, skips and gaps.
+    pub evaluation: &'a PooledEvaluation,
+    /// Combos in the grid — the other factor of the trial count.
+    pub combos: usize,
+    /// Which roll rule produced the front windows. Named because every report
+    /// in this codebase says which of two things produced its numbers.
+    pub roll_rule: &'a str,
+}
+
+impl PooledReport<'_> {
+    /// The block a pooled run prints, and the same text the scorecard embeds.
+    #[must_use]
+    pub fn render(&self) -> String {
+        let e = self.evaluation;
+        let s = self.sessions;
+        let mut out = String::new();
+
+        out.push_str(&format!(
+            "  pooling       root {}, {} contract(s) declared, {} evaluated, {} skipped\n",
+            self.root,
+            s.contracts(),
+            e.contracts_evaluated,
+            e.skipped.len()
+        ));
+        out.push_str(&format!(
+            "  attribution   front-month windows from the {} roll table\n",
+            self.roll_rule
+        ));
+
+        // The union IS the sample; the sum is printed beside it so a reader can
+        // tell whether the pooling was honest, and can never be consumed as a
+        // sample size (D-0114).
+        out.push_str(&format!(
+            "  sessions      {} distinct out-of-sample — {} summed, {} overlapping\n",
+            e.oos_sessions, s.summed_days, s.overlap_days
+        ));
+        if s.has_overlap() {
+            out.push_str(
+                "                the SUM is not a sample size: contracts of one root trade\n\
+                 \x20               the same days, and adding them claims a sample twice the\n\
+                 \x20               size of the one that exists (D-0114)\n",
+            );
+        }
+
+        // The other half of the two-part floor. A pool clearing the session
+        // half has cleared half a floor (D-0119).
+        out.push_str(&format!(
+            "  trades        {} out-of-sample round-trip(s), summed across contracts\n\
+             \x20               (a round-trip belongs to exactly one contract, so summing is\n\
+             \x20               exact — unlike sessions, which must be unioned)\n",
+            e.oos_trades
+        ));
+
+        // Printed EVEN AT ZERO (D-0070): "nothing was dropped" and "the report
+        // forgot to say" must not look the same.
+        if e.skipped.is_empty() {
+            out.push_str("  skipped       none — every declared contract contributed\n");
+        } else {
+            out.push_str(&format!(
+                "  skipped       {} contract(s):\n",
+                e.skipped.len()
+            ));
+            for (instrument, reason) in &e.skipped {
+                out.push_str(&format!("                  {instrument} — {reason}\n"));
+            }
+        }
+
+        // Gaps are reported, never refused: a deliberately non-consecutive pool
+        // is a legitimate experiment and an invisible hole is not (D-0119).
+        if e.gaps.is_empty() {
+            out.push_str("  gaps          none — the evaluated contracts are contiguous\n");
+        } else {
+            let total: i64 = e.gaps.iter().map(SessionGap::days).sum();
+            out.push_str(&format!(
+                "  gaps          {} hole(s), {total} trading day(s) total:\n",
+                e.gaps.len()
+            ));
+            for gap in &e.gaps {
+                out.push_str(&format!(
+                    "                  day {}..{} ({}) between {} and {}\n",
+                    gap.from_day,
+                    gap.to_day,
+                    gap.days(),
+                    gap.between.0,
+                    gap.between.1
+                ));
+            }
+        }
+
+        // Composition rather than a bare integer, with the direction of the
+        // error stated (D-0124, D-0125).
+        out.push_str(&format!(
+            "  trials        {} = {} contract(s) x {} combo(s)\n\
+             \x20               pooled contracts are a LARGER SAMPLE, not independent\n\
+             \x20               searches, so this count OVER-deflates the Sharpe. It is used\n\
+             \x20               anyway: the preferred error is against the strategy. Read the\n\
+             \x20               correction as conservative, not precise (D-0124)\n",
+            e.contracts_evaluated * self.combos,
+            e.contracts_evaluated,
+            self.combos
+        ));
+
+        out.push_str(
+            "  NOT COMPUTED  max drawdown, longest losing streak and time under water are\n\
+             \x20               not reported across this pool and cannot be: it is many short\n\
+             \x20               non-contiguous windows, not one track record, and such a\n\
+             \x20               number would describe a path no account ever walked (D-0119)\n",
+        );
+        out
+    }
+}

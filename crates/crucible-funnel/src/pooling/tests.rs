@@ -704,3 +704,205 @@ fn the_deflated_sharpe_falls_as_the_pool_grows() {
         "a DSR is a probability"
     );
 }
+
+// ---------------------------------------------------------------------------
+// C5 — the pooled report. Each control names the DEGENERATE case it excludes,
+// per the C4d lesson: a reviewer can check strictness by reading, and cannot
+// check non-degeneracy without knowing the domain.
+// ---------------------------------------------------------------------------
+
+fn report_of<'a>(
+    root: &'a str,
+    sessions: &'a PooledSessions,
+    evaluation: &'a PooledEvaluation,
+    combos: usize,
+) -> PooledReport<'a> {
+    PooledReport {
+        root,
+        sessions,
+        evaluation,
+        combos,
+        roll_rule: "`.v` volume",
+    }
+}
+
+/// **The skip line renders AT ZERO.**
+///
+/// Degenerate case excluded: a reporter that prints the line only when
+/// something was skipped. Then "nothing was dropped" and "the report forgot to
+/// say" are the same page, and a pool that quietly lost two short contracts
+/// reports a smaller sample than it declared with nothing to show it
+/// (D-0070's declared-filter pattern).
+#[test]
+fn the_skip_line_renders_when_nothing_was_skipped() {
+    let a = contract("ESH2024", &[10, 11, 12, 13]);
+    let sessions = pool_sessions(&[a]).expect("poolable");
+    let ev = pool_evaluations(&[evaluation("ESH2024", (10, 13), &[12, 13], 4, 1)]).expect("ok");
+    let text = report_of("ES", &sessions, &ev, 4).render();
+    assert!(text.contains("skipped       none"), "{text}");
+    assert!(
+        text.contains("every declared contract contributed"),
+        "the zero case says what it means, not just '0': {text}"
+    );
+}
+
+/// A skipped contract is named WITH its reason, and both reasons render.
+#[test]
+fn a_skipped_contract_is_named_with_its_reason() {
+    let short = evaluation("ESM2010", (10, 14), &[], 0, 0);
+    let good = evaluation("ESH2024", (20, 60), &[50, 51], 4, 1);
+    let ev = pool_evaluations(&[short, good]).expect("ok");
+    let sessions = pool_sessions(&[contract("ESH2024", &[20, 21])]).expect("ok");
+    let text = report_of("ES", &sessions, &ev, 4).render();
+    assert!(
+        text.contains("ESM2010"),
+        "the skipped contract is named: {text}"
+    );
+    assert!(
+        text.contains("one fold needs"),
+        "and the reason travels with it: {text}"
+    );
+}
+
+/// **A gap is reported with its span and size; a contiguous pool reports
+/// none.**
+///
+/// Degenerate case excluded: a reporter that always claims contiguity — which
+/// passes any test that only checks the contiguous case — and its mirror, one
+/// that always claims a hole.
+#[test]
+fn a_gap_is_reported_with_span_and_size_and_a_contiguous_pool_is_not() {
+    let h = evaluation("ESH2024", (10, 13), &[12, 13], 4, 1);
+    let u = evaluation("ESU2024", (30, 33), &[32, 33], 4, 1);
+    let holed = pool_evaluations(&[h.clone(), u]).expect("ok");
+    let sessions = pool_sessions(&[contract("ESH2024", &[10, 11])]).expect("ok");
+    let text = report_of("ES", &sessions, &holed, 4).render();
+    assert!(text.contains("day 14..29"), "span: {text}");
+    assert!(text.contains("(16)"), "size: {text}");
+    assert!(
+        text.contains("between ESH2024 and ESU2024"),
+        "bounds: {text}"
+    );
+
+    let m = evaluation("ESM2024", (14, 17), &[16, 17], 4, 1);
+    let solid = pool_evaluations(&[h, m]).expect("ok");
+    let text2 = report_of("ES", &sessions, &solid, 4).render();
+    assert!(text2.contains("gaps          none"), "{text2}");
+    assert!(
+        !text2.contains("hole(s)"),
+        "and no hole is invented: {text2}"
+    );
+}
+
+/// **The union is reported beside the sum, and on an overlapping pool they
+/// DIFFER.**
+///
+/// Strict, because the defect being excluded — reporting the sum as the sample
+/// — makes them EQUAL rather than reversed. Degenerate case: a pool with no
+/// overlap, where union and sum coincide legitimately and the test would prove
+/// nothing.
+#[test]
+fn the_union_is_reported_beside_the_sum_and_they_differ_when_they_must() {
+    // One fixture feeding BOTH aggregates, so the rendered numbers relate to
+    // each other. Two overlapping contracts: days 10..13 and 12..15.
+    let a = contract("ESH2024", &[10, 11, 12, 13]);
+    let b = contract("ESM2024", &[12, 13, 14, 15]);
+    let sessions = pool_sessions(&[a, b]).expect("poolable");
+    let ev = pool_evaluations(&[
+        evaluation("ESH2024", (10, 13), &[10, 11, 12, 13], 4, 1),
+        // Overlapping OOS days, so the pooled union (6) differs from both the
+        // per-contract sum (8) and the session fixture's summed total.
+        evaluation("ESM2024", (12, 15), &[12, 13, 14, 15], 4, 1),
+    ])
+    .expect("ok");
+
+    // FIXTURE CONTROL: union and sum must actually differ here, or an
+    // assertion that they render differently proves nothing.
+    assert!(
+        sessions.summed_days > sessions.distinct_days,
+        "the fixture must overlap: {} summed vs {} distinct",
+        sessions.summed_days,
+        sessions.distinct_days
+    );
+    assert_ne!(
+        ev.oos_sessions, sessions.summed_days,
+        "and the reported sample must be distinguishable from the sum"
+    );
+
+    let text = report_of("ES", &sessions, &ev, 4).render();
+    // THE ASSERTION THAT MATTERS, and the one a first draft omitted: the
+    // DISTINCT count is what renders as the sample. Asserting only that the
+    // sum and overlap appear passes on a build that reports the sum AS the
+    // sample, because the sum still appears — it is simply in the wrong slot.
+    assert!(
+        text.contains(&format!("{} distinct out-of-sample", ev.oos_sessions)),
+        "the union is the sample: {text}"
+    );
+    assert!(
+        text.contains(&format!("{} summed", sessions.summed_days)),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("{} overlapping", sessions.overlap_days)),
+        "{text}"
+    );
+    assert!(
+        text.contains("the SUM is not a sample size"),
+        "an overlapping pool must say so in words: {text}"
+    );
+}
+
+/// The trial count renders as a COMPOSITION with the direction of its error.
+#[test]
+fn the_trial_count_renders_as_a_composition_with_its_over_deflation_stated() {
+    let sessions = pool_sessions(&[contract("ESH2024", &[10, 11])]).expect("ok");
+    let ev = pool_evaluations(&[
+        evaluation("ESH2024", (10, 13), &[12, 13], 4, 1),
+        evaluation("ESM2024", (14, 17), &[16, 17], 4, 1),
+    ])
+    .expect("ok");
+    let text = report_of("ES", &sessions, &ev, 6).render();
+    assert!(text.contains("12 = 2 contract(s) x 6 combo(s)"), "{text}");
+    assert!(text.contains("OVER-deflates"), "{text}");
+    assert!(
+        text.contains("conservative, not precise"),
+        "a reader must not mistake it for a precise correction: {text}"
+    );
+    assert!(
+        text.contains("`.v` volume"),
+        "and the attribution source is named: {text}"
+    );
+}
+
+/// **Path-dependent statistics are structurally absent, and this is the
+/// tripwire.**
+///
+/// The pooled types carry day keys and counts — no equity curve, no `Summary`,
+/// no per-bar series — so a drawdown across the concatenation is not something
+/// this code declines to compute, it is something it cannot express. That is
+/// stronger than a runtime refusal and it is why D-0119's rule needed no
+/// enforcement code.
+///
+/// Degenerate case excluded: the guarantee silently lapsing when someone adds
+/// a field. This fails the moment a path-shaped name appears in the report, so
+/// the property stops being one a reader has to re-verify.
+#[test]
+fn the_pooled_types_carry_nothing_path_dependent() {
+    let sessions = pool_sessions(&[contract("ESH2024", &[10, 11])]).expect("ok");
+    let ev = pool_evaluations(&[evaluation("ESH2024", (10, 13), &[12, 13], 4, 1)]).expect("ok");
+    let text = report_of("ES", &sessions, &ev, 4).render();
+    for forbidden in ["max drawdown of", "losing streak of", "time under water:"] {
+        assert!(
+            !text.contains(forbidden),
+            "a pooled report must not carry {forbidden:?}: {text}"
+        );
+    }
+    assert!(
+        text.contains("NOT COMPUTED"),
+        "and it says so rather than leaving the absence to be noticed: {text}"
+    );
+    // The positive control on this test: the words DO appear, in the sentence
+    // explaining why they are absent. A test asserting only absence would pass
+    // on a report that said nothing at all.
+    assert!(text.contains("max drawdown, longest losing streak and time under water"));
+}
