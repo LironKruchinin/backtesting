@@ -626,6 +626,22 @@ The quant-research payload. Specs live in `crucible-funnel` module docs.
             opposite of the truth — or invents one another contract covers.
             `pool_sessions` has an order-independence control; `pool_evaluations`
             has none
+- [ ] **The DATE path counts a trailing fragment as a whole session** (found
+      2026-08-06, unfixed). `FoldPlan` drops the leading partial session and
+      reports it, so "60 sessions" is sixty sessions (D-0062) — there is no
+      trailing equivalent. `[data].end` is an exclusive **UTC date** while a CME
+      trading day opens 17:00 CT the evening before, so a config's final
+      trading-day key is systematically a fragment that `FoldPlan::build`
+      accepts as a whole entry. One session per run, systematic, and in the
+      flattering direction: `oos_sessions` is the number that clears the
+      admission floor. **The pooled path is NOT affected** — measured on all 66
+      curated ES contracts, 65 front windows end one nanosecond past a session
+      close because a `roll_ts` *is* one, and C4b-ii drops and counts the
+      remaining case (the chain's last contract, which ends at the archive
+      edge). Fixing it here is a separate commit from that one *because it moves
+      hashes*: `combo`, `walk-forward`, `funnel` and S0 all read this path, so
+      it carries its own re-pin, derived twice. Keeping them apart is what let
+      the pooled fix land inert with no gate moving
 - [ ] Cross-instrument rhyme check (needs NQ/RTY archives from M1 tooling)
 - [ ] Multi-instance pass + dataset semaphore, with criterion evidence
 

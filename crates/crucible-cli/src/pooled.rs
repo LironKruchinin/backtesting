@@ -37,8 +37,9 @@
 
 use crucible_core::prelude::*;
 use crucible_data::calendar::Calendar;
+use crucible_data::catalog::TsRange;
 use crucible_data::continuous::{ContinuousError, RollTable, read_roll_table};
-use crucible_data::ingest::window::days_from_civil;
+use crucible_data::ingest::window::{civil_from_days, days_from_civil};
 use crucible_funnel::walkforward::{FoldPlan, FoldSpec};
 
 use crate::combo::{Series, collect_events_in_window};
@@ -62,6 +63,14 @@ pub(crate) struct PooledContractPlan {
     pub day_keys: Vec<i64>,
     /// Distinct trading-day keys of the front window, ascending.
     pub front_window_days: Vec<i64>,
+    /// The trailing trading day the **window** cut, dropped from evaluation —
+    /// or `None` when the window ended on a session close, which is what a
+    /// roll boundary does.
+    pub dropped_tail_day: Option<i64>,
+    /// Bars in that dropped day. Reported even when zero (D-0070's
+    /// declared-filter-with-a-number pattern): "nothing was cut" and "the
+    /// report forgot to say" must not look the same.
+    pub dropped_tail_bars: usize,
     /// The fold layout, or `None` when no complete fold fits.
     pub plan: Option<FoldPlan>,
     /// Sessions one fold needed, carried so a skip can say what it missed by.
@@ -239,13 +248,51 @@ pub(crate) fn plan_pool(
         let series = collect_events_in_window(loaded, instrument, Some(window))?;
 
         // The D-0071 device: computed once, here, and read by every consumer.
-        let day_keys: Vec<i64> = series
+        let mut day_keys: Vec<i64> = series
             .events
             .iter()
             .map(|event| days_from_civil(calendar.trading_day(event.avail_ts())))
             .collect();
         let mut front_window_days = day_keys.clone();
         front_window_days.dedup();
+
+        // A trading day the WINDOW cut is dropped and counted — the symmetric
+        // twin of the leading partial session `FoldPlan` already drops so that
+        // its "60 sessions" is sixty sessions (D-0062).
+        //
+        // Measured on all 66 curated ES contracts before this was written: 65
+        // lose nothing here, because a `roll_ts` IS a session close. A roll is
+        // decided from a day's volume, which is not knowable until that day's
+        // last bar, so the window ends at close + 1ns and the final day is
+        // whole — checked arithmetically on ESH2020 -> ESM2020, whose roll_ts
+        // is 2020-03-16T21:00:00Z, exactly era 3a's 16:00 CT close.
+        //
+        // The one contract that does lose a day is the chain's LAST, whose
+        // window ends at the archive edge rather than at a roll: ESU2026's
+        // final trading day held 120 of 1380 minutes, because the archive stops
+        // at 2026-07-28T00:00:00Z — 19:00 CT, two hours into a session that
+        // opened at 17:00.
+        //
+        // That is not a rare tail case, it is the common one for the pools
+        // anyone builds first: the last contract is always the most recent, so
+        // a pool testing recent data contains it by construction, and the error
+        // counts a fragment as a whole session toward the admission floor —
+        // in the flattering direction. Dropping it here makes the property
+        // something the code enforces rather than something re-measured every
+        // time data lands.
+        let mut series = series;
+        let (dropped_tail_day, dropped_tail_bars) =
+            match trailing_fragment(&calendar, window, &day_keys) {
+                Some((day, bars)) => {
+                    // `day_keys` is availability-ordered, so the cut day's bars
+                    // are exactly the tail.
+                    day_keys.truncate(day_keys.len() - bars);
+                    series.events.truncate(series.events.len() - bars);
+                    front_window_days.pop();
+                    (Some(day), bars)
+                }
+                None => (None, 0),
+            };
 
         // A front window that cannot fit one complete fold is planned as
         // `None` rather than refused: the pool reports it as skipped with a
@@ -257,9 +304,125 @@ pub(crate) fn plan_pool(
             series,
             day_keys,
             front_window_days,
+            dropped_tail_day,
+            dropped_tail_bars,
             plan,
             fold_needs_sessions: needs,
         });
     }
     Ok(planned)
+}
+
+/// Whether `window` cut its final trading day, and how many bars that day holds.
+///
+/// A front window is half-open, so the final session is **whole** exactly when
+/// the window extends past that session's close. A roll boundary always does:
+/// `roll_ts` is the availability of the deciding day's last bar — a session
+/// close — and the window ends at `roll_ts + 1ns`. What does not is the chain's
+/// last contract, whose window ends where the archive does.
+///
+/// Returns `(trading_day_key, bars)` for a cut day, or `None` when nothing was
+/// cut. Separated from [`plan_pool`] so it can be tested without an archive:
+/// the planner needs a `LoadedConfig` and curated Parquet, and a check that
+/// only runs against the archive is a check nobody runs.
+fn trailing_fragment(
+    calendar: &Calendar,
+    window: TsRange,
+    day_keys: &[i64],
+) -> Option<(i64, usize)> {
+    let &last = day_keys.last()?;
+    let close = calendar.session_close(civil_from_days(last));
+    // Half-open: a bar whose `avail_ts` IS the close belongs to the session, so
+    // the session survives only if the window reaches strictly past it.
+    if window.end_ts() > close {
+        return None;
+    }
+    let bars = day_keys.iter().rev().take_while(|&&k| k == last).count();
+    Some((last, bars))
+}
+
+#[cfg(test)]
+mod trailing_fragment_tests {
+    use super::*;
+    use crucible_data::ingest::window::CivilDate;
+
+    fn es() -> Calendar {
+        Calendar::for_instrument(&InstrumentId::new("ESH2024"))
+            .expect("bundled tables parse")
+            .expect("ES is governed")
+    }
+
+    const FRIDAY: CivilDate = CivilDate {
+        year: 2024,
+        month: 3,
+        day: 8,
+    };
+
+    /// **The converse, and it is written first.** Every roll boundary ends one
+    /// nanosecond past a session close, and 65 of this archive's 66 ES
+    /// contracts end that way — so an implementation that dropped a day
+    /// unconditionally would pass the cut-window test below while silently
+    /// shortening every contract in the pool by a session. That is the same
+    /// failure shape the D4 converse caught: a fix applied everywhere looks
+    /// identical to a fix applied where it belongs.
+    #[test]
+    fn a_window_ending_past_a_session_close_drops_nothing() {
+        let cal = es();
+        let key = days_from_civil(FRIDAY);
+        let close = cal.session_close(FRIDAY);
+        let window = TsRange::new(cal.session_open(FRIDAY), close.plus_ns(1)).expect("range");
+        assert_eq!(
+            trailing_fragment(&cal, window, &[key - 1, key, key, key]),
+            None,
+            "a roll boundary is a session close; nothing was cut"
+        );
+    }
+
+    /// A window stopping mid-session drops that day, with its bar count.
+    #[test]
+    fn a_window_cut_mid_session_drops_the_fragment_with_a_count() {
+        let cal = es();
+        let key = days_from_civil(FRIDAY);
+        let close = cal.session_close(FRIDAY);
+        let window = TsRange::new(
+            cal.session_open(FRIDAY),
+            close.plus_ns(-3_600 * 1_000_000_000),
+        )
+        .expect("range");
+        assert_eq!(
+            trailing_fragment(&cal, window, &[key - 1, key, key, key]),
+            Some((key, 3)),
+            "three bars of the cut day, counted rather than absorbed"
+        );
+    }
+
+    /// The measured case this exists for, with the archive's real numbers.
+    ///
+    /// `ESU2026` is the chain's last contract; its front window ends at
+    /// `last_ts_open + tf` = 2026-07-28T00:00:00Z, which is 19:00 CT — two
+    /// hours into a trading day that opened at 17:00. Measured against the
+    /// archive: 120 of 1380 minutes. This is the common case rather than a
+    /// rare one, because the chain's last contract is always the most recent,
+    /// so any pool testing recent data contains it by construction.
+    #[test]
+    fn the_archive_edge_is_a_cut_day_and_not_a_roll() {
+        let cal = es();
+        let day = CivilDate {
+            year: 2026,
+            month: 7,
+            day: 28,
+        };
+        let key = days_from_civil(day);
+        let archive_edge = Ts(1_785_196_800_000_000_000);
+        assert!(
+            archive_edge < cal.session_close(day),
+            "positive control on the fixture: the archive edge must really fall \
+             before this session's close, or the test proves nothing"
+        );
+        let window = TsRange::new(Ts(1_781_557_200_000_000_001), archive_edge).expect("range");
+        assert_eq!(
+            trailing_fragment(&cal, window, &[key - 3, key - 1, key]),
+            Some((key, 1))
+        );
+    }
 }
