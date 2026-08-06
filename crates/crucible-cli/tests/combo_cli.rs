@@ -701,3 +701,113 @@ fn the_curated_path_survives_the_window_seam() {
         stderr(&out)
     );
 }
+
+/// The root check is a **parse**, not a prefix match, and this is the case that
+/// makes the difference: `root = "Z"` with two rates products.
+///
+/// `starts_with("Z")` accepts both ZN and ZB, so the pool would have been
+/// declared well-formed and the two products pooled as one instrument across
+/// time. They are not one instrument, and — the reason this matters for C4b-ii
+/// — a calendar-shared-by-construction assertion downstream would then be
+/// resting on an invariant that holds only by accident of today's root list.
+/// No curated root is currently a prefix of another (ES NQ RTY CL GC 6E ZN),
+/// which is why the prefix spelling had never misfired.
+#[test]
+fn a_root_that_is_only_a_prefix_is_refused_rather_than_pooling_two_products() {
+    let dir = TempDir::new();
+    let path = dir.config(
+        &TEMPLATE
+            .replace(
+                r#"instruments = ["SYN:RW"]"#,
+                r#"instruments = ["ZNH2024", "ZBH2024"]"#,
+            )
+            .replace("[run]", "[pooling]\nroot = \"Z\"\n\n[run]"),
+    );
+    let out = run(&["combo", "--config", &path.to_string_lossy()]);
+    assert_eq!(code(&out), 2);
+    assert!(
+        stderr(&out).contains("breadth rather than sample size"),
+        "a prefix must not pass for a root: {}",
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out).contains("root \"ZN\""),
+        "the refusal names the root it actually parsed, so the operator can see \
+         why the declaration was wrong: {}",
+        stderr(&out)
+    );
+}
+
+/// The same shape with one product: `root = "Z"` over ZN alone is still wrong,
+/// because "Z" is not a root. Without this, a fix that only rejected *mixed*
+/// pools would pass the test above while still accepting a meaningless root.
+#[test]
+fn a_prefix_root_is_refused_even_when_every_contract_shares_it() {
+    let dir = TempDir::new();
+    let path = dir.config(
+        &TEMPLATE
+            .replace(
+                r#"instruments = ["SYN:RW"]"#,
+                r#"instruments = ["ZNH2024", "ZNM2024"]"#,
+            )
+            .replace("[run]", "[pooling]\nroot = \"Z\"\n\n[run]"),
+    );
+    let out = run(&["combo", "--config", &path.to_string_lossy()]);
+    assert_eq!(code(&out), 2);
+    assert!(
+        stderr(&out).contains("breadth rather than sample size"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+/// The converse, and it is what stops the check above from being a blanket
+/// refusal: a correctly declared root still reaches D-0117's blanket refusal
+/// rather than being turned away as a root error. A test that only proved
+/// things are refused would be satisfied by refusing everything.
+#[test]
+fn a_correctly_declared_root_passes_the_root_check_and_reaches_d0117() {
+    let dir = TempDir::new();
+    let path = dir.config(
+        &TEMPLATE
+            .replace(
+                r#"instruments = ["SYN:RW"]"#,
+                r#"instruments = ["ZNH2024", "ZNM2024"]"#,
+            )
+            .replace("[run]", "[pooling]\nroot = \"ZN\"\n\n[run]"),
+    );
+    let out = run(&["combo", "--config", &path.to_string_lossy()]);
+    assert_eq!(code(&out), 2);
+    assert!(
+        !stderr(&out).contains("breadth rather than sample size"),
+        "a valid root must not be refused as a cross-instrument claim: {}",
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out).contains("cannot run"),
+        "it should be D-0117 that refuses it, not the root check: {}",
+        stderr(&out)
+    );
+}
+
+/// A symbol that is not a contract at all is refused by name rather than
+/// silently failing a prefix comparison.
+#[test]
+fn a_pooled_instrument_that_is_not_a_contract_symbol_is_refused() {
+    let dir = TempDir::new();
+    let path = dir.config(
+        &TEMPLATE
+            .replace(
+                r#"instruments = ["SYN:RW"]"#,
+                r#"instruments = ["ESH2024", "ES"]"#,
+            )
+            .replace("[run]", "[pooling]\nroot = \"ES\"\n\n[run]"),
+    );
+    let out = run(&["combo", "--config", &path.to_string_lossy()]);
+    assert_eq!(code(&out), 2);
+    assert!(
+        stderr(&out).contains("is not a contract symbol"),
+        "{}",
+        stderr(&out)
+    );
+}

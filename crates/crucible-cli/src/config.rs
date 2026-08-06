@@ -910,14 +910,42 @@ fn validate_pooling(file: &ConfigFile) -> Result<(), ConfigError> {
             });
         }
 
-        if !symbol.starts_with(root) {
+        // The root is PARSED, never prefix-matched.
+        //
+        // `symbol.starts_with(root)` is safe only while no root is a prefix of
+        // another, and that is a property of today's seven curated roots — ES,
+        // NQ, RTY, CL, GC, 6E, ZN, whose first characters happen to be
+        // distinct — rather than of the rule this check claims to enforce. Add
+        // ZB and `root = "Z"` silently pools two rates products; add NG and
+        // `root = "N"` pools equity index with energy, and those are different
+        // calendar tables. The calendar-shared-by-construction assertion below
+        // rests on this check, so an invariant holding by accident of another
+        // rule is exactly what that assertion exists to eliminate.
+        //
+        // `RollTable::validate` already compares parsed roots. This is the same
+        // comparison at the config seam, and `parse_parts` rather than
+        // `ContractSymbol::parse` because a root question has no opinion about
+        // the year — dragging `DecadeAnchor::DEFAULT` in here would imply the
+        // decade mattered to it.
+        let parts =
+            crucible_data::continuous::parse_parts(symbol).map_err(|e| ConfigError::Field {
+                field: "universe.instruments",
+                message: format!(
+                    "{symbol} is not a contract symbol ({e}), so its root cannot be compared \
+                     with the declared {root:?}. A pool names real curated contracts \
+                     (ESH2024) — that is what makes it a claim about one instrument across \
+                     time"
+                ),
+            })?;
+        if parts.root != root {
             return Err(ConfigError::Field {
                 field: "universe.instruments",
                 message: format!(
-                    "{symbol} is not a contract of the declared root {root:?}. A pool is a \
+                    "{symbol} has root {found:?}, not the declared root {root:?}. A pool is a \
                      claim that these contracts are one instrument across time; pooling two \
                      roots is a cross-instrument claim, which is breadth rather than sample \
-                     size (D-0114)"
+                     size (D-0114)",
+                    found = parts.root
                 ),
             });
         }
