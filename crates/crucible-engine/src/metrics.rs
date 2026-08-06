@@ -198,48 +198,91 @@ impl ReturnStats {
             (Some(&(_, a)), Some(&(_, b))) => b - a,
             _ => 0,
         };
-        if rets.is_empty() {
+        let (n, mean, m2, m3, m4) = moments_of(&rets);
+        ReturnStats {
+            n,
+            mean,
+            m2,
+            m3,
+            m4,
+            net_delta_nano_usd,
+        }
+    }
+
+    /// The statistics of the two samples' return series **concatenated**,
+    /// computed from the two summaries alone.
+    ///
+    /// # What is concatenated, and what is not
+    ///
+    /// The *return series*, never the equity curves. Joining two contracts'
+    /// curves end to end would manufacture one extra return across the seam —
+    /// the step from contract A's last equity to contract B's first — and that
+    /// step is not a trade, not a mark, and not a number any strategy could
+    /// have earned. It is the same seam `RunTrace::pooled_with_stats` already
+    /// refuses to double-count between folds, one level up.
+    ///
+    /// `net_delta_nano_usd` is added, always, and in integer arithmetic — so a
+    /// pooled *total return* carries no float error whatever this function does
+    /// to the moments. It is summed even when a sample contributes no returns,
+    /// because a curve can have a delta and no usable return step (D-0076's
+    /// insolvent prefix).
+    ///
+    /// # The arithmetic, and its citation
+    ///
+    /// Pébay's pairwise update for arbitrary-order moments (Sandia report
+    /// SAND2008-6212, 2008), whose `M2` term is Chan, Golub & LeVeque's (1979)
+    /// parallel variance formula. Written out rather than expressed with
+    /// `powi`, per D-0126.
+    ///
+    /// # Not bit-identical to a single pass, and not associative
+    ///
+    /// Combining two halves and reducing the whole in one pass are different
+    /// sequences of floating-point operations, so they agree to a tolerance
+    /// rather than to the bit — and `combine(combine(a, b), c)` may differ from
+    /// `combine(a, combine(b, c))` in the last bits for the same reason. That
+    /// does **not** weaken §2.2: determinism requires the same config and data
+    /// to give the same answer, not that the answer equal some other route's.
+    /// What it does require is that the fold order be **fixed and part of the
+    /// definition** — a caller pooling N contracts must fold them in a declared
+    /// order (contract order), never in completion order.
+    #[must_use]
+    pub fn combine(a: ReturnStats, b: ReturnStats) -> ReturnStats {
+        let net_delta_nano_usd = a.net_delta_nano_usd + b.net_delta_nano_usd;
+        // An empty sample contributes no moments, and returning the other side
+        // unchanged is exact rather than merely close: the general formulas
+        // below divide by `n`, which is zero when both are empty.
+        if a.n == 0 {
             return ReturnStats {
-                n: 0,
-                mean: 0.0,
-                m2: 0.0,
-                m3: 0.0,
-                m4: 0.0,
                 net_delta_nano_usd,
+                ..b
+            };
+        }
+        if b.n == 0 {
+            return ReturnStats {
+                net_delta_nano_usd,
+                ..a
             };
         }
         #[expect(
             clippy::cast_precision_loss,
             reason = "bar counts fit f64 exactly at our scales"
         )]
-        let n = rets.len() as f64;
-        // Same order as `ReturnShape::of`: mean first, then each power summed
-        // over the same iteration, written out per D-0122/D-0126.
-        let mean = rets.iter().sum::<f64>() / n;
-        let m2 = rets
-            .iter()
-            .map(|r| {
-                let d = r - mean;
-                d * d
-            })
-            .sum::<f64>();
-        let m3 = rets
-            .iter()
-            .map(|r| {
-                let d = r - mean;
-                d * d * d
-            })
-            .sum::<f64>();
-        let m4 = rets
-            .iter()
-            .map(|r| {
-                let d = r - mean;
-                let d2 = d * d;
-                d2 * d2
-            })
-            .sum::<f64>();
+        let (na, nb) = (a.n as f64, b.n as f64);
+        let n = na + nb;
+        let d = b.mean - a.mean;
+        let mean = a.mean + d * nb / n;
+        let m2 = a.m2 + b.m2 + d * d * na * nb / n;
+        let m3 = a.m3
+            + b.m3
+            + d * d * d * na * nb * (na - nb) / (n * n)
+            + 3.0 * d * (na * b.m2 - nb * a.m2) / n;
+        let m4 = a.m4
+            + b.m4
+            + d * d * d * d * na * nb * (na * na - na * nb + nb * nb) / (n * n * n)
+            + 6.0 * d * d * (na * na * b.m2 + nb * nb * a.m2) / (n * n)
+            + 4.0 * d * (na * b.m3 - nb * a.m3) / n;
         ReturnStats {
-            n: rets.len(),
+            n: a.n + b.n,
             mean,
             m2,
             m3,
@@ -285,6 +328,50 @@ impl ReturnStats {
             kurtosis: Some(m4 / (m2 * m2)),
         }
     }
+}
+
+/// `(n, mean, Σ(r−μ)², Σ(r−μ)³, Σ(r−μ)⁴)` in one pass over `rets`.
+///
+/// Lifted out of [`ReturnStats::of`] verbatim so that the two-route control on
+/// [`ReturnStats::combine`] can compare the combine against **this** pass
+/// rather than against a second implementation written inside the test. A test
+/// that reimplements the thing it checks is checking the reimplementation.
+///
+/// Same order as [`ReturnShape::of`]: mean first, then each power summed over
+/// the same iteration, written out per D-0122/D-0126.
+fn moments_of(rets: &[f64]) -> (usize, f64, f64, f64, f64) {
+    if rets.is_empty() {
+        return (0, 0.0, 0.0, 0.0, 0.0);
+    }
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "bar counts fit f64 exactly at our scales"
+    )]
+    let n = rets.len() as f64;
+    let mean = rets.iter().sum::<f64>() / n;
+    let m2 = rets
+        .iter()
+        .map(|r| {
+            let d = r - mean;
+            d * d
+        })
+        .sum::<f64>();
+    let m3 = rets
+        .iter()
+        .map(|r| {
+            let d = r - mean;
+            d * d * d
+        })
+        .sum::<f64>();
+    let m4 = rets
+        .iter()
+        .map(|r| {
+            let d = r - mean;
+            let d2 = d * d;
+            d2 * d2
+        })
+        .sum::<f64>();
+    (rets.len(), mean, m2, m3, m4)
 }
 
 /// The shape of the return series a naive Sharpe was computed on.
@@ -510,6 +597,140 @@ mod tests {
         assert_ne!(
             stats.net_delta_nano_usd, 0,
             "the fixture must actually move"
+        );
+    }
+
+    /// Moments from a raw return series, for the combine controls below.
+    fn from_returns(rets: &[f64]) -> ReturnStats {
+        let (n, mean, m2, m3, m4) = super::moments_of(rets);
+        ReturnStats {
+            n,
+            mean,
+            m2,
+            m3,
+            m4,
+            net_delta_nano_usd: 0,
+        }
+    }
+
+    /// Two samples that genuinely differ, so a combine that ignored one of them
+    /// could not pass. Different lengths, different means, different spreads.
+    fn halves() -> (Vec<f64>, Vec<f64>) {
+        let a = vec![0.004, -0.001, 0.0025, -0.0035, 0.006, 0.0005, -0.002];
+        let b = vec![-0.011, 0.017, -0.003, 0.0085, -0.0125, 0.021];
+        (a, b)
+    }
+
+    /// **The two-route agreement control.** Combining two halves must reproduce
+    /// one pass over the whole — to a tolerance, never to the bit, because the
+    /// two are different sequences of floating-point operations.
+    ///
+    /// What would this do if the thing it looks for were absent? If the halves
+    /// had equal means the `delta` correction terms would all vanish and a
+    /// combine that was nothing but `a.m2 + b.m2` would pass — so the fixture's
+    /// means are asserted to differ, and to differ by more than the tolerance
+    /// being applied. That assertion is the control on the control.
+    #[test]
+    fn combining_two_halves_reproduces_one_pass_over_the_whole() {
+        let (a, b) = halves();
+        let whole: Vec<f64> = a.iter().chain(b.iter()).copied().collect();
+
+        let sa = from_returns(&a);
+        let sb = from_returns(&b);
+        assert!(
+            (sa.mean - sb.mean).abs() > 1e-4,
+            "the halves must have genuinely different means, or the correction \
+             terms are all zero and this test cannot see them"
+        );
+
+        let combined = ReturnStats::combine(sa, sb);
+        let direct = from_returns(&whole);
+
+        assert_eq!(combined.n, direct.n);
+        let close = |got: f64, want: f64, tol: f64, what: &str| {
+            let rel = (got - want).abs() / want.abs();
+            assert!(rel < tol, "{what}: {got} vs {want}, relative {rel:e}");
+        };
+        close(combined.mean, direct.mean, 1e-12, "mean");
+        close(combined.m2, direct.m2, 1e-12, "m2");
+        close(combined.m3, direct.m3, 1e-10, "m3");
+        close(combined.m4, direct.m4, 1e-10, "m4");
+    }
+
+    /// **The converse.** The tolerances above are only evidence if a *wrong*
+    /// combine would exceed them. Naively adding the two halves' moments —
+    /// dropping every mean-difference correction, which is the mistake the
+    /// formulas exist to prevent — must be caught by the same comparison.
+    #[test]
+    fn dropping_the_mean_correction_is_caught_by_those_tolerances() {
+        let (a, b) = halves();
+        let whole: Vec<f64> = a.iter().chain(b.iter()).copied().collect();
+        let (sa, sb, direct) = (from_returns(&a), from_returns(&b), from_returns(&whole));
+
+        let naive_m2 = sa.m2 + sb.m2;
+        let rel = (naive_m2 - direct.m2).abs() / direct.m2.abs();
+        assert!(
+            rel > 1e-12,
+            "a combine that ignored the mean difference would have to be caught \
+             by the m2 tolerance, and here it is off by only {rel:e}"
+        );
+    }
+
+    /// An empty operand contributes no moments and is EXACT, not merely close —
+    /// the general formulas divide by `n`. The delta is still summed, because a
+    /// curve can carry one and yield no usable return step (D-0076).
+    #[test]
+    fn an_empty_sample_leaves_the_moments_alone_but_still_adds_its_delta() {
+        let (a, _) = halves();
+        let full = ReturnStats {
+            net_delta_nano_usd: 7_000_000_000,
+            ..from_returns(&a)
+        };
+        let empty = ReturnStats {
+            n: 0,
+            mean: 0.0,
+            m2: 0.0,
+            m3: 0.0,
+            m4: 0.0,
+            net_delta_nano_usd: -2_000_000_000,
+        };
+
+        for combined in [
+            ReturnStats::combine(full, empty),
+            ReturnStats::combine(empty, full),
+        ] {
+            assert_eq!(combined.n, full.n);
+            assert_eq!(combined.mean.to_bits(), full.mean.to_bits());
+            assert_eq!(combined.m2.to_bits(), full.m2.to_bits());
+            assert_eq!(combined.m3.to_bits(), full.m3.to_bits());
+            assert_eq!(combined.m4.to_bits(), full.m4.to_bits());
+            assert_eq!(combined.net_delta_nano_usd, 5_000_000_000);
+        }
+
+        // Two empties are still a legal question, and must not divide by zero.
+        let both = ReturnStats::combine(empty, empty);
+        assert_eq!(both.n, 0);
+        assert!(both.mean.is_finite() && both.m2.is_finite());
+        assert_eq!(both.net_delta_nano_usd, -4_000_000_000);
+    }
+
+    /// The pooled TOTAL RETURN is exact however the moments round, because the
+    /// delta is integer — which is the whole reason the field is an `i64` and
+    /// not an `f64` (§2.3).
+    #[test]
+    fn the_combined_delta_is_exact_integer_arithmetic() {
+        let (a, b) = halves();
+        let sa = ReturnStats {
+            net_delta_nano_usd: 123_456_789_012,
+            ..from_returns(&a)
+        };
+        let sb = ReturnStats {
+            net_delta_nano_usd: -23_456_789_013,
+            ..from_returns(&b)
+        };
+        assert_eq!(
+            ReturnStats::combine(sa, sb).net_delta_nano_usd,
+            99_999_999_999
         );
     }
 

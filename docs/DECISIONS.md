@@ -4707,3 +4707,63 @@ propose a superseding entry — don't silently diverge.
   **The powers stay written out and the comments say why.** The naive form looks
   tidier, and a reader who simplifies it back re-creates the defect — which is
   how the class survived D-0122 in the first place.
+
+- **D-0127** (2026-08-07) -- **A pooled statistic across contracts is DEFINED as
+  the pairwise combine of per-contract sufficient statistics, folded in declared
+  contract order. It is not "the statistic of the concatenated equity curve",
+  and the difference is not a rounding detail.**
+  `ReturnStats::combine` implements Pébay's pairwise update for arbitrary-order
+  moments (Sandia report SAND2008-6212, 2008), whose `M2` term is Chan, Golub &
+  LeVeque's (1979) parallel variance formula. Written out rather than spelled
+  with `powi`, per D-0126.
+  **What is concatenated is the RETURN SERIES, never the equity curves.** Joining
+  two contracts' curves end to end manufactures one extra return across the seam
+  — the step from contract A's last equity to contract B's first — and that step
+  is not a trade, not a mark, and not a number any strategy could have earned. It
+  is the same seam `RunTrace::pooled_with_stats` already refuses to double-count
+  between folds, one level up, and for the same reason.
+  **The fold order is part of the definition, because the operation is neither
+  bit-identical to a single pass nor associative.** Combining two halves and
+  reducing the whole in one pass are different sequences of floating-point
+  operations; measured on the test fixture they agree to a relative 1e-12 on the
+  mean and `m2` and 1e-10 on `m3` and `m4`, which is what the control asserts.
+  This does **not** weaken §2.2. Determinism requires that the same config and
+  the same data give the same answer — not that the answer equal some other
+  route's. What it does require is that the order be *declared*: a caller pooling
+  N contracts folds them in contract order, never in completion order, which is
+  the rule §2.2 already states for merging parallel results.
+  **The total return is exempt, and deliberately so.** `net_delta_nano_usd` is
+  summed in integer arithmetic, so a pooled total return carries no float error
+  at all whatever the moments do. Only the *moments* are order-sensitive. That is
+  why the field is an `i64` and not an `f64` (§2.3), and it is why the number a
+  reader quotes most often is the one that cannot drift.
+  **What must NOT be pooled this way, restating D-0119 because this is the
+  machinery that makes it tempting**: max drawdown, losing streaks and time
+  under water. Those are path statistics, and the pooled series is not a path any
+  account walked — its seams join windows months apart. `sharpe_and_shape` exists
+  precisely so a stitched series can yield a Sharpe and moments *without* a
+  drawdown being computed and left sitting there looking available.
+  **Nor is a pooled `n` evidence of more searching.** D-0114 is emphatic that
+  agreement across contracts is not sample size; pooling gives a larger sample of
+  the same hypothesis, not more independent trials, and the deflation entry at C5
+  owes that sentence beside the number.
+  **Where it lives, and why that is not a §3 violation.** `combine` sits in
+  `crucible-engine` beside `ReturnStats` itself, following that type's own
+  precedent: it is arithmetic on a reducer and knows nothing about runs,
+  contracts or grids — it takes two summaries and returns one. The *decision to
+  pool contracts*, which is the cross-run statistic §3 assigns to
+  `crucible-funnel`, stays in the funnel. Engine gains no I/O, no threads and no
+  clock.
+  **The controls, and the converse was written into the suite rather than run
+  once.** The two-route control combines two halves and compares against one pass
+  over the whole; because equal means would make every correction term vanish and
+  let a combine that merely added the moments pass, the fixture's means are
+  asserted to differ first. `dropping_the_mean_correction_is_caught_by_those_
+  tolerances` is the permanent converse: it shows the naive `a.m2 + b.m2` exceeds
+  the same tolerance the agreement test applies. And the tolerance was watched
+  discriminating rather than assumed to: mutating the `m4` correction's
+  coefficient from 6 to 5 failed the control at a relative **7.0e-3** against a
+  1e-10 bar, seven orders of magnitude over (D-0116 protocol; pre-mutation blob
+  `216e9196`, restored and re-printed identical).
+  **Nothing calls it yet.** D-0117 still refuses every pooled config, and the
+  combine reaches no run until C6b lifts that refusal. No gate moved.
