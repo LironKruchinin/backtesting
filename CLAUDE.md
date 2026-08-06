@@ -463,8 +463,9 @@ The protocol:
    is silent on the branch that skipped it, because a diff carrying a confident
    `D-0106` looks exactly like a diff whose number was assigned at merge. So
    before committing any diff that names a decision number it did not receive
-   from a merge, **re-read the log tail and re-verify that number is still
-   free.** Free ⇒ commit it as written and say in the report that it was
+   from a merge, **re-verify that number is still free — against the MAX of
+   allocated numbers, never against the tail of the file.** Free ⇒ commit it as
+   written and say in the report that it was
    pre-claimed and re-verified. Taken ⇒ **renumber the diff**, never the log:
    the entry on `main` was published to every later reader and reference, and
    moving it silently invalidates all of them, while the unmerged branch has
@@ -478,6 +479,30 @@ The protocol:
    process** — the branch had no way to know, which is precisely what
    placeholders exist to fix. Recording the near miss here is cheaper than
    discovering the collided one.
+
+   **The query is the MAX of headings. Not the tail of the file, and not the
+   last occurrence of the pattern** (D-0123):
+
+   ```bash
+   grep -oE '^- \*\*D-([0-9]{4})\*\*' docs/DECISIONS.md \
+     | grep -oE '[0-9]{4}' | sort -u | tail -1
+   ```
+
+   Both wrong spellings have been measured wrong on this repository. `grep -oE
+   'D-0[0-9]{3}' docs/DECISIONS.md | tail -1` returned **D-0119** when the log
+   topped out at D-0122 — three behind — because an entry had been appended in
+   the middle; and after that was repaired it returned **D-0097**, because the
+   newest entry's *body* cites an older decision and the last **occurrence** is
+   not the last **heading**. A `tail` on the raw file is wrong for the same
+   reason. The max over headings is right whatever the order and whatever the
+   prose mentions.
+
+   **Neither the ordering nor the query is trusted to a procedure any more.**
+   `crucible-cli/tests/decision_log.rs` asserts that every heading is unique and
+   strictly ascending, and that the max equals the last — so an entry inserted
+   in the middle fails a test rather than waiting to mislead an allocator.
+   §8.2 has now failed six times under procedure alone; a test makes the class
+   inexpressible instead of monitored.
 
 **The motivating record — four collisions, all on merge, all avoidable:**
 
