@@ -515,6 +515,24 @@ The quant-research payload. Specs live in `crucible-funnel` module docs.
       > is why this was invisible for as long as it was: the gate had only ever
       > been measured in one profile while claiming determinism.
 
+      > **OWED — the deflated Sharpe is UNPINNED, and nothing above reaches it**
+      > (found 2026-08-06, D-0125). The nine hashes cover verdicts, returns,
+      > **naive** Sharpes, the cost sweep, the two controls and the day records.
+      > They do not cover the deflated Sharpe, the PBO, or anything else S3
+      > computes — because both smoke configs kill every combo before S3, so no
+      > hashed run ever produces one. The project's headline overfitting
+      > statistic could change silently in either direction and no gate would
+      > notice. **The proof is C4d**: a fix to that statistic — one that moved
+      > a saturated `1.0000` to a real probability — landed without moving a
+      > single pinned value.
+      > This is D-0122's fixture-reach limitation at the worst location: a gate
+      > certifies what its fixture reaches, and neither fixture reaches S3.
+      > **The eventual fix needs a fixture whose combos SURVIVE to S3**, which
+      > no smoke config does. `crucible-funnel/tests/planted_leak.rs` already
+      > reaches S3 and asserts `Kill` there (D-0087), so a hash over its S3
+      > evidence is the natural candidate — noted so whoever picks this up does
+      > not begin by inventing a fixture that already exists.
+
       **The planted defect they were measured against already existed**:
       `controls::LeakyZScore` (a full-sample z-score, §2.1's named lookahead),
       and `crucible-funnel/tests/planted_leak.rs` recorded that the gates
