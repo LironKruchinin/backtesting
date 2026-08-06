@@ -1,0 +1,139 @@
+# The single-contract CONTROL for `configs/pooled-es-smoke.toml`.
+#
+#   crucible funnel --config configs/pooled-es-smoke-single.toml --out results
+#
+# Identical to the pooled file in strategy, criteria, geometry and execution.
+# The only differences are the two that matter: ONE contract instead of six, and
+# no `[pooling]` block. Its date range is ESH2024's own front window, so the
+# comparison is one contract's honest evidence against six contracts' pooled
+# evidence — not one contract given a longer rope.
+#
+# **It is supposed to die at admission**, and that is the whole point. 30
+# out-of-sample sessions against a registered floor of 150. The pooled file
+# reaches 190 and clears it. Without this control, "pooling supplies the
+# sessions" would be an assertion; with it, the floor is watched failing and
+# then passing for exactly one reason (C8, D-0132).
+
+# The pooled null harness: the same SMA-crossover grid as `combo-smoke.toml`,
+# run over SIX real ES contracts and judged on ONE pooled verdict.
+#
+#   crucible funnel --config configs/pooled-es-smoke.toml --out results
+#   crucible funnel --config configs/pooled-es-smoke.toml --out <tmp> --hash-only
+#
+# The last form is the POOLED determinism gate (C7). `combo` and `walk-forward`
+# refuse this file by name and point at `funnel`: neither pools, and answering
+# with the first contract alone would be a single-contract number wearing a
+# pooled header (D-0130).
+#
+# This is a HARNESS, not an idea. SmaCross is the reference fixture and is not
+# supposed to be profitable (§9); what this file exists to prove is that pooling
+# supplies sessions honestly — the union, never the sum — and that N contracts
+# charge N trials. A run of it that reports anything but KILL is a bug.
+
+schema_version = 1
+
+[meta]
+name = "es-single-sma-cross-null"
+hypothesis_family = "null-harness-single-sma-cross"
+economic_rationale = "None, deliberately. This is the SINGLE-CONTRACT CONTROL for pooled-es-smoke.toml: same strategy, same criteria, same 26/10/10 geometry, one contract over its own front window. It exists to be killed at admission, which is what makes the pooled run's cleared floor a demonstration rather than an assertion."
+
+[universe]
+# Six consecutive ES contracts. Their front windows are disjoint by
+# construction — a contract is front month for exactly the span the `.v` volume
+# roll table says (D-0119) — but their CURATED spans overlap heavily, which is
+# the whole reason pooled sessions are a union and not a sum (D-0114).
+instruments = ["ESH2024"]
+timeframes = ["1m"]
+
+[data]
+source = "curated"
+# The span the pooled contracts' front windows live in. Each contract is
+# evaluated on its OWN front window (D-0119), which the `.v` roll table decides;
+# this range only has to contain them.
+start = "2023-12-11"
+end = "2024-03-12"
+
+[contract]
+tick_points = "0.25"
+point_value_usd = 50
+
+[indicators.fast]
+kind = "sma"
+period = [10, 20]
+
+[indicators.slow]
+kind = "sma"
+period = { start = 50, end = 100, step = 25 }
+
+[rules]
+enter_long = "fast crosses_above slow"
+exit_long = "fast crosses_below slow"
+enter_short = "fast crosses_below slow"
+exit_short = "fast crosses_above slow"
+
+[execution]
+fill_model = "spread_cross"
+# An ASSUMPTION wearing a measurement's field name, and it always will be for
+# this root: the L1 entitlement windows were allowed to lapse, so the archive
+# holds one `tbbo` record and nothing that could settle this (D-0120).
+half_spread_ticks = 1
+fee_per_contract_usd = "1.25"
+
+# ---------------------------------------------------------------------------
+# GEOMETRY — DECLARED, WITH ITS BASIS, AND NOT INHERITED
+# ---------------------------------------------------------------------------
+#
+# `26 / 10 / 10` train/test/step trading days.
+#
+# **Basis: it is the largest whole-fold geometry that FITS the measured front
+# window, and nothing else.** ES 2024 front windows measured 64, 70, 66 and 66
+# sessions (D-0119). A rolling plan needs `train + test` sessions for its first
+# fold and `step` for each one after, so 26/10/10 fits four complete folds in 66
+# sessions (26 + 10, then three more steps of 10) with a few sessions spare.
+#
+# **It is NOT a blessed default and must not be copied as one.** It has no
+# conventional source — it was computed against this archive's measured window
+# lengths and would be wrong for a root whose front windows are shorter. D-0119
+# is explicit that no geometry is blessed, and inheriting an unsourced geometry
+# is exactly how H-007 and H-008 took combo-smoke's 5/2/2 and died at admission
+# for a reason that had nothing to do with their ideas.
+#
+# `step_days == test_days` so the out-of-sample windows TILE rather than
+# overlap: D-0062 refuses `step < test` because pooling overlapping windows
+# counts a session twice, which is the same double-count D-0114 forbids across
+# contracts.
+[walk_forward]
+scheme = "rolling"
+train_days = 26
+test_days = 10
+step_days = 10
+
+# ---------------------------------------------------------------------------
+# CRITERIA — pre-registered, and the point of the whole file
+# ---------------------------------------------------------------------------
+#
+# `min_oos_sessions = 150` is the number that makes this config a demonstration
+# rather than a smoke test. One ES contract contributes ~40 out-of-sample
+# sessions at this geometry (four folds x 10), so a SINGLE-contract run of this
+# file dies at admission — correctly, for want of evidence. Six contracts pool
+# past it. That is the claim block C exists to make good on, and it is written
+# down here BEFORE the run rather than chosen after seeing the number.
+#
+# The floor is not lowered to make anything pass: it is met by supplying
+# sessions honestly, which is the only thing D-0114 and H-007/H-008 permit.
+[funnel]
+stages = ["s1", "s2"]
+cost_sensitivity_ticks = [0.0, 0.5, 1.0, 2.0]
+min_oos_trades = 100
+min_oos_sessions = 150
+min_oos_return_pct_free_fills = 0.0
+min_oos_sharpe_after_costs = 0.5
+kill_if_dead_at_ticks = 1.0
+require_controls_beaten = true
+max_pbo = 0.5
+require_plateau = true
+
+[run]
+seed = 42
+initial_cash_usd = "100000"
+qty_contracts = 1

@@ -5014,3 +5014,52 @@ propose a superseding entry — don't silently diverge.
   the largest whole-fold layout fitting a measured ~66-session front window) and
   is explicitly not a blessed default, which is D-0119's rule and the thing that
   killed H-007 and H-008 when they inherited combo-smoke's 5/2/2.
+- **D-0132** (2026-08-07) -- **Block C's acceptance run: the same config dies at
+  admission on one contract and clears the floor on six, and the floor was never
+  lowered.** This is the claim block C existed to make good on, watched happening
+  rather than argued.
+  **The measurement, both halves in the same session.**
+  `configs/pooled-es-smoke-single.toml` — one contract, ESH2024, over its own
+  front window — reports **30 out-of-sample sessions against a registered floor
+  of 150** and is KILLED AT ADMISSION, all six combos.
+  `configs/pooled-es-smoke.toml` — the same strategy, the same criteria, the same
+  26/10/10 geometry, six contracts — reports **190 distinct out-of-sample
+  sessions**, clears admission, and dies later at S1 and S2 on performance. One
+  contract's evidence is not enough; six contracts' pooled evidence is. That is
+  the sentence `research/backlog/README.md` §6.2 has been waiting for.
+  **The control is what makes it a demonstration rather than an assertion.** The
+  two files differ in exactly two things — six instruments instead of one, and
+  the presence of `[pooling]` — so the floor is watched *failing* and then
+  *passing* for one reason and no other. A pooled run reported alone would prove
+  only that some config passes some floor.
+  **The floor was met, never lowered.** 150 sessions is registered in both files
+  before either ran. H-007 and H-008 both say their floors come down "only when
+  registry pooling supplies the sessions honestly, never to make a short run
+  pass", and this is the mechanism doing that: the union of six front windows,
+  not a relaxed threshold and not a sum.
+  **190 is a UNION and the arithmetic is visible.** Six ES front windows are
+  disjoint by construction — the `.v` roll table makes each contract front for
+  exactly one span (D-0119) — so here the union and the sum coincide, and that
+  is worth saying plainly rather than letting the number look like a proof it is
+  not. The double-count D-0114 forbids appears when *curated spans* are pooled,
+  which is why the pooled path counts front-month sessions; the control against
+  it is `a_planting_the_summed_sessions_makes_admission_accept_what_it_must_refuse`
+  (D-0130), where the fixture overlaps by 15 and the planted sum passes a floor
+  the honest union fails.
+  **Trials: 36, which is 6 contracts x 6 combos** (D-0124). Every pooled contract
+  is a trial, so the deflated Sharpe falls accordingly — the over-deflation
+  D-0124 accepts on the grounds that the preferred error is against the strategy.
+  **Determinism**: `crucible funnel --config configs/pooled-es-smoke.toml --out
+  <tmp> --hash-only` double-run in this session, `30c62df587156ae9` both times,
+  matching the pin D-0131 derived twice in dev and twice in release.
+  **Both runs exit 5**, which is the correct answer and not a failure: every
+  combo was killed, and a scheduled sweep that reported 0 for "the whole grid is
+  dead" would be indistinguishable from one reporting 0 for "we have a
+  candidate" (D-0075). SmaCross is the reference fixture and is not supposed to
+  be profitable (§9); a pooled run of it that printed anything but KILL would be
+  a bug in the machinery, not an edge.
+  **What this does NOT establish.** No hypothesis has been run. H-007 and H-008
+  still carry combo-smoke's 5/2/2 smoke-scale geometry, which is A4's to replace
+  with conventionally-sourced parameters, and running them is Liron's call by
+  name. Block C supplies the sessions; it does not supply a verdict about an
+  idea.
