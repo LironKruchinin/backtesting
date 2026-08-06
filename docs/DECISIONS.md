@@ -4860,3 +4860,55 @@ propose a superseding entry — don't silently diverge.
   for the reason D-0075 gives about absent numbers generally: a reader who meets
   "ten gates" before C7 lands would conclude the pooled pin exists, which is a
   more flattering claim than the true one.
+- **D-TBD(intake-topic-stamp)** (2026-08-06) — **A corpus record carries the
+  TOPIC it was harvested under, and `draft --topic` selects on it.** Before
+  this, `--topic` supplied the front-matter label and the family hint and
+  nothing else: selection was `[p for p in papers if p.abstract][:count]` over
+  the **whole** corpus, so a twelve-topic sweep emitted twelve stamps of the
+  same head-of-list papers and the slug-based filename made them overwrite one
+  another. Twelve topic runs produced one topic's worth of drafts and **no
+  error** — a silently narrowed sweep, which is the failure mode this project
+  exists to prevent wearing a harmless shape.
+  The topic is stamped **at harvest time** rather than derived from `query` at
+  draft time: two topic files may legitimately share a query string, and a
+  query edited after a harvest would orphan every record it produced.
+  `Paper.topic` **defaults to empty** so corpus lines written before the field
+  existed still parse — reader-first (CLAUDE.md §8) applied to a store that is
+  append-only for the same reason the run registry is (D-0074) — and
+  `cli.in_topic` falls back to matching `query` for those. `corpus.dedupe`
+  collects **every** topic a record was seen under, because a cross-asset paper
+  harvested under two themes belongs to both and keeping one would delete it
+  from the other.
+  **`--offset` and `--min-year` land with it**, for the reason the same
+  measurement exposed: selection is head-of-list off the dedupe's
+  `(-year, title)` sort, so without an offset a second run over one topic
+  re-drafts exactly what the first one did.
+  **Paging is per-source, not behind a wrapper.** Each harvester takes a
+  zero-based `page` and translates its own idiom — `offset` (Semantic Scholar,
+  Crossref), a **1-based** `page` number (OpenAlex), `start` (arXiv). A shared
+  wrapper would have to pretend the four are one, and an off-by-one inside it
+  would silently re-fetch page 1 four times while the corpus looked twice as
+  broad as it was. Nothing about compliance moves: one call site, one
+  allowlist, one request per 1.1 s per host (D-0111).
+- **D-TBD(intake-reproduced-prose)** (2026-08-06) — **Not embedding an abstract
+  is not the same as not reproducing one**, so `draft.find_reproduced_prose`
+  reports any run of **eight** words shared between a draft and its corpus
+  abstract. D-0112 removed the embedded abstract, and its test proves the
+  *drafter* pastes nothing in — which is all it can prove. It says nothing
+  about a draft a **human** wrote while reading one, and that is the case
+  D-0112 actually has to survive: a hand-written draft that follows the
+  abstract closely carries the same third-party prose the rule exists to keep
+  out, one clause at a time, while looking like original writing.
+  Eight words is the threshold because ordinary technical phrasing does not
+  reach it — "the information coefficient of the signal at a ten minute
+  horizon" is seven — and because a shorter run would fire on the boilerplate
+  every registration shares. A run made only of stopwords is ignored.
+  **The check runs over the AUTHORED sections, not the rendered file.** A
+  Citation section is required to print the paper's title, and many indexes
+  return an abstract that opens with — or simply *is* — that title, so scanning
+  the whole file flags the one string a citation cannot omit. Six of the first
+  seven refusals in the 2026-08-06 sweep were exactly that; the seventh was a
+  real lifted clause and was rewritten rather than waived. Scoping the check to
+  what a human chose to write is what stops the other six from teaching the
+  next reader to ignore it — the same argument §8.2 makes about a grep that
+  matches its own documentation.

@@ -17,6 +17,15 @@ is not that scraping is hard, it is that the terms say no.
 Every record carries its source API, its DOI where one exists, and the UTC date
 it was retrieved, because a citation without an access date is the house
 discipline's missing half.
+
+**Paging.** Each harvester takes a zero-based ``page`` and each of the four
+APIs spells paging differently — ``offset`` (Semantic Scholar, Crossref), a
+1-based ``page`` number (OpenAlex), ``start`` (arXiv). The translation happens
+in each harvester rather than behind a shared wrapper: a wrapper would have to
+pretend the four idioms are one, and an off-by-one in it would silently
+re-harvest page 1 four times while the corpus looked twice as broad as it was.
+Paging does not touch the throttle or the single call site — every page is
+still one :func:`_get`, still one request per 1.1 s per host.
 """
 
 from __future__ import annotations
@@ -64,6 +73,14 @@ class Paper:
     ``doi`` is the dedupe key and may be ``None`` — arXiv preprints often have
     none, and dropping them for that reason would silently bias the corpus
     toward published work.
+
+    ``topic`` is the topic file the harvest ran under. It is stamped at harvest
+    time rather than derived at draft time, because ``query`` alone cannot
+    answer it: two topic files may legitimately share a query string, and a
+    query edited after a harvest would orphan every record it produced. It
+    **defaults to empty** so records written before the field existed still
+    parse — reader-first (CLAUDE.md §8), applied to a JSONL store that is
+    append-only for the same reason the run registry is.
     """
 
     source: str
@@ -78,6 +95,7 @@ class Paper:
     accessed: str
     query: str
     extra: dict[str, Any] = field(default_factory=dict)
+    topic: str = ""
 
     def to_json(self) -> str:
         return json.dumps(
@@ -94,6 +112,7 @@ class Paper:
                 "accessed": self.accessed,
                 "query": self.query,
                 "extra": self.extra,
+                "topic": self.topic,
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -179,12 +198,22 @@ def _norm_doi(raw: str | None) -> str | None:
     return doi or None
 
 
-def semantic_scholar(query: str, limit: int) -> Iterator[Paper]:
-    """Semantic Scholar Graph API — free, no key needed for this endpoint."""
+def semantic_scholar(query: str, limit: int, page: int = 0) -> Iterator[Paper]:
+    """Semantic Scholar Graph API — free, no key needed for this endpoint.
+
+    Pages on a record ``offset``, so page *n* starts at ``n * limit``.
+    """
     fields = "title,abstract,year,venue,authors,externalIds,url"
     url = (
         "https://api.semanticscholar.org/graph/v1/paper/search?"
-        + urllib.parse.urlencode({"query": query, "limit": limit, "fields": fields})
+        + urllib.parse.urlencode(
+            {
+                "query": query,
+                "limit": limit,
+                "offset": page * limit,
+                "fields": fields,
+            }
+        )
     )
     payload = json.loads(_get(url))
     accessed = _today()
@@ -206,10 +235,19 @@ def semantic_scholar(query: str, limit: int) -> Iterator[Paper]:
         )
 
 
-def openalex(query: str, limit: int) -> Iterator[Paper]:
-    """OpenAlex — open catalogue, indexes SSRN DOIs among many others."""
+def openalex(query: str, limit: int, page: int = 0) -> Iterator[Paper]:
+    """OpenAlex — open catalogue, indexes SSRN DOIs among many others.
+
+    Pages on a **1-based** ``page`` number rather than a record offset, which
+    is why the argument is translated here rather than passed through.
+    """
     url = "https://api.openalex.org/works?" + urllib.parse.urlencode(
-        {"search": query, "per-page": limit, "mailto": "lironkruch@gmail.com"}
+        {
+            "search": query,
+            "per-page": limit,
+            "page": page + 1,
+            "mailto": "lironkruch@gmail.com",
+        }
     )
     payload = json.loads(_get(url))
     accessed = _today()
@@ -245,10 +283,18 @@ def _openalex_abstract(index: dict[str, list[int]] | None) -> str | None:
     return " ".join(word for _, word in positions) or None
 
 
-def crossref(query: str, limit: int) -> Iterator[Paper]:
-    """Crossref — the DOI registry itself, and where SSRN DOIs resolve."""
+def crossref(query: str, limit: int, page: int = 0) -> Iterator[Paper]:
+    """Crossref — the DOI registry itself, and where SSRN DOIs resolve.
+
+    Pages on a record ``offset``, like Semantic Scholar but spelled differently.
+    """
     url = "https://api.crossref.org/works?" + urllib.parse.urlencode(
-        {"query": query, "rows": limit, "mailto": "lironkruch@gmail.com"}
+        {
+            "query": query,
+            "rows": limit,
+            "offset": page * limit,
+            "mailto": "lironkruch@gmail.com",
+        }
     )
     payload = json.loads(_get(url))
     accessed = _today()
@@ -275,14 +321,21 @@ def crossref(query: str, limit: int) -> Iterator[Paper]:
         )
 
 
-def arxiv(query: str, limit: int) -> Iterator[Paper]:
-    """arXiv q-fin. Atom XML rather than JSON, parsed with the stdlib."""
+def arxiv(query: str, limit: int, page: int = 0) -> Iterator[Paper]:
+    """arXiv q-fin. Atom XML rather than JSON, parsed with the stdlib.
+
+    Pages on ``start``, a record offset spelled a fourth way. All four idioms
+    are translated at their own call site rather than abstracted: the shapes
+    genuinely differ, and one wrapper pretending otherwise would be the place a
+    silently-wrong page number would live.
+    """
     import xml.etree.ElementTree as ET
 
     url = "https://export.arxiv.org/api/query?" + urllib.parse.urlencode(
         {
             "search_query": f"cat:q-fin.* AND all:{query}",
             "max_results": limit,
+            "start": page * limit,
             "sortBy": "relevance",
         }
     )

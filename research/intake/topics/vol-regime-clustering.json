@@ -1,0 +1,9 @@
+{
+  "topic": "vol-regime-clustering",
+  "hypothesis_family_hint": "TODO(human) — one family for the whole idea, not one parameterization",
+  "queries": [
+    "volatility regime switching futures returns",
+    "volatility clustering GARCH commodity energy futures",
+    "realized volatility forecasting Treasury currency futures"
+  ]
+}

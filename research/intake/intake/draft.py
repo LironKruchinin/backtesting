@@ -49,6 +49,46 @@ def find_predictions(text: str) -> list[str]:
     return sorted({m.group(0) for m in PREDICTION_MARKERS.finditer(text)})
 
 
+#: Words too common to make a shingle meaningful. Left short on purpose: a long
+#: list would let a reproduced sentence slip through by being made of ordinary
+#: words, which is what most reproduced sentences are made of.
+_SHINGLE_STOPWORDS = frozenset({"the", "a", "an", "of", "and", "to", "in", "is"})
+
+
+def _shingles(text: str, size: int) -> set[tuple[str, ...]]:
+    words = re.findall(r"[a-z0-9]+", text.lower())
+    return {tuple(words[i : i + size]) for i in range(len(words) - size + 1)}
+
+
+def find_reproduced_prose(text: str, abstract: str | None, size: int = 8) -> list[str]:
+    """Runs of ``size`` words appearing in both ``text`` and ``abstract``.
+
+    `test_the_abstract_is_not_reproduced` proves the *drafter* does not paste
+    an abstract in. It cannot prove anything about a draft a human wrote while
+    reading one, and that is the case D-0112 actually has to survive: a
+    hand-written draft that follows the abstract closely reproduces the same
+    third-party prose the embedding rule exists to keep out, one clause at a
+    time, and looks like original writing while doing it.
+
+    Eight words is the threshold because it is long enough that ordinary
+    technical phrasing does not reach it — "the information coefficient of the
+    signal at a ten minute horizon" is seven — and short enough to catch a
+    reproduced clause before it becomes a reproduced sentence. A run made
+    entirely of stopwords is ignored; nothing is learned from matching
+    "of the returns in the sample and the".
+
+    Returns the offending runs, joined, so a report can print what to rewrite.
+    """
+    if not abstract:
+        return []
+    common = _shingles(text, size) & _shingles(abstract, size)
+    return sorted(
+        " ".join(run)
+        for run in common
+        if not all(word in _SHINGLE_STOPWORDS for word in run)
+    )
+
+
 def draft_markdown(paper: Paper, *, topic: str, family_hint: str) -> str:
     """Render one registration draft.
 

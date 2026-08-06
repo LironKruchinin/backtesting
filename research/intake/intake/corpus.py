@@ -73,11 +73,19 @@ def dedupe(papers: Iterable[Paper]) -> list[Paper]:
     """
     best: dict[str, Paper] = {}
     seen_in: dict[str, list[str]] = {}
+    topics: dict[str, list[str]] = {}
     for paper in papers:
         key = _key(paper)
         seen_in.setdefault(key, [])
         if paper.source not in seen_in[key]:
             seen_in[key].append(paper.source)
+        # A paper found under two topics belongs to both, so the merge keeps
+        # every one rather than the winner's. Collapsing to a single topic is
+        # how a cross-asset paper harvested under two themes would silently
+        # disappear from one of them.
+        topics.setdefault(key, [])
+        if paper.topic and paper.topic not in topics[key]:
+            topics[key].append(paper.topic)
         current = best.get(key)
         if current is None:
             best[key] = paper
@@ -96,6 +104,7 @@ def dedupe(papers: Iterable[Paper]) -> list[Paper]:
     for key, paper in best.items():
         extra = dict(paper.extra)
         extra["seen_in"] = sorted(seen_in[key])
+        extra["topics"] = sorted(topics[key])
         out.append(replace(paper, extra=extra))
     # Sorted so two runs over the same corpus produce the same order — the
     # same determinism argument the Rust side makes about merging by identity.

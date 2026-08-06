@@ -1,0 +1,9 @@
+{
+  "topic": "intraday-seasonality",
+  "hypothesis_family_hint": "TODO(human) — one family for the whole idea, not one parameterization",
+  "queries": [
+    "intraday periodicity time of day returns futures",
+    "intraday seasonality volatility commodity energy futures",
+    "time of day effect foreign exchange Treasury futures"
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "topic": "short-horizon-reversal",
+  "hypothesis_family_hint": "TODO(human) — one family for the whole idea, not one parameterization",
+  "queries": [
+    "short horizon return reversal index futures",
+    "intraday overreaction reversal commodity futures",
+    "high frequency mean reversion foreign exchange futures"
+  ]
+}

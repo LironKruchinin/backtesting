@@ -1,0 +1,9 @@
+{
+  "topic": "calendar-effects",
+  "hypothesis_family_hint": "TODO(human) — one family for the whole idea, not one parameterization",
+  "queries": [
+    "turn of the month effect stock index futures",
+    "day of week seasonality commodity futures",
+    "holiday effect calendar anomaly Treasury currency futures"
+  ]
+}

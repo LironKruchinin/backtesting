@@ -1,0 +1,9 @@
+{
+  "topic": "trend-horizon",
+  "hypothesis_family_hint": "TODO(human) — one family for the whole idea, not one parameterization",
+  "queries": [
+    "time series momentum futures lookback horizon",
+    "trend following commodity futures crude oil gold",
+    "moving average trend signal Treasury bond futures currency"
+  ]
+}

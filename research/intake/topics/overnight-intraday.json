@@ -1,0 +1,9 @@
+{
+  "topic": "overnight-intraday",
+  "hypothesis_family_hint": "TODO(human) — one family for the whole idea, not one parameterization",
+  "queries": [
+    "overnight versus intraday returns index futures",
+    "night session return commodity futures gold crude",
+    "close to open return currency Treasury futures"
+  ]
+}
