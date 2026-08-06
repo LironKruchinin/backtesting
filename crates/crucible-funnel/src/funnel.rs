@@ -42,7 +42,9 @@
 use std::ops::Range;
 
 use crucible_core::prelude::*;
-use crucible_engine::{BacktestParams, BacktestResult, FreeFills, SpreadCrossFills, Summary, run};
+use crucible_engine::{
+    BacktestParams, BacktestResult, FreeFills, ReturnStats, SpreadCrossFills, Summary, run,
+};
 use crucible_strategies::combo::{ComboId, Grid};
 use crucible_strategies::controls::{BuyAndHold, ControlError, MatchedEpisode, RandomEntry};
 
@@ -329,7 +331,7 @@ fn contract_evidence(
     pbo: &Result<crate::stats::pbo::Pbo, crate::stats::pbo::PboUnavailable>,
 ) -> ContractEvidence {
     // Step 3: the S1 screen, cost-free. The only sanctioned FreeFills use.
-    let free_fill_oos = pooled_of(&replay(inputs, index, &mut FreeFills), inputs, test_windows);
+    let free_fill_oos = pooled_of(&replay(inputs, index, &mut FreeFills), inputs, test_windows).0;
 
     // Step 4: the mandatory sweep.
     let sweep: Vec<CostLevel> = inputs
@@ -346,7 +348,8 @@ fn contract_evidence(
                 ),
                 inputs,
                 test_windows,
-            ),
+            )
+            .0,
         })
         .collect();
 
@@ -865,12 +868,29 @@ fn replay<M: FillModel>(inputs: &FunnelInputs<'_>, index: usize, fills: &mut M) 
     )
 }
 
+/// One replay's test windows stitched, and the sufficient statistics of the
+/// series that stitch produced.
+///
+/// Widened rather than given a sibling, which is the opposite call from
+/// [`RunTrace::pooled_with_stats`] one layer down, for the reason that made
+/// that one a sibling: blast radius is the symptom, caller need is the cause.
+/// `pooled` had nine callers when that call was made and has seven now — this
+/// commit and the one before it each took one — and the majority of them want a
+/// `Summary` alone, so widening it would have charged every uninterested call
+/// site for the one interested caller. `pooled_of` has four: the S1 free-fill
+/// screen, each cost-sweep level, each random-entry draw and buy-and-hold.
+/// Every one of them is a series `ContractEvidence` must be able to pool across
+/// contracts, so *all four* want the statistics, and a sibling here would leave
+/// `pooled_of` with no callers at all.
+///
+/// The four take `.0` for one commit. Storing what they now receive is the next
+/// one, kept separate so that a moved gate has a single candidate cause.
 fn pooled_of(
     result: &BacktestResult,
     inputs: &FunnelInputs<'_>,
     test_windows: &[Range<usize>],
-) -> Summary {
-    RunTrace::new(&result.equity, &result.closed_trades, &result.fee_events).pooled(
+) -> (Summary, ReturnStats) {
+    RunTrace::new(&result.equity, &result.closed_trades, &result.fee_events).pooled_with_stats(
         test_windows,
         inputs.params.initial_cash_nano_usd,
         inputs.params.bars_per_year,
@@ -947,7 +967,7 @@ fn random_entry_control(
                     inputs.params,
                 )
                 .expect("INVARIANT: the shared bar series is availability-ordered");
-                draws.push((seed, pooled_of(&result, inputs, test_windows)));
+                draws.push((seed, pooled_of(&result, inputs, test_windows).0));
             }
             Err(ControlError::NothingToMatch) => {
                 return absent(
@@ -1010,7 +1030,7 @@ fn buy_and_hold_control(
         inputs.params,
     )
     .expect("INVARIANT: the shared bar series is availability-ordered");
-    let oos = pooled_of(&result, inputs, test_windows);
+    let oos = pooled_of(&result, inputs, test_windows).0;
     Control {
         name: "buy-and-hold",
         // One "draw", because owning the thing is not a random variable. The
