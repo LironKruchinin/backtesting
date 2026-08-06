@@ -29,8 +29,22 @@ timeframes = ["15m"]
 
 [data]
 source = "curated"
-start = "2024-01-01"
-end = "2024-02-01"
+# ESH2024's front window opens one nanosecond after the 2023-12-11 roll and
+# closes one nanosecond after the 2024-03-11 one — both at 16:00 CT, era 3a's
+# close, though at 22:00Z and 21:00Z respectively because DST moved between
+# them. (A reader grepping a fixed UTC hour finds one and not the other, which
+# is the same artefact §9 records for ZN's settlement prints.) Measured on the
+# `.v` roll table, that window is 63 trading sessions.
+#
+# These dates yield 64, and the extra one is not an error to fix here:
+# `[data]` boundaries are UTC dates while a roll boundary is an instant, so
+# `start` snaps to 00:00Z — 18:00 CT on the 10th, already inside the trading
+# day keyed to the 11th, which sits before the roll. That is B10's date-path
+# half: queued, systematic, and deliberately not fixed here because it moves
+# the combo, walk-forward, funnel and S0 hashes. When block C lands and reports
+# 63 for this contract, 64 against 63 is that one-day edge and nothing else.
+start = "2023-12-11"
+end = "2024-03-11"
 
 [contract]
 tick_points = "0.25"
