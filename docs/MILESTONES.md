@@ -286,14 +286,18 @@ The quant-research payload. Specs live in `crucible-funnel` module docs.
       `the_parallel_scheduler_agrees_with_the_serial_one` asserting the two
       reports are bit-identical including the captured account series. The
       **dataset semaphore and the multi-instance pass are deferred**, and the
-      semaphore's stated reason expired on 2026-08-04. It was "one config runs
-      one instrument, so there is exactly one resident dataset to bound";
-      block C's planner loads one `Series` per contract *plus* an `i64`
-      trading-day key per bar, all resident at once, so a pooled ES run holds N
-      datasets rather than one. Both stay deferred as throughput work, which §7
-      wants criterion evidence for — but the semaphore is now deferred with a
-      live consumer rather than for want of anything to bound, and pooling
-      makes it more relevant, not less
+      semaphore's stated reason — "one config runs one instrument, so there is
+      exactly one resident dataset to bound" — is **still true, and stops being
+      true at C6 rather than at C4a**. Block C's planner does hold one `Series`
+      per contract plus an `i64` trading-day key per bar, all resident at once,
+      but it is `#![expect(dead_code)]` behind D-0117's refusal and has no
+      caller, so nothing loads N series at runtime yet. *An earlier draft of
+      this line said the reason had already expired; it had not, and the
+      difference is exactly the inert-first ordering D-0114, D-0115 and D-0117
+      exist to preserve — code that exists is not code that runs.* Both stay
+      deferred as throughput work, which §7 wants criterion evidence for. The
+      commit to revisit this justification in is the one that lifts the
+      refusal, where pooling makes the semaphore more relevant, not less
 - [x] Stages **S1–S2** with pre-registered kill criteria from config
       (2026-07-30). Criteria live in `[funnel]`, are read before the run and
       stored verbatim on the registry row inserted before the run. **S0 and S3
