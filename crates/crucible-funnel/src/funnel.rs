@@ -125,6 +125,49 @@ pub struct FunnelInputs<'a> {
     pub now: &'a str,
 }
 
+/// The **shared** half of a funnel run's inputs: everything identical for
+/// every contract of a pool.
+///
+/// A view borrowed out of [`FunnelInputs`], not a second copy of it. Its
+/// purpose is subtractive: it is what the evidence seam is allowed to see, and
+/// the per-contract fields — `events`, `day_keys`, `plan`, `params` — are
+/// deliberately absent. After C6b-i-a the seam stopped *reading* them; this
+/// makes them unreachable, so a later edit cannot quietly reintroduce
+/// `inputs.events` into a function a pooled caller invokes once per contract.
+/// A wrong state genuinely exists here, which is when this codebase spends a
+/// type on one: a pooled caller has N series, and only one of them could ever
+/// have been the `FunnelInputs`'.
+#[derive(Clone, Copy, Debug)]
+pub struct SharedInputs<'a> {
+    /// The expanded grid.
+    pub grid: &'a Grid,
+    /// Tick and point value.
+    pub spec: &'a ContractSpec,
+    /// The criteria, written before the run.
+    pub criteria: &'a Criteria,
+    /// Config hash, root seed, account.
+    pub identity: &'a RunIdentity,
+    /// The declared execution assumption.
+    pub costs: Costs,
+    /// Position size, so the controls trade what the strategy trades.
+    pub qty: Qty,
+}
+
+impl<'a> FunnelInputs<'a> {
+    /// The shared half, for a caller producing one contract's evidence.
+    #[must_use]
+    pub const fn shared(&self) -> SharedInputs<'a> {
+        SharedInputs {
+            grid: self.grid,
+            spec: self.spec,
+            criteria: self.criteria,
+            identity: self.identity,
+            costs: self.costs,
+            qty: self.qty,
+        }
+    }
+}
+
 /// The **per-contract** half of a funnel run's inputs.
 ///
 /// Measured rather than guessed at: of everything [`contract_evidence`] and its
@@ -353,15 +396,16 @@ fn sharpe_dispersion(combos: &[ComboWalkForward]) -> Option<f64> {
 /// per-contract copy of one is a second opinion waiting to disagree with the
 /// first. They enter once, through [`PoolingInputs`], at the single point
 /// where N contributions become one [`Evidence`].
-struct ContractEvidence {
-    free_fill_oos: crucible_engine::Summary,
+pub struct ContractEvidence {
+    /// The S1 free-fill screen's summary, for the report.
+    pub free_fill_oos: crucible_engine::Summary,
     /// Sufficient statistics of the S1 free-fill series, so the screen pools
     /// across contracts the same way everything else does.
     ///
     /// The sweep's and the controls' statistics need no field here: they travel
     /// inside [`CostLevel`] and [`Control`], beside the summaries they describe,
     /// which is where they cannot drift out of step with them.
-    free_fill_oos_stats: ReturnStats,
+    pub free_fill_oos_stats: ReturnStats,
     /// Sufficient statistics of the **costed** out-of-sample series — the one
     /// the headline Sharpe, the deflation and both control comparisons are
     /// about.
@@ -372,12 +416,14 @@ struct ContractEvidence {
     /// for `max_drawdown_pct`, and a drawdown over a curve stitched across
     /// contracts describes a path nobody walked (D-0119). Forty-eight bytes is
     /// what that guarantee costs.
-    costed_oos_stats: ReturnStats,
+    pub costed_oos_stats: ReturnStats,
     /// Round-trips this contract closed inside its out-of-sample windows,
     /// carried for the same reason and at the same price.
-    oos_trades: usize,
-    sweep: Vec<CostLevel>,
-    controls: [Control; 2],
+    pub oos_trades: usize,
+    /// The mandatory cost-sensitivity sweep, ascending by half-spread.
+    pub sweep: Vec<CostLevel>,
+    /// The two mandatory controls, in a fixed order.
+    pub controls: [Control; 2],
 }
 
 /// Produces one contract's contribution **without assessing it**.
@@ -396,8 +442,8 @@ struct ContractEvidence {
 /// `too_many_arguments` note that deferred this signature to C6a-iii-b is
 /// discharged by deletion rather than by a bundle: four arguments remain, and
 /// every one of them is genuinely per contract.
-fn contract_evidence(
-    inputs: &FunnelInputs<'_>,
+pub fn contract_evidence(
+    shared: SharedInputs<'_>,
     contract: ContractSeries<'_>,
     index: usize,
     costed: &ComboWalkForward,
@@ -405,23 +451,23 @@ fn contract_evidence(
 ) -> ContractEvidence {
     // Step 3: the S1 screen, cost-free. The only sanctioned FreeFills use.
     let (free_fill_oos, free_fill_oos_stats) = pooled_of(
-        &replay(inputs, contract, index, &mut FreeFills),
+        &replay(shared, contract, index, &mut FreeFills),
         contract,
         test_windows,
     );
 
     // Step 4: the mandatory sweep.
-    let sweep: Vec<CostLevel> = inputs
+    let sweep: Vec<CostLevel> = shared
         .criteria
         .cost_sweep_half_ticks
         .iter()
         .map(|&half_ticks| {
             let (oos_stitched, oos_stitched_stats) = pooled_of(
                 &replay(
-                    inputs,
+                    shared,
                     contract,
                     index,
-                    &mut inputs.costs.at_half_ticks(half_ticks, inputs.spec.tick),
+                    &mut shared.costs.at_half_ticks(half_ticks, shared.spec.tick),
                 ),
                 contract,
                 test_windows,
@@ -436,9 +482,9 @@ fn contract_evidence(
 
     // Step 5: the controls, under the declared costs.
     let controls = [
-        random_entry_control(inputs, contract, costed, test_windows),
+        random_entry_control(shared, contract, costed, test_windows),
         buy_and_hold_control(
-            inputs,
+            shared,
             contract,
             test_windows,
             costed.oos_stitched.total_return_pct,
@@ -468,7 +514,7 @@ fn contract_evidence(
 /// nobody else's (D-0083), and the deflation units come from the config
 /// (D-0125). There is no per-contract variant of any of them for a pooling step
 /// to invent.
-struct PoolingInputs<'a> {
+pub struct PoolingInputs<'a> {
     /// **Distinct** out-of-sample trading days across every pooled contract —
     /// the union, never the sum (D-0114).
     ///
@@ -479,26 +525,26 @@ struct PoolingInputs<'a> {
     /// the number, and summing is precisely the defect D-0114 exists to
     /// prevent. The union is computed where the day keys actually are, by
     /// [`crate::pooling::PooledSessions`].
-    distinct_oos_sessions: usize,
+    pub distinct_oos_sessions: usize,
     /// Trials charged to the hypothesis family, read from the registry and
     /// nowhere else, so voided runs are already excluded (D-0083).
-    n_trials: usize,
+    pub n_trials: usize,
     /// The grid's probability of backtest overfitting, or `None` when CSCV
     /// could not be computed.
-    pbo: Option<f64>,
+    pub pbo: Option<f64>,
     /// Dispersion of the grid's out-of-sample Sharpes, already converted to
     /// per-observation units (D-0125).
-    trial_sharpe_dispersion: Option<f64>,
+    pub trial_sharpe_dispersion: Option<f64>,
     /// Annualized Sharpe to per-observation Sharpe, the other half of D-0125.
-    deannualize: &'a dyn Fn(f64) -> f64,
+    pub deannualize: &'a dyn Fn(f64) -> f64,
     /// The sweep level the `kill_if_dead` criterion reads.
-    kill_if_dead_half_ticks: i64,
+    pub kill_if_dead_half_ticks: i64,
     /// Declared capital. Every contract's stitched curve starts here, which is
     /// what makes a pooled final equity `initial + Σ deltas` and therefore
     /// exact in integer arithmetic (D-0127).
-    initial_cash_nano_usd: NanoUsd,
+    pub initial_cash_nano_usd: NanoUsd,
     /// Annualization for the pooled Sharpe.
-    bars_per_year: f64,
+    pub bars_per_year: f64,
 }
 
 /// A series pooled across contracts, and the two numbers such a series may
@@ -603,7 +649,7 @@ impl PoolingInputs<'_> {
 ///
 /// **Path statistics are not pooled at all**, and cannot be from here: what a
 /// fold yields is a [`PooledSeries`], which has no drawdown to offer (D-0119).
-fn pool_contract_evidence(
+pub fn pool_contract_evidence(
     first: &ContractEvidence,
     rest: &[ContractEvidence],
     shared: &PoolingInputs<'_>,
@@ -948,6 +994,7 @@ pub fn run_funnel(
     //
     // `instrument` is the config's declared universe entry, which
     // `collect_events` already narrowed to one (D-0117 again).
+    let shared_inputs = inputs.shared();
     let series = ContractSeries {
         events: inputs.events,
         params: inputs.params,
@@ -971,7 +1018,7 @@ pub fn run_funnel(
     for costed in report.combos {
         let index = costed.id.combo_index;
 
-        let contract = contract_evidence(inputs, series, index, &costed, &test_windows);
+        let contract = contract_evidence(shared_inputs, series, index, &costed, &test_windows);
         // `rest` is empty at the only call site in this build, and that is
         // D-0117 holding rather than an omission: every well-formed `[pooling]`
         // config is refused, so no funnel run has a second contract to pool.
@@ -1153,12 +1200,12 @@ fn metrics_of(s: &Summary) -> RunMetrics {
 /// Subtracting an estimated cost from a finished equity curve would get the
 /// final dollar right and every other number wrong.
 fn replay<M: FillModel>(
-    inputs: &FunnelInputs<'_>,
+    shared: SharedInputs<'_>,
     contract: ContractSeries<'_>,
     index: usize,
     fills: &mut M,
 ) -> BacktestResult {
-    let mut strategy = inputs.grid.aligned_strategy(index);
+    let mut strategy = shared.grid.aligned_strategy(index);
     let mut feed = SliceFeed {
         events: contract.events,
         at: 0,
@@ -1167,7 +1214,7 @@ fn replay<M: FillModel>(
         &mut feed,
         &mut strategy,
         fills,
-        inputs.spec,
+        shared.spec,
         contract.params,
     )
     .expect(
@@ -1223,7 +1270,7 @@ fn pooled_of(
 /// placing an episode across a seam would put its exposure in a training
 /// window, where the pooled curve does not look.
 fn random_entry_control(
-    inputs: &FunnelInputs<'_>,
+    shared: SharedInputs<'_>,
     contract: ContractSeries<'_>,
     costed: &ComboWalkForward,
     test_windows: &[Range<usize>],
@@ -1259,24 +1306,24 @@ fn random_entry_control(
     let mut draws: Vec<(u64, Summary, ReturnStats)> = Vec::with_capacity(RANDOM_ENTRY_DRAWS);
     for i in 0..RANDOM_ENTRY_DRAWS {
         let seed = derive_control_seed(
-            &inputs.identity.config_hash,
-            inputs.identity.root_seed,
-            inputs.identity.account_id.as_deref(),
+            &shared.identity.config_hash,
+            shared.identity.root_seed,
+            shared.identity.account_id.as_deref(),
             costed.id.combo_index,
             &format!("random_entry:{i}"),
         );
-        match RandomEntry::matched_across(seed, &per_window, inputs.qty) {
+        match RandomEntry::matched_across(seed, &per_window, shared.qty) {
             Ok(mut control) => {
                 let mut feed = SliceFeed {
                     events: contract.events,
                     at: 0,
                 };
-                let mut fills = inputs.costs.declared(inputs.spec.tick);
+                let mut fills = shared.costs.declared(shared.spec.tick);
                 let result = run(
                     &mut feed,
                     &mut control,
                     &mut fills,
-                    inputs.spec,
+                    shared.spec,
                     contract.params,
                 )
                 .expect("INVARIANT: the shared bar series is availability-ordered");
@@ -1326,22 +1373,22 @@ fn random_entry_control(
 /// "what owning the thing during the out-of-sample windows would have paid" —
 /// not what owning it for the whole series would have.
 fn buy_and_hold_control(
-    inputs: &FunnelInputs<'_>,
+    shared: SharedInputs<'_>,
     contract: ContractSeries<'_>,
     test_windows: &[Range<usize>],
     strategy_pct: f64,
 ) -> Control {
-    let mut control = BuyAndHold::new(inputs.grid.max_warmup_bars(), inputs.qty);
+    let mut control = BuyAndHold::new(shared.grid.max_warmup_bars(), shared.qty);
     let mut feed = SliceFeed {
         events: contract.events,
         at: 0,
     };
-    let mut fills = inputs.costs.declared(inputs.spec.tick);
+    let mut fills = shared.costs.declared(shared.spec.tick);
     let result = run(
         &mut feed,
         &mut control,
         &mut fills,
-        inputs.spec,
+        shared.spec,
         contract.params,
     )
     .expect("INVARIANT: the shared bar series is availability-ordered");

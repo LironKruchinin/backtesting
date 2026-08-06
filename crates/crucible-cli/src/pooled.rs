@@ -40,11 +40,13 @@ use crucible_data::calendar::Calendar;
 use crucible_data::catalog::TsRange;
 use crucible_data::continuous::{ContinuousError, RollTable, read_roll_table};
 use crucible_data::ingest::window::{civil_from_days, days_from_civil};
-use crucible_engine::{BacktestParams, FreeFills, run};
+use crucible_engine::{BacktestParams, FreeFills};
+use crucible_funnel::funnel::{ContractEvidence, ContractSeries, SharedInputs, contract_evidence};
 use crucible_funnel::pooling::{ContractEvaluation, pooled_registration_hash};
-use crucible_funnel::walkforward::{FoldPlan, FoldSpec, RunTrace};
+use crucible_funnel::walkforward::GridRun;
+use crucible_funnel::walkforward::{FoldPlan, FoldSpec};
 
-use crate::combo::{PooledWindow, Series, SliceFeed, annualization, collect_events_in_window};
+use crate::combo::{PooledWindow, Series, annualization, collect_events_in_window};
 use crate::config::LoadedConfig;
 use crate::pull::{EXIT_USAGE, data_dir};
 
@@ -631,6 +633,7 @@ mod warmup_trim_tests {
 /// finish.
 pub(crate) fn replay_pool(
     loaded: &LoadedConfig,
+    shared: SharedInputs<'_>,
     plans: &[PooledContractPlan],
     combo_index: usize,
 ) -> Vec<PooledRun> {
@@ -657,6 +660,13 @@ pub(crate) fn replay_pool(
                         folds: 0,
                         fold_needs_sessions: contract.fold_needs_sessions,
                     },
+                    // A contract that fit no complete fold contributes no
+                    // evidence to pool. Absent, never an empty `ContractEvidence`
+                    // — a zero-return screen and a zero-return control would
+                    // pool as real numbers and drag the pooled answer toward
+                    // nothing, which is D-0075's zero-that-reads-as-a-benchmark
+                    // in its most direct form.
+                    evidence: None,
                 };
             };
 
@@ -689,38 +699,64 @@ pub(crate) fn replay_pool(
             // -----------------------------------------------------------------
 
             let events = &contract.series.events;
-            let mut strategy = loaded.grid.aligned_strategy(combo_index);
-            let mut feed = SliceFeed { events, at: 0 };
             let params = BacktestParams {
                 initial_cash_nano_usd: loaded.initial_cash_nano_usd,
                 bars_per_year: annualization(loaded, events),
             };
-            let expect = "INVARIANT: a collected bar series is already availability-ordered";
-            let result = if loaded.file.execution.fill_model == "free_fills" {
-                run(
-                    &mut feed,
-                    &mut strategy,
-                    &mut FreeFills,
-                    &loaded.spec,
-                    &params,
-                )
-                .expect(expect)
-            } else {
-                let mut fills = loaded.spread_cross_fills();
-                run(&mut feed, &mut strategy, &mut fills, &loaded.spec, &params).expect(expect)
+            let series = ContractSeries {
+                events,
+                params: &params,
             };
-
-            let trace = RunTrace::new(&result.equity, &result.closed_trades, &result.fee_events);
             let test_windows: Vec<std::ops::Range<usize>> = fold_plan
                 .folds()
                 .iter()
                 .map(|fold| fold.test.bars.clone())
                 .collect();
-            let oos = trace.pooled(
-                &test_windows,
-                params.initial_cash_nano_usd,
-                params.bars_per_year,
-            );
+
+            // The costed walk-forward, through `GridRun` rather than a bare
+            // `run` — which is the bridge, and is why the evaluation below no
+            // longer needs a replay of its own. `ContractEvaluation` and
+            // `ContractEvidence` now come from ONE replay of this contract, so
+            // "how many out-of-sample round-trips" has a single answer here
+            // instead of two that agree until someone edits one of them.
+            //
+            // The plan, the day keys and the warmup were all built by
+            // `plan_pool` from this very series and this grid, so `GridRun`'s
+            // three consistency refusals cannot fire — and if that ever stops
+            // being true it is a wiring bug that must be loud rather than a
+            // contract silently reported as skipped.
+            let built = "INVARIANT: plan_pool built this fold plan from this series, this day-key                  slice and this grid's own max warmup, so GridRun's plan/warmup/day-key checks                  cannot fail here";
+            let costed = if loaded.file.execution.fill_model == "free_fills" {
+                GridRun::new(
+                    events,
+                    &contract.day_keys,
+                    &loaded.grid,
+                    fold_plan,
+                    &loaded.spec,
+                    &params,
+                    shared.identity,
+                    &FreeFills,
+                )
+                .expect(built)
+                .one_combo(combo_index)
+            } else {
+                GridRun::new(
+                    events,
+                    &contract.day_keys,
+                    &loaded.grid,
+                    fold_plan,
+                    &loaded.spec,
+                    &params,
+                    shared.identity,
+                    &loaded.spread_cross_fills(),
+                )
+                .expect(built)
+                .one_combo(combo_index)
+            }
+            .expect("INVARIANT: a collected bar series is already availability-ordered");
+
+            let evidence =
+                contract_evidence(shared, series, combo_index, &costed, &test_windows);
 
             PooledRun {
                 registration_hash,
@@ -731,11 +767,12 @@ pub(crate) fn replay_pool(
                     // Read off the pooled summary rather than recounted: the
                     // window that owns a round-trip is the one containing its
                     // closing fill, and that decision is made in exactly one place.
-                    oos_trades: oos.round_trips,
+                    oos_trades: costed.oos_stitched.round_trips,
                     insufficient_warmup: contract.insufficient_warmup,
                     folds: fold_plan.folds().len(),
                     fold_needs_sessions: contract.fold_needs_sessions,
                 },
+                evidence: Some(evidence),
             }
         })
         .collect()
@@ -749,8 +786,20 @@ pub(crate) fn replay_pool(
 pub(crate) struct PooledRun {
     /// Effective registration hash for this contract's run (D-0124).
     pub registration_hash: String,
-    /// The evidence admission judges on.
+    /// What ADMISSION judges on: days, trades, folds.
     pub evaluation: ContractEvaluation,
+    /// What the STAGES judge on: the S1 screen, the mandatory sweep, both
+    /// controls and the costed series' sufficient statistics.
+    ///
+    /// The two are separate fields rather than one merged record because they
+    /// answer different questions and fail independently. Admission asks "is
+    /// there enough evidence", the stages ask "is the evidence any good"
+    /// (`stages::assess` evaluates them under separate headings for exactly
+    /// that reason), and a contract can supply the first and not the second.
+    ///
+    /// `None` when the contract fit no complete fold — the same contract the
+    /// evaluation reports as skipped with a count (D-0119).
+    pub evidence: Option<ContractEvidence>,
 }
 
 #[cfg(test)]
@@ -758,6 +807,40 @@ pub(super) mod replay_pool_tests {
     use super::*;
     use crate::combo::collect_events_for;
     use crucible_funnel::walkforward::FoldScheme;
+
+    /// The run identity these replays are charged under.
+    ///
+    /// A fixed seed and no account: `replay_pool` reads the identity only to
+    /// derive the controls' streams, so what matters is that every contract in
+    /// one test sees the SAME one — two contracts given different identities
+    /// would draw different random-entry schedules and the converse test below
+    /// would fail for a reason that has nothing to do with leaked state.
+    pub(super) fn identity(loaded: &LoadedConfig) -> crucible_funnel::walkforward::RunIdentity {
+        crucible_funnel::walkforward::RunIdentity {
+            config_hash: loaded.config_hash,
+            root_seed: 42,
+            account_id: None,
+        }
+    }
+
+    /// The shared half of the seam's inputs, from the same shipped config.
+    pub(super) fn shared<'a>(
+        loaded: &'a LoadedConfig,
+        criteria: &'a crucible_funnel::Criteria,
+        identity: &'a crucible_funnel::walkforward::RunIdentity,
+    ) -> SharedInputs<'a> {
+        SharedInputs {
+            grid: &loaded.grid,
+            spec: &loaded.spec,
+            criteria,
+            identity,
+            costs: crucible_funnel::Costs {
+                half_spread_ticks: loaded.file.execution.half_spread_ticks,
+                fee_per_contract_nano_usd: loaded.fee_per_contract_nano_usd,
+            },
+            qty: Qty(1),
+        }
+    }
 
     /// A real grid over a SYNTHETIC source, so the replay is exercised end to
     /// end with no archive. `combo-smoke.toml` declares `source = "synthetic"`.
@@ -819,6 +902,9 @@ pub(super) mod replay_pool_tests {
     #[test]
     fn two_contracts_with_the_same_bars_produce_identical_evidence() {
         let loaded = loaded();
+        let criteria = crucible_funnel::Criteria::for_tests();
+        let id = identity(&loaded);
+        let sh = shared(&loaded, &criteria, &id);
         let events = collect_events_for(&loaded, "SYN:RW")
             .expect("synthetic")
             .events;
@@ -826,7 +912,7 @@ pub(super) mod replay_pool_tests {
             plan_of(&loaded, "AAA", events.clone(), 40, spec()),
             plan_of(&loaded, "BBB", events, 40, spec()),
         ];
-        let out = replay_pool(&loaded, &plans, 0);
+        let out = replay_pool(&loaded, sh, &plans, 0);
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].evaluation.oos_trades, out[1].evaluation.oos_trades);
         assert_eq!(
@@ -834,6 +920,57 @@ pub(super) mod replay_pool_tests {
             out[1].evaluation.oos_day_keys
         );
         assert_eq!(out[0].evaluation.folds, out[1].evaluation.folds);
+
+        // ---- and now the EVIDENCE, which is what the name always claimed ----
+        //
+        // Until C6b-i-b this test could only compare the admission half, so a
+        // replay leaking state through the S1 screen, the sweep or either
+        // control would have passed it. Those exist now, so they are checked.
+        let (a, b) = (
+            out[0]
+                .evidence
+                .as_ref()
+                .expect("planned contract has evidence"),
+            out[1]
+                .evidence
+                .as_ref()
+                .expect("planned contract has evidence"),
+        );
+        assert_eq!(
+            a.costed_oos_stats, b.costed_oos_stats,
+            "identical bars must give identical costed statistics"
+        );
+        assert_eq!(a.free_fill_oos_stats, b.free_fill_oos_stats);
+        assert_eq!(a.oos_trades, b.oos_trades);
+        assert_eq!(a.sweep.len(), b.sweep.len());
+        for (x, y) in a.sweep.iter().zip(b.sweep.iter()) {
+            assert_eq!(x.half_ticks, y.half_ticks);
+            assert_eq!(x.oos_stitched_stats, y.oos_stitched_stats);
+        }
+        for (x, y) in a.controls.iter().zip(b.controls.iter()) {
+            assert_eq!(x.name, y.name);
+            assert_eq!(
+                x.oos_stitched.as_ref().map(|(_, s)| *s),
+                y.oos_stitched.as_ref().map(|(_, s)| *s),
+                "the {} control must not depend on which contract ran it",
+                x.name
+            );
+        }
+
+        // What makes this pass? Not "both are empty": the fixture must have
+        // produced live statistics, or every comparison above holds for
+        // nothing. This is the control on the control.
+        assert!(
+            a.costed_oos_stats.n > 1 && a.oos_trades > 0,
+            "the fixture must actually trade: n={} trades={}",
+            a.costed_oos_stats.n,
+            a.oos_trades
+        );
+        assert_eq!(a.sweep.len(), 4, "the mandatory sweep is four levels");
+        assert!(
+            a.controls.iter().all(|c| c.oos_stitched.is_some()),
+            "both controls must have been built, or their equality is vacuous"
+        );
         assert!(
             out[0].evaluation.folds > 0,
             "the fixture must actually fold"
@@ -853,6 +990,9 @@ pub(super) mod replay_pool_tests {
     #[test]
     fn oos_trades_counts_the_test_windows_and_not_the_whole_run() {
         let loaded = loaded();
+        let criteria = crucible_funnel::Criteria::for_tests();
+        let id = identity(&loaded);
+        let sh = shared(&loaded, &criteria, &id);
         let events = collect_events_for(&loaded, "SYN:RW")
             .expect("synthetic")
             .events;
@@ -873,10 +1013,11 @@ pub(super) mod replay_pool_tests {
         };
         let w = replay_pool(
             &loaded,
+            sh,
             &[plan_of(&loaded, "W", events.clone(), 40, wide)],
             0,
         );
-        let n = replay_pool(&loaded, &[plan_of(&loaded, "N", events, 40, narrow)], 0);
+        let n = replay_pool(&loaded, sh, &[plan_of(&loaded, "N", events, 40, narrow)], 0);
         assert!(
             w[0].evaluation.folds > 0 && n[0].evaluation.folds > 0,
             "both geometries must fold"
@@ -907,13 +1048,16 @@ pub(super) mod replay_pool_tests {
     #[test]
     fn an_unplannable_contract_contributes_nothing_and_carries_its_reason() {
         let loaded = loaded();
+        let criteria = crucible_funnel::Criteria::for_tests();
+        let id = identity(&loaded);
+        let sh = shared(&loaded, &criteria, &id);
         let events = collect_events_for(&loaded, "SYN:RW")
             .expect("synthetic")
             .events;
         let mut short = plan_of(&loaded, "SHORT", events, 40, spec());
         short.plan = None;
         short.insufficient_warmup = Some((3, 40));
-        let out = replay_pool(&loaded, &[short], 0);
+        let out = replay_pool(&loaded, sh, &[short], 0);
         assert_eq!(out[0].evaluation.oos_trades, 0);
         assert!(out[0].evaluation.oos_day_keys.is_empty());
         assert_eq!(out[0].evaluation.folds, 0);
@@ -943,6 +1087,9 @@ mod pooled_identity_tests {
     #[test]
     fn each_contract_in_a_pool_carries_its_own_registration_hash() {
         let loaded = super::replay_pool_tests::loaded();
+        let criteria = crucible_funnel::Criteria::for_tests();
+        let id = super::replay_pool_tests::identity(&loaded);
+        let sh = super::replay_pool_tests::shared(&loaded, &criteria, &id);
         let events = collect_events_for(&loaded, "SYN:RW")
             .expect("synthetic")
             .events;
@@ -956,7 +1103,7 @@ mod pooled_identity_tests {
             super::replay_pool_tests::plan_of(&loaded, "ESH2024", events.clone(), 40, spec),
             super::replay_pool_tests::plan_of(&loaded, "ESM2024", events, 40, spec),
         ];
-        let out = replay_pool(&loaded, &plans, 0);
+        let out = replay_pool(&loaded, sh, &plans, 0);
         assert_ne!(
             out[0].registration_hash, out[1].registration_hash,
             "two contracts must be two runs and therefore two trials"
@@ -965,7 +1112,7 @@ mod pooled_identity_tests {
         // The converse: the identity is a function of the contract, so the
         // same pool replayed again reproduces it. A hash that varied per call
         // would satisfy the assertion above and destroy the trial count.
-        let again = replay_pool(&loaded, &plans, 0);
+        let again = replay_pool(&loaded, sh, &plans, 0);
         assert_eq!(out[0].registration_hash, again[0].registration_hash);
         assert_eq!(out[1].registration_hash, again[1].registration_hash);
     }
