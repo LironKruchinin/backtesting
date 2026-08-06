@@ -4428,6 +4428,52 @@ propose a superseding entry — don't silently diverge.
   each of which now carries an execution assumption that is named rather than
   measured, which is what §2.4 has demanded all along. The honest form of this
   decision is a stated assumption, not a quiet one.
+- **D-0122** (2026-08-06) -- **A pinned value that changes with the optimisation
+  level is a §2.2 violation, and the fix is to remove the compiler's freedom —
+  never to bless a profile.** `the_deflated_sharpe_determinism_hash_is_pinned`
+  produced `dc7f94f25235df6c` under `dev` and `fec6ffe24b0447a8` under
+  `--release`. Repinned to **`fec6ffe24b0447a8`**, which both profiles now agree
+  on; D-0097's value is historical.
+  **"Which profile do we pin" was the wrong question, and rejecting it is the
+  decision.** Canonising either value institutionalises a number that still
+  moves with the compiler — it makes the gate green while leaving §2.2 broken,
+  and §2.2 says "on any machine" without carving out an `-O` level. What was
+  fixed is the freedom, not the symptom.
+  **The mechanism, bisected rather than guessed.** The failing test hashes
+  `sharpe`, `skew` and `kurtosis` *before* `deflated_sharpe` is called, so
+  hashing the moments alone decides between "it is in `moments()`" and "it is
+  downstream". It is `moments()`. `f64::powi` lowers to `llvm.powi`, whose
+  expansion into multiplications may associate differently at different
+  optimisation levels, and float multiplication is not associative. Rust itself
+  never reassociates — there is no fast-math — so writing the powers out makes
+  the association a property of the source.
+  **The third case that makes it an attribution.** `powi(2)` has exactly one
+  association and cannot diverge; `powi(3)` and `powi(4)` have two or more and
+  did. Measured: the input series hashed **identically** in both profiles
+  (`a3a4a2b7ea207428`), `sharpe` was byte-identical, and only `skew` and
+  `kurtosis` moved — `-8.79018770777955371631e-2` against
+  `-8.79018770777955094076e-2`, and `2.88711809985583700566e0` against
+  `2.88711809985583744975e0`. A divergence with an identical input and a
+  same-profile-stable sibling is located, not merely observed. `variance` keeps
+  `powi(2)` for that reason, stated in the code so the naive form is not
+  restored as a tidy-up.
+  **Acceptance was AGREEMENT, not the new number.** Derived twice in each
+  profile — four identical readings — before anything was written down. Two
+  derivations in one profile is exactly what certified `dc7f94f25235df6c`, and
+  it certified less than it appeared to.
+  **Only one pin moved, and the one that did not is informative.** The block-B
+  battery consumes deflation and is unmoved and green in both profiles, so the
+  divergence was **input-dependent**: a combo's own moments never reached
+  magnitudes where the association mattered. That is why a gate built on the
+  same arithmetic stayed green for as long as the broken one did, and it is the
+  reason a single-input pin is not a proof of profile-stability for its callers.
+  **CI now runs `--release`, and that is part of this decision rather than a
+  follow-up.** The gate was invisible because `ci.yml` ran only `dev` — it had
+  been measuring dev-profile determinism while claiming determinism, which is a
+  gate narrower than its own claim. The workspace suite now runs in both
+  profiles and the five hash-emitting CLI gates are compared **across** profiles
+  by value with no-output detection, rather than each against a second run of
+  itself. A fix without its regression guard is a fix that can silently return.
 - **D-0121** (2026-08-06) -- **A pooled contract is replayed over a LEAD-IN plus
   its front window, and a contract whose own curated data cannot supply the
   grid's warmup is SKIPPED with a count and a reason rather than evaluated on a

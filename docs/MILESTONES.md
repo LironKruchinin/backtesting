@@ -497,29 +497,23 @@ The quant-research payload. Specs live in `crucible-funnel` module docs.
       | S0 | `e74766eb3f7becfc` | `crucible funnel --config configs/s0-smoke.toml --out <tmp> --hash-only` (D-0107) |
       | permutation null | `9fe41f6f5b3653e7` | `stats::permutation::tests::the_permutation_null_is_pinned` |
       | truncation | `91b9ff5b9bbcdb25` | `stats::truncation::tests::the_truncation_sweep_is_pinned` |
-      | deflated Sharpe | `dc7f94f25235df6c` | `stats::deflated::tests::the_deflated_sharpe_determinism_hash_is_pinned` |
+      | deflated Sharpe | `fec6ffe24b0447a8` | `stats::deflated::tests::the_deflated_sharpe_determinism_hash_is_pinned` |
       | **block-B battery** | **`ef703dfd8d19fdd3`** | `stats::pbo::pinned::the_block_b_battery_is_pinned` (D-0110) |
 
-      > **UNRESOLVED, and it makes one row above profile-dependent** (found
-      > 2026-08-06). `cargo test --release` fails
-      > `the_deflated_sharpe_determinism_hash_is_pinned`: the deflation
-      > arithmetic produces **`fec6ffe24b0447a8`** under `--release` against the
-      > pinned `dc7f94f25235df6c` under `dev`. Both profiles are green
-      > *individually*; they disagree with each other. That is a **§2.2
-      > question** — "same config + same data ⇒ bit-identical results" does not
-      > carve out an optimization level — and the pinned value is currently a
-      > statement about a build profile rather than about the arithmetic.
-      > **CI has never run `--release` tests** (`ci.yml` runs `cargo test
-      > --workspace` and `--workspace --all-features`), which is why sixteen
-      > months of green never surfaced it. Proven pre-existing at `3c29c99` by
-      > stashing an unrelated diff and re-running on the verified-clean tree.
-      > **It blocks C4d and C7 as specified**: both require a hash *derived
-      > twice*, and two derivations in one profile agree while the other profile
-      > disagrees — so "which profile do we pin?" has to be answered before
-      > either can be done correctly. Pinning a profile-dependent value pins a
-      > rumor. Not diagnosed: the cause could be float contraction, constant
-      > folding at a different precision, or a real ordering bug, and guessing
-      > between them is what §7 refuses.
+      > **RESOLVED 2026-08-06 (D-0122), and the row above carries its new
+      > value.** `the_deflated_sharpe_determinism_hash_is_pinned` produced
+      > `dc7f94f25235df6c` under dev and `fec6ffe24b0447a8` under `--release`.
+      > The cause was `f64::powi` in `moments()`: `llvm.powi` expands into
+      > multiplications and may associate them differently per optimisation
+      > level, and float multiplication is not associative. `powi(3)` and
+      > `powi(4)` diverged; `powi(2)` did not, having only one association —
+      > which is the third case that made the attribution. Fixed by writing the
+      > powers out so the association is a property of the source, not of the
+      > compiler; **not** by blessing a profile, which would have canonised a
+      > value that still moved. Repinned to `fec6ffe24b0447a8`, derived twice in
+      > each profile with all four identical. **CI now runs `--release`**, which
+      > is why this was invisible for as long as it was: the gate had only ever
+      > been measured in one profile while claiming determinism.
 
       **The planted defect they were measured against already existed**:
       `controls::LeakyZScore` (a full-sample z-score, §2.1's named lookahead),

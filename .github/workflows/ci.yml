@@ -27,6 +27,35 @@ jobs:
       - name: Tests
         run: cargo test --workspace
 
+      # §2.2 says "same config + same data => bit-identical results, on any
+      # machine". It does not carve out an optimisation level — and until
+      # D-0122 this job only ever ran `dev`, so the deflated-Sharpe gate was
+      # measuring dev-profile determinism while claiming determinism. It
+      # disagreed with `--release` for as long as it existed and nothing here
+      # could see it. This step is that fix's regression guard.
+      - name: Tests (release profile)
+        run: cargo test --workspace --release
+
+      # The five CLI gates are hash-emitting binaries, so the profile question
+      # applies to them too: they are compared BY VALUE across profiles rather
+      # than each against a second run of itself.
+      - name: Gates agree across build profiles
+        run: |
+          for cmd in "demo --hash-only"                      "combo --config configs/combo-smoke.toml --run --hash-only"                      "walk-forward --config configs/combo-smoke.toml --hash-only"; do
+            D=$(cargo run -q -p crucible-cli -- $cmd)
+            R=$(cargo run -q --release -p crucible-cli -- $cmd)
+            test -n "$D" || { echo "NO OUTPUT (dev): $cmd"; exit 1; }
+            test "$D" = "$R" || { echo "PROFILE DIVERGENCE on $cmd: dev $D vs release $R"; exit 1; }
+            echo "profile-stable: $cmd = $D"
+          done
+          for cfg in combo-smoke s0-smoke; do
+            D=$(cargo run -q -p crucible-cli -- funnel --config configs/$cfg.toml                   --out "$RUNNER_TEMP/pd-$cfg" --hash-only)
+            R=$(cargo run -q --release -p crucible-cli -- funnel --config configs/$cfg.toml                   --out "$RUNNER_TEMP/pr-$cfg" --hash-only)
+            test -n "$D" || { echo "NO OUTPUT (dev): $cfg"; exit 1; }
+            test "$D" = "$R" || { echo "PROFILE DIVERGENCE on $cfg: dev $D vs release $R"; exit 1; }
+            echo "profile-stable: funnel $cfg = $D"
+          done
+
       # Determinism gate: the demo backtest must produce bit-identical results
       # across two runs. Any nondeterminism in the engine fails CI.
       - name: Determinism smoke test
