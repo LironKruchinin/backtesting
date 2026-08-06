@@ -328,6 +328,51 @@ impl ReturnStats {
             kurtosis: Some(m4 / (m2 * m2)),
         }
     }
+
+    /// The naive annualized Sharpe these statistics describe.
+    ///
+    /// The sibling of [`Self::shape`], and bit-identical to the ratio
+    /// [`sharpe_and_shape`] computes on the same series for the same reason:
+    /// `mean` and `m2` were accumulated by the very expressions that function's
+    /// `sharpe` uses, and the divide, the square root and the ratio are formed
+    /// here at exactly the points it forms them. `Σ(r−μ)²` is divided by
+    /// `n − 1` — the sample convention — while [`Self::shape`] divides the same
+    /// field by `n`, which is precisely why the field is stored undivided.
+    ///
+    /// `None` on fewer than two returns, and `None` on a series with no
+    /// deviation, where the ratio is undefined rather than infinite. Both
+    /// guards are reproduced from `sharpe` rather than reinvented, and
+    /// `return_stats_and_sharpe_and_shape_agree_bit_for_bit` is what stops the
+    /// two from drifting.
+    ///
+    /// # Why this exists
+    ///
+    /// A series pooled across contracts by [`Self::combine`] has no equity
+    /// curve left to hand to [`sharpe_and_shape`] — not retaining the curve is
+    /// the whole reason this reducer exists. Without a Sharpe readable from the
+    /// statistics, a caller pooling N contracts would be left averaging the
+    /// contracts' *own* Sharpes, which is not the Sharpe of the pooled series
+    /// and is not a statistic at all: it is the mean of N ratios with N
+    /// different denominators, and it can sit above every one of them.
+    /// `the_pooled_sharpe_is_not_the_mean_of_the_contracts_sharpes` measures
+    /// that gap rather than asserting it.
+    #[must_use]
+    pub fn sharpe(&self, periods_per_year: f64) -> Option<f64> {
+        if self.n < 2 {
+            return None;
+        }
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "bar counts fit f64 exactly at our scales"
+        )]
+        let n = self.n as f64;
+        let var = self.m2 / (n - 1.0);
+        let sd = var.sqrt();
+        if sd == 0.0 {
+            return None;
+        }
+        Some(self.mean / sd * periods_per_year.sqrt())
+    }
 }
 
 /// `(n, mean, Σ(r−μ)², Σ(r−μ)³, Σ(r−μ)⁴)` in one pass over `rets`.
@@ -731,6 +776,93 @@ mod tests {
         assert_eq!(
             ReturnStats::combine(sa, sb).net_delta_nano_usd,
             99_999_999_999
+        );
+    }
+
+    /// **The drift guard for the Sharpe**, the sibling of
+    /// `return_stats_and_return_shape_agree_bit_for_bit` and asserted on the
+    /// same terms: BIT-for-bit, because both sides accumulate `mean` and
+    /// `Σ(r−μ)²` with the same written-out expressions and then divide, root
+    /// and ratio at the same points. A tolerance here would let a genuinely
+    /// different formula through.
+    ///
+    /// What would this do if the thing it looks for were absent? On a series
+    /// with no deviation both sides return `None` and every comparison would
+    /// hold vacuously — so the fixture is asserted to produce `Some` first, and
+    /// to produce a ratio that is not zero. That assertion is the control on
+    /// the control.
+    #[test]
+    fn return_stats_and_sharpe_and_shape_agree_bit_for_bit() {
+        let curve = skewed_curve();
+        let (direct, _) = sharpe_and_shape(&curve, 252.0);
+        let derived = ReturnStats::of(&curve).sharpe(252.0);
+
+        let value = direct.expect("the fixture must produce a real ratio, or this test is vacuous");
+        assert!(
+            value != 0.0 && value.is_finite(),
+            "a zero or non-finite fixture ratio would agree with almost any \
+             implementation: {value}"
+        );
+        assert_eq!(
+            derived.map(f64::to_bits),
+            direct.map(f64::to_bits),
+            "the Sharpe read off the statistics must equal the one computed from \
+             the series: {derived:?} vs {direct:?}"
+        );
+    }
+
+    /// Both guards, and they are a SEPARATE test rather than folded into the
+    /// one above, where a degenerate series would hide a real disagreement
+    /// instead of being the behaviour under test.
+    #[test]
+    fn a_flat_or_single_step_series_has_no_sharpe_on_either_path() {
+        let flat: Vec<(Ts, NanoUsd)> = (0..8).map(|i| (Ts(i), 1_000_000_000_000)).collect();
+        let (direct, _) = sharpe_and_shape(&flat, 252.0);
+        assert!(direct.is_none(), "a flat series has no ratio");
+        assert!(ReturnStats::of(&flat).sharpe(252.0).is_none());
+
+        // One return is not a sample: `n < 2` short-circuits before the
+        // divide by `n - 1`, which would otherwise be a divide by zero.
+        let one_step = vec![(Ts(0), 1_000_000_000_000), (Ts(1), 1_000_000_100_000)];
+        let (direct, _) = sharpe_and_shape(&one_step, 252.0);
+        assert!(direct.is_none());
+        assert!(ReturnStats::of(&one_step).sharpe(252.0).is_none());
+    }
+
+    /// **What the pooled reader is FOR**, measured rather than asserted.
+    ///
+    /// The tempting shortcut for a caller pooling N contracts is to average the
+    /// contracts' own Sharpes. That is the mean of N ratios with N different
+    /// denominators, and it is not the Sharpe of the pooled series. This
+    /// measures the gap on two samples that differ in length, mean and spread
+    /// — 0.212 pooled against 0.253 averaged, a relative 16 % — so a future
+    /// implementation that quietly averaged could not pass.
+    ///
+    /// Annualization is 1.0 so the numbers below are per-observation ratios and
+    /// the comparison is not scaled by a factor common to both sides.
+    #[test]
+    fn the_pooled_sharpe_is_not_the_mean_of_the_contracts_sharpes() {
+        let (a, b) = halves();
+        let (sa, sb) = (from_returns(&a), from_returns(&b));
+
+        let ra = sa.sharpe(1.0).expect("half a has a ratio");
+        let rb = sb.sharpe(1.0).expect("half b has a ratio");
+        let pooled = ReturnStats::combine(sa, sb)
+            .sharpe(1.0)
+            .expect("the pool has a ratio");
+        let averaged = (ra + rb) / 2.0;
+
+        // The halves must genuinely disagree, or averaging and pooling would
+        // coincide and this test would prove nothing.
+        assert!(
+            (ra - rb).abs() > 0.01,
+            "the halves' own ratios must differ: {ra} vs {rb}"
+        );
+        let gap = (pooled - averaged).abs() / averaged.abs();
+        assert!(
+            gap > 0.1,
+            "pooling and averaging must be distinguishable here: pooled {pooled}, \
+             averaged {averaged}, relative gap {gap:e}"
         );
     }
 
