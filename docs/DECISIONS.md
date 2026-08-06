@@ -4622,6 +4622,47 @@ propose a superseding entry — don't silently diverge.
   left for it, because D-0074's insert-before-run means the identity a run is
   recorded under exists before the run does. An identity derived after the loop
   produced numbers would be insert-after-run wearing the right name.
+- **D-0126** (2026-08-06) -- **`f64::powi` is banned from result-affecting code,
+  and D-0122's clause exempting `powi(2)` is SUPERSEDED — it was an inference
+  stated as a measurement.** Three sites are written out here; the six
+  `powi(2)` sites follow in their own commit because they move values.
+  **What was measured, and it is three separate facts.** Over 1,512,658 sampled
+  inputs: `powi(3)` differs from `d*d*d` on **390,842 (25.8 %)** in `dev` and on
+  **zero** in `release`. Release's `powi(4)` equals the **balanced**
+  `(d*d)*(d*d)` on all 1,512,658 and the linear `((d*d)*d)*d` on only 989,165 —
+  so the balanced form is what preserves every value release already computes,
+  and it was measured rather than chosen for symmetry. And `powi(2)` differs
+  from `x*x` on **725** samples in dev and zero in release, at ordinary normal
+  finite values: `x = 1.00985740004162628e-6` gives `3d71f0d32627d8be` against
+  `3d71f0d32627d8bd`, one ULP.
+  **That third fact refutes D-0122's own reasoning, which is mine.** D-0122 said
+  `variance` may keep `powi(2)` because "`z*z` has only one association, so it
+  has no freedom to exercise — and that is not an assumption, it is the third
+  case in the same measurement." The association argument is sound and
+  irrelevant: squaring *does* have one association, and `powi(2)` diverges
+  anyway, because LLVM's `-O0` expansion is not a plain multiply. The
+  "measurement" it cited was that a Sharpe built on `powi(2)` agreed across
+  profiles **on one fixture** — fixture-level evidence generalized into a claim
+  about an operation.
+  **The rule that follows, and it is the reusable part.** A claim about an
+  OPERATION needs measurement over inputs; a claim about a FIXTURE needs only
+  that fixture. D-0122 made the second kind of measurement and stated the first
+  kind of conclusion, and its sentence asserting its own evidentiary status is
+  what made the error uncheckable downstream. **An inference recorded in a
+  decision entry becomes indistinguishable from a measurement to everyone who
+  reads it, including its author** — this entry cites measurements over inputs,
+  and says so, for that reason.
+  **D-0122's fix was therefore incomplete on its own terms.** It repaired
+  `moments()` and left `deflated.rs:199` and `deflated.rs:391` — both `powi(2)`,
+  both inside the estimator it was written to fix. Nine result-affecting sites
+  exist in total; three are written out here and six remain.
+  **No gate moved**, in either profile, exactly as predicted: release already
+  computed the written-out associations, so this makes universal what release
+  was already producing. The six `powi(2)` sites will move gates, and that is
+  expected evidence rather than a finding.
+  **The powers stay written out and the comments say why.** The naive form looks
+  tidier, and a reader who simplifies it back re-creates the defect — which is
+  how the class survived D-0122 in the first place.
 - **D-0125** (2026-08-06) -- **A deflated Sharpe is computed in PER-OBSERVATION
   units, and both the observed ratio and the trial dispersion are converted
   there.** The run path passed an ANNUALIZED `sharpe_naive` against a per-bar
