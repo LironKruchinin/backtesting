@@ -486,10 +486,14 @@ fn the_grammar_surface_config_expands() {
 }
 
 // ---------------------------------------------------------------------------
-// `[pooling]` — block C's declaration surface. Inert: these assert what a
-// config may DECLARE, and nothing consumes the declaration yet (D-0114 lists
-// the orchestration as owed). The parser and its refusals land first, which is
-// the ordering §8 requires of any shape a later writer will depend on.
+// `[pooling]` — block C's declaration surface. No longer inert: C6b-iii wired
+// the orchestration and `crucible funnel` honours a pool (D-0130). These still
+// assert what a config may DECLARE, and the terminal refusal they check is now
+// the COMMAND one — `combo` and `walk-forward` do not pool — rather than
+// D-0117's blanket "this build cannot run it". The converse property is
+// unchanged and is the reason these tests exist: a well-formed pool must reach
+// the terminal refusal rather than any shape refusal, or the shape rules are
+// rejecting the block on sight instead of diagnosing it.
 // ---------------------------------------------------------------------------
 
 /// The converse, and it comes first: without it every refusal below could be
@@ -500,7 +504,7 @@ fn the_grammar_surface_config_expands() {
 /// what proves the four shape rules below are diagnosing shape and not just
 /// rejecting the block on sight.
 #[test]
-fn a_well_formed_pool_reaches_the_not_yet_orchestrated_refusal() {
+fn a_well_formed_pool_reaches_the_command_refusal_not_a_shape_one() {
     let dir = TempDir::new();
     let path = dir.config(
         &TEMPLATE
@@ -523,8 +527,8 @@ fn a_well_formed_pool_reaches_the_not_yet_orchestrated_refusal() {
         stderr(&out)
     );
     assert!(
-        stderr(&out).contains("is not implemented"),
-        "a well-formed pool must reach the orchestration refusal: {}",
+        stderr(&out).contains("Run `crucible funnel"),
+        "a well-formed pool must reach the COMMAND refusal -- `combo` does not pool --          rather than any shape refusal: {}",
         stderr(&out)
     );
 }
@@ -766,7 +770,7 @@ fn a_prefix_root_is_refused_even_when_every_contract_shares_it() {
 /// rather than being turned away as a root error. A test that only proved
 /// things are refused would be satisfied by refusing everything.
 #[test]
-fn a_correctly_declared_root_passes_the_root_check_and_reaches_d0117() {
+fn a_correctly_declared_root_passes_the_root_check_and_reaches_the_command_refusal() {
     let dir = TempDir::new();
     let path = dir.config(
         &TEMPLATE
@@ -784,8 +788,8 @@ fn a_correctly_declared_root_passes_the_root_check_and_reaches_d0117() {
         stderr(&out)
     );
     assert!(
-        stderr(&out).contains("cannot run"),
-        "it should be D-0117 that refuses it, not the root check: {}",
+        stderr(&out).contains("Run `crucible funnel"),
+        "it should be the command refusal, not the root check: {}",
         stderr(&out)
     );
 }

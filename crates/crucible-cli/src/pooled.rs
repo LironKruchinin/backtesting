@@ -42,7 +42,11 @@ use crucible_data::continuous::{ContinuousError, RollTable, read_roll_table};
 use crucible_data::ingest::window::{civil_from_days, days_from_civil};
 use crucible_engine::{BacktestParams, FreeFills};
 use crucible_funnel::funnel::{ContractEvidence, ContractSeries, SharedInputs, contract_evidence};
-use crucible_funnel::pooling::{ContractEvaluation, pooled_registration_hash};
+use crucible_funnel::pooling::{
+    ContractEvaluation, PooledEvaluation, pool_evaluations, pooled_registration_hash,
+};
+use crucible_funnel::scorecard::PooledCostLevel;
+use crucible_funnel::stages::{Assessment, Evidence};
 use crucible_funnel::walkforward::GridRun;
 use crucible_funnel::walkforward::{FoldPlan, FoldSpec};
 
@@ -667,6 +671,7 @@ pub(crate) fn replay_pool(
                     // nothing, which is D-0075's zero-that-reads-as-a-benchmark
                     // in its most direct form.
                     evidence: None,
+                    fold_returns: Vec::new(),
                 };
             };
 
@@ -773,6 +778,11 @@ pub(crate) fn replay_pool(
                     fold_needs_sessions: contract.fold_needs_sessions,
                 },
                 evidence: Some(evidence),
+                fold_returns: costed
+                    .folds
+                    .iter()
+                    .map(|fold| fold.oos.total_return_pct)
+                    .collect(),
             }
         })
         .collect()
@@ -800,6 +810,14 @@ pub(crate) struct PooledRun {
     /// `None` when the contract fit no complete fold — the same contract the
     /// evaluation reports as skipped with a count (D-0119).
     pub evidence: Option<ContractEvidence>,
+    /// This contract's per-fold out-of-sample returns, in fold order.
+    ///
+    /// Carried because PBO is a property of the SEARCH and needs a rectangular
+    /// combo x fold matrix (D-0109). Every combo of a pooled run sees the same
+    /// contracts with the same fold plans, so concatenating each contract's
+    /// folds in contract order gives every combo a row of identical length —
+    /// which is what CSCV requires and what a per-contract PBO would not be.
+    pub fold_returns: Vec<f64>,
 }
 
 #[cfg(test)]
@@ -1116,4 +1134,369 @@ mod pooled_identity_tests {
         assert_eq!(out[0].registration_hash, again[0].registration_hash);
         assert_eq!(out[1].registration_hash, again[1].registration_hash);
     }
+}
+
+// ---------------------------------------------------------------------------
+// The orchestration (C6b-iii). This is what D-0117's refusal was withheld for.
+// ---------------------------------------------------------------------------
+
+/// One combo of a pooled run, judged once on evidence pooled across contracts.
+pub(crate) struct PooledComboOutcome {
+    /// Grid index.
+    pub combo_index: usize,
+    /// `fast(period=10) slow(period=50)`.
+    pub label: String,
+    /// The pooled evidence `assess` was handed.
+    pub evidence: Evidence,
+    /// The verdict and every criterion behind it.
+    pub assessment: Assessment,
+    /// The pooled cost sweep, for the named-hole table (D-0129).
+    pub sweep: Vec<PooledCostLevel>,
+}
+
+/// A whole pooled funnel run.
+pub(crate) struct PooledFunnelReport {
+    /// One entry per combo, in grid-index order — never rank order.
+    pub combos: Vec<PooledComboOutcome>,
+    /// The admission half: the session union, the trade sum, what was skipped
+    /// and where the gaps are (D-0114, D-0119).
+    pub evaluation: PooledEvaluation,
+    /// Trials charged to the family before this run.
+    pub trials_before: usize,
+    /// And after. N contracts charge N trials (D-0124).
+    pub trials_after: usize,
+    /// Rows claimed for the first time.
+    pub runs_claimed: usize,
+    /// The annualization the pooled series was scored at — printed because it
+    /// is an assumption rather than a measurement.
+    pub bars_per_year: f64,
+}
+
+/// Provenance a pooled run records, borrowed from the caller.
+#[derive(Clone, Copy)]
+pub(crate) struct PooledRunMeta<'a> {
+    /// `meta.hypothesis_family`.
+    pub hypothesis_family: &'a str,
+    /// Repository revision (§2.5).
+    pub git_sha: &'a str,
+    /// blake3 of every archived file the series were read from (§2.5).
+    pub data_manifest_ids: &'a [String],
+    /// Wall clock, supplied by the caller. No crate below `cli` reads one.
+    pub now: &'a str,
+}
+
+/// Runs a pooled funnel: claim, replay each contract, pool, judge once.
+///
+/// # The order is claim-then-run, exactly as the single-contract path
+///
+/// Every (combo, contract, fold) row is claimed before any bar is replayed
+/// (D-0074, registry rule 1). A crash then leaves claimed-and-unfinished rows
+/// rather than runs nobody knows happened, and the trial count — which N
+/// contracts multiply by N (D-0124) — has already moved.
+///
+/// # Errors
+/// An exit code and a message when the pool cannot be formed.
+pub(crate) fn run_pooled_funnel(
+    loaded: &LoadedConfig,
+    shared: SharedInputs<'_>,
+    plans: &[PooledContractPlan],
+    registry: &mut crucible_funnel::Registry,
+    meta: PooledRunMeta<'_>,
+) -> Result<PooledFunnelReport, (i32, String)> {
+    let trials_before = registry.trials_for(meta.hypothesis_family);
+    let usage = crate::pull::EXIT_USAGE;
+
+    // ---- 1. Claim every row, before anything replays ---------------------
+    let mut runs_claimed = 0usize;
+    for combo_index in 0..loaded.grid.len() {
+        for contract in plans {
+            let Some(plan) = contract.plan.as_ref() else {
+                continue;
+            };
+            let effective = effective_hash(loaded, contract);
+            for fold in plan.folds() {
+                let row = crucible_funnel::RunRow {
+                    key: pooled_run_key(&effective, shared, combo_index, fold.index),
+                    hypothesis_family: meta.hypothesis_family.to_owned(),
+                    params: loaded.grid.combo(combo_index).label(),
+                    fill_model: "spread_cross".to_owned(),
+                    git_sha: meta.git_sha.to_owned(),
+                    data_manifest_ids: meta.data_manifest_ids.to_vec(),
+                    started_at: meta.now.to_owned(),
+                    criteria: shared.criteria.clone(),
+                };
+                match registry.insert_running(&row) {
+                    Ok(crucible_funnel::registry::Inserted::New) => runs_claimed += 1,
+                    Ok(_) => {}
+                    Err(e) => return Err((usage, e.to_string())),
+                }
+            }
+        }
+    }
+    let n_trials =
+        crucible_funnel::stats::deflated::trials_from_registry(registry, meta.hypothesis_family);
+
+    // ---- 2. Replay every combo over every contract ------------------------
+    let per_combo: Vec<Vec<PooledRun>> = (0..loaded.grid.len())
+        .map(|index| replay_pool(loaded, shared, plans, index))
+        .collect();
+
+    // ---- 3. The admission half, read off the first combo ------------------
+    //
+    // Days, folds and skips are properties of the PLAN, which no combo can
+    // change; only `oos_trades` varies by combo, and admission's trade floor is
+    // judged per combo from the pooled `Evidence` below. Reading the day union
+    // off combo 0 is therefore exact rather than approximate.
+    let first = per_combo
+        .first()
+        .ok_or((usage, "the grid is empty".to_owned()))?;
+    let evaluation = pool_evaluations(
+        &first
+            .iter()
+            .map(|r| r.evaluation.clone())
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|e| (usage, e.to_string()))?;
+
+    // ---- 4. The annualization the POOLED series is scored at --------------
+    //
+    // An assumption, and named as one (§4's basis rule). Each contract measures
+    // its own `bars_per_year` from its own sample (D-0038, D-0039), and the
+    // pooled return series concatenates all of them, so no single contract's
+    // factor is the pool's. The mean over contributing contracts is used:
+    // contracts of one root at one grain trade the same exchange on the same
+    // schedule, so the spread is small — but it is not zero, which is why the
+    // number is reported rather than folded silently into every Sharpe.
+    let contributing: Vec<&PooledContractPlan> =
+        plans.iter().filter(|c| c.plan.is_some()).collect();
+    if contributing.is_empty() {
+        return Err((
+            usage,
+            "no pooled contract fitted a complete fold at the declared geometry; the pool has \
+             nothing to judge"
+                .to_owned(),
+        ));
+    }
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "contract counts are single digits"
+    )]
+    let bars_per_year = contributing
+        .iter()
+        .map(|c| annualization(loaded, &c.series.events))
+        .sum::<f64>()
+        / contributing.len() as f64;
+
+    // ---- 5. Grid-level statistics, once, before any combo is judged -------
+    //
+    // Every combo sees the same contracts with the same fold plans, so
+    // concatenating each contract's folds in contract order gives every combo a
+    // row of identical length — which is what CSCV needs, and what a
+    // per-contract PBO would not be (D-0109).
+    let fold_performance: Vec<Vec<f64>> = per_combo
+        .iter()
+        .map(|runs| {
+            runs.iter()
+                .flat_map(|r| r.fold_returns.iter().copied())
+                .collect()
+        })
+        .collect();
+    let pbo = crucible_funnel::stats::pbo::probability_of_backtest_overfitting(&fold_performance);
+
+    let factor = bars_per_year.sqrt();
+    let deannualize = move |annualized: f64| annualized / factor;
+    let dispersion = pooled_sharpe_dispersion(&per_combo, bars_per_year).map(|sd| sd / factor);
+
+    // ---- 6. Pool each combo's evidence and judge it ONCE ------------------
+    let mut combos = Vec::with_capacity(per_combo.len());
+    for (combo_index, runs) in per_combo.iter().enumerate() {
+        let present: Vec<ContractEvidence> =
+            runs.iter().filter_map(|r| r.evidence.clone()).collect();
+        let (first_evidence, rest) = present
+            .split_first()
+            .ok_or((usage, "no pooled contract produced evidence".to_owned()))?;
+
+        let pooling_inputs = crucible_funnel::funnel::PoolingInputs {
+            // **The union, never the sum** (D-0114). It comes from
+            // `pool_evaluations`, which computed it from the contracts' day
+            // keys — the only place that knows two contracts shared a Tuesday.
+            distinct_oos_sessions: evaluation.oos_sessions,
+            n_trials,
+            pbo: pbo.as_ref().ok().map(|p| p.value),
+            trial_sharpe_dispersion: dispersion,
+            deannualize: &deannualize,
+            kill_if_dead_half_ticks: shared.criteria.kill_if_dead_half_ticks,
+            initial_cash_nano_usd: loaded.initial_cash_nano_usd,
+            bars_per_year,
+        };
+        let evidence =
+            crucible_funnel::funnel::pool_contract_evidence(first_evidence, rest, &pooling_inputs);
+        let assessment = crucible_funnel::assess(shared.criteria, &evidence, None);
+        let refs: Vec<&ContractEvidence> = present.iter().collect();
+
+        combos.push(PooledComboOutcome {
+            combo_index,
+            label: loaded.grid.combo(combo_index).label(),
+            sweep: pooled_sweep_of(&refs, &pooling_inputs),
+            evidence,
+            assessment,
+        });
+    }
+
+    // ---- 7. Record one verdict per (contract, combo) ----------------------
+    for outcome in &combos {
+        for contract in plans.iter().filter(|c| c.plan.is_some()) {
+            registry
+                .record_verdict(&crucible_funnel::VerdictRow {
+                    config_hash: effective_hash(loaded, contract),
+                    account_id: shared.identity.account_id.clone(),
+                    combo_index: outcome.combo_index,
+                    hypothesis_family: meta.hypothesis_family.to_owned(),
+                    decided_at: outcome.assessment.decided_at.to_string(),
+                    verdict: outcome.assessment.verdict,
+                    reasons: outcome.assessment.rendered_reasons(),
+                    trials_at_decision: n_trials,
+                    decided_on: meta.now.to_owned(),
+                })
+                .map_err(|e| (usage, e.to_string()))?;
+        }
+    }
+
+    Ok(PooledFunnelReport {
+        combos,
+        evaluation,
+        trials_before,
+        trials_after: registry.trials_for(meta.hypothesis_family),
+        runs_claimed,
+        bars_per_year,
+    })
+}
+
+/// The D-0124 third composite: strategy, contract and front window.
+fn effective_hash(loaded: &LoadedConfig, contract: &PooledContractPlan) -> String {
+    pooled_registration_hash(
+        &loaded.config_hash.to_string(),
+        &contract.instrument,
+        contract.front_window.start_ts().0,
+        contract.front_window.end_ts().0,
+    )
+}
+
+/// The run key for one pooled (combo, contract, fold).
+///
+/// `config_hash` is the **effective** hash, so N contracts are N runs and
+/// therefore N trials, and the same contract twice collides into one (D-0124).
+fn pooled_run_key(
+    effective: &str,
+    shared: SharedInputs<'_>,
+    combo_index: usize,
+    fold: usize,
+) -> crucible_funnel::RunKey {
+    let seed = crucible_funnel::walkforward::derive_run_seed(
+        &shared.identity.config_hash,
+        shared.identity.root_seed,
+        shared.identity.account_id.as_deref(),
+        combo_index,
+        fold,
+    );
+    crucible_funnel::RunKey {
+        config_hash: effective.to_owned(),
+        account_id: shared.identity.account_id.clone(),
+        combo_index,
+        fold: Some(fold),
+        seed,
+    }
+}
+
+/// Dispersion of the grid's POOLED out-of-sample Sharpes.
+///
+/// Each combo's pooled Sharpe, never the mean of its contracts' — the
+/// distinction `ReturnStats::sharpe` exists for.
+fn pooled_sharpe_dispersion(per_combo: &[Vec<PooledRun>], bars_per_year: f64) -> Option<f64> {
+    let sharpes: Vec<f64> = per_combo
+        .iter()
+        .filter_map(|runs| {
+            runs.iter()
+                .filter_map(|r| r.evidence.as_ref().map(|e| e.costed_oos_stats))
+                .reduce(crucible_engine::ReturnStats::combine)?
+                .sharpe(bars_per_year)
+        })
+        .filter(|s| s.is_finite())
+        .collect();
+    if sharpes.len() < 2 {
+        return None;
+    }
+    #[expect(clippy::cast_precision_loss, reason = "grid sizes are small")]
+    let n = sharpes.len() as f64;
+    let mean = sharpes.iter().sum::<f64>() / n;
+    // `d * d`, never `powi(2)` (D-0126).
+    let variance = sharpes
+        .iter()
+        .map(|s| {
+            let d = s - mean;
+            d * d
+        })
+        .sum::<f64>()
+        / (n - 1.0);
+    let sd = variance.sqrt();
+    (sd.is_finite() && sd > 0.0).then_some(sd)
+}
+
+/// The pooled cost sweep: one row per declared level, plus the S1 screen.
+///
+/// Fees SUM across contracts — a fee is charged per fill and a fill belongs to
+/// exactly one contract, so summing double-counts nothing (D-0129). Returns and
+/// Sharpes come from the folded sufficient statistics. No drawdown is computed,
+/// because `PooledCostLevel` cannot hold one.
+fn pooled_sweep_of(
+    contracts: &[&ContractEvidence],
+    shared: &crucible_funnel::funnel::PoolingInputs<'_>,
+) -> Vec<PooledCostLevel> {
+    let mut out = Vec::new();
+    let Some(first) = contracts.first() else {
+        return out;
+    };
+    for (i, level) in first.sweep.iter().enumerate() {
+        let Some(stats) = contracts
+            .iter()
+            .filter_map(|c| c.sweep.get(i).map(|l| l.oos_stitched_stats))
+            .reduce(crucible_engine::ReturnStats::combine)
+        else {
+            continue;
+        };
+        out.push(PooledCostLevel {
+            half_ticks: Some(level.half_ticks),
+            total_return_pct: pooled_return_pct(&stats, shared.initial_cash_nano_usd),
+            sharpe_naive: stats.sharpe(shared.bars_per_year),
+            fees_nano_usd: contracts
+                .iter()
+                .filter_map(|c| c.sweep.get(i).map(|l| l.oos_stitched.fees_nano_usd))
+                .sum(),
+        });
+    }
+    if let Some(stats) = contracts
+        .iter()
+        .map(|c| c.free_fill_oos_stats)
+        .reduce(crucible_engine::ReturnStats::combine)
+    {
+        out.push(PooledCostLevel {
+            half_ticks: None,
+            total_return_pct: pooled_return_pct(&stats, shared.initial_cash_nano_usd),
+            sharpe_naive: stats.sharpe(shared.bars_per_year),
+            fees_nano_usd: contracts
+                .iter()
+                .map(|c| c.free_fill_oos.fees_nano_usd)
+                .sum(),
+        });
+    }
+    out
+}
+
+/// Final-over-initial, the spelling `Summary::compute` uses, so a pool of one
+/// reproduces the single-contract number to the bit (D-0128).
+fn pooled_return_pct(stats: &crucible_engine::ReturnStats, initial: NanoUsd) -> f64 {
+    if initial == 0 {
+        return 0.0;
+    }
+    (nano_usd_to_f64(initial + stats.net_delta_nano_usd) / nano_usd_to_f64(initial) - 1.0) * 100.0
 }

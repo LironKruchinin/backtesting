@@ -39,10 +39,24 @@
 //! ## What is deliberately not here yet
 //!
 //! - **A dataset semaphore.** The real memory control on a 32 GB box is the
-//!   number of *resident datasets*, not the number of threads. One config runs
-//!   one instrument on one shared `Arc`-free slice today (`combo` refuses two
-//!   instruments), so there is exactly one dataset resident and nothing to
-//!   bound. The semaphore lands with the cross-product over a universe.
+//!   number of *resident datasets*, not the number of threads.
+//!
+//!   **"Exactly one dataset resident" EXPIRED on 2026-08-07** (C6b-iii,
+//!   D-0130), and it is recorded here rather than quietly amended because the
+//!   sentence was load-bearing: it is why there is no semaphore. A pooled run
+//!   replays N contracts of one root, and `plan_pool` materializes every
+//!   contract's front window *before* the first replay — so N datasets are
+//!   resident simultaneously, not one at a time. What still bounds it is that
+//!   N is a config's declared contract list, single digits in every pooled
+//!   config written so far, and that each front window is ~66 sessions rather
+//!   than a 16-year span.
+//!
+//!   So the semaphore is still absent and is now absent for a *weaker* reason:
+//!   the bound is a config's declared arity rather than a structural one. It
+//!   becomes load-bearing at the cross-product over a universe, where N is
+//!   roots times contracts and nobody declares it by hand. A pooled run that
+//!   exhausts memory today is a config that declared too many contracts, which
+//!   is at least diagnosable from the config; that will stop being true.
 //! - **The multi-instance pass** — one replay pass feeding K strategy
 //!   instances, amortizing the data pass across the grid. It needs a
 //!   `MultiStrategy` fan-out adapter in the engine, and it is a throughput

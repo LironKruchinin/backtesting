@@ -951,27 +951,15 @@ fn validate_pooling(file: &ConfigFile) -> Result<(), ConfigError> {
         }
     }
 
-    // The declaration is well formed, and **no consumer in this build can
-    // honour it**. Refusing here is the D-0075 shape: a config that asks for a
-    // pooled verdict and silently receives a single-contract one has been
-    // answered with a different question than it asked, and the answer looks
-    // exactly like the one it wanted. The specific refusals above run first, so
-    // a malformed pool still gets its own diagnosis rather than this blanket
-    // one.
+    // **The blanket orchestration refusal was here, and C6b-iii lifted it.**
+    // `crucible funnel` now replays each contract, pools the evidence and
+    // judges it once (D-0128, D-0130), so a well-formed pool has a consumer.
     //
-    // This refusal is lifted in the same commit whose orchestration controls go
-    // green — never before. Until then `crucible funnel` would replay
-    // `instruments[0]` alone and label the result a pooled run, which is
-    // exactly the half-wired window the inert-first ordering exists to prevent.
-    Err(ConfigError::Field {
-        field: "pooling",
-        message: format!(
-            "`[pooling].root = {root:?}` over {} contracts is a well-formed declaration that \
-             this build cannot run: the orchestration — replaying each contract and pooling \
-             the evidence — is not implemented (D-0114, D-0115). It is refused rather than \
-             answered with a single-contract result wearing a pooled-run header. Drop \
-             `[pooling]` and name one instrument to run today",
-            instruments.len()
-        ),
-    })
+    // The shape refusals above stay and still run first, so a malformed pool
+    // gets its own diagnosis rather than a vaguer one. And the lift is not a
+    // deletion: `combo` and `walk-forward` refuse a pooled config at their own
+    // entry points, because neither pools, and answering with `instruments[0]`
+    // under a pooled header is exactly the D-0075 shape this rule was always
+    // about. The refusal MOVED to where it is still true.
+    Ok(())
 }

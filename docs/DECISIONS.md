@@ -4911,3 +4911,69 @@ propose a superseding entry — don't silently diverge.
   **Nothing renders this yet.** D-0117 still refuses every pooled config; the
   renderer is reachable only from its tests, like every other pooled piece
   before it.
+- **D-0130** (2026-08-07) -- **D-0117's refusal is LIFTED: `crucible funnel`
+  replays each pooled contract, pools the evidence and judges it once. The
+  refusal did not disappear — it MOVED to `combo` and `walk-forward`, which
+  still cannot pool.**
+  The orchestration D-0117 withheld the permission for now exists
+  (`crucible-cli::pooled::run_pooled_funnel`): claim every (combo, contract,
+  fold) row before any bar replays (D-0074), replay each contract, pool the
+  contributions into one `Evidence` (D-0128) and `assess` once.
+  **The lift is not a deletion, and that distinction is the entry.** A pooled
+  config handed to `combo` would still be answered with `instruments[0]` — a
+  single-contract number wearing a pooled header, which is the D-0075 shape and
+  the more dangerous half of it, because a plausible result is harder to catch
+  than an obvious hole. So both commands refuse a `[pooling]` config by name and
+  point at `funnel`. The two tests that asserted D-0117's blanket refusal were
+  **retargeted rather than removed**: their converse property is unchanged and is
+  why they exist — a well-formed pool must reach the *terminal* refusal rather
+  than any *shape* refusal, or the shape rules are rejecting the block on sight
+  instead of diagnosing it.
+  **The pooled annualization is an ASSUMPTION and is printed as one.** Each
+  contract measures `bars_per_year` from its own sample (D-0038, D-0039) and the
+  pooled return series concatenates all of them, so no single contract's factor
+  is the pool's. The mean over contributing contracts is used and reported on
+  its own line: contracts of one root at one grain trade the same exchange on
+  the same schedule so the spread is small, but it is not zero, and §4's basis
+  rule says a number derived by convention carries its basis beside it rather
+  than folded into the value.
+  **PBO is computed across the pooled fold matrix, not per contract.** Every
+  combo sees the same contracts with the same fold plans, so concatenating each
+  contract's folds in contract order gives every combo a row of identical length
+  — which is what CSCV requires (D-0109) and what a per-contract PBO would not
+  be.
+  **The admission half is read off combo 0, and that is exact rather than
+  approximate.** Days, folds and skips are properties of the *plan*, which no
+  combo can change; only `oos_trades` varies by combo, and admission's trade
+  floor is judged per combo from the pooled `Evidence`.
+  **Controls, two planted bugs, each with its converse written FIRST**
+  (`crucible-funnel/tests/pooled_orchestration.rs`). *(a) Summed sessions*: two
+  contracts of 40 sessions sharing 15 — union 65, sum 80 — against a 70-session
+  floor. The honest union FAILS it and the planted sum PASSES it, so the defect
+  is a verdict difference rather than a cosmetic one, and the assertion is on the
+  criterion's outcome rather than on the number. The converse asserts the fixture
+  actually overlaps, without which union and sum coincide and the control cannot
+  see anything. *(b) A single trial for an N-contract pool*: the deflated Sharpe
+  must fall as trials grow, and **both guards are present because one is not
+  enough**. The DSR is a probability and saturates, so at 1.0 or 0.0 "it did not
+  fall" is trivially true and a correction ignoring its denominator would pass a
+  naive `>=`. The value is therefore asserted to sit **strictly inside (0, 1)**
+  first, where it can still move in both directions, and only then asserted to
+  fall **strictly** — and the gap is required to exceed 1e-6 so the control
+  cannot fire on rounding.
+  **`scheduler.rs`'s "exactly one dataset resident" EXPIRED here**, and is
+  recorded as expired rather than quietly amended, because that sentence was
+  load-bearing: it is the reason there is no dataset semaphore. `plan_pool`
+  materializes every contract's front window before the first replay, so N
+  datasets are resident simultaneously. What still bounds it is that N is a
+  config's declared contract list — single digits so far — and that a front
+  window is ~66 sessions rather than a 16-year span. So the semaphore is still
+  absent, for a **weaker** reason: the bound is a declared arity rather than a
+  structural one. It becomes load-bearing at the cross-product over a universe,
+  where nobody declares N by hand.
+  **What the nine gates say about this, which is less than it looks.** All nine
+  are unmoved, and they must be: every one of them runs a single-contract config,
+  and none of them constructs a pool. That is D-0128's measurement applied to
+  this commit — a gate's silence is evidence about its fixture. The pooled path's
+  own pin is **C7's**, and until it exists the evidence for this orchestration is
+  the controls above and nothing else.

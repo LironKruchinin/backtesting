@@ -214,6 +214,15 @@ pub fn run_cmd(args: &FunnelArgs) -> i32 {
         }
     };
 
+    // ---- The pooled path (C6b-iii) ----------------------------------------
+    //
+    // Taken before `collect_events`, which reads `universe.instruments[0]` and
+    // would replay one contract under a pooled config's header — the exact
+    // half-wired answer D-0117 refused rather than allow.
+    if loaded.file.pooling.is_some() {
+        return run_pooled(&loaded, args, &git_sha, fold_spec, &criteria);
+    }
+
     let series = match collect_events(&loaded) {
         Ok(series) => series,
         Err((code, message)) => {
@@ -947,6 +956,229 @@ fn format_s0(report: &crucible_funnel::s0::S0Report) -> String {
         None => {}
     }
     text
+}
+
+/// The pooled funnel command (C6b-iii).
+///
+/// Separate from [`run_cmd`]'s single-contract body rather than folded into it,
+/// because a pooled run answers a different question with a different
+/// denominator: its sessions are a union rather than a count (D-0114), its
+/// trials are N rather than one (D-0124), and its cost table cannot print a
+/// drawdown (D-0129). Threading all of that through one function with `if
+/// pooled` at each of those points is how the two answers start borrowing each
+/// other's numbers.
+fn run_pooled(
+    loaded: &crate::config::LoadedConfig,
+    args: &FunnelArgs,
+    git_sha: &str,
+    fold_spec: crucible_funnel::FoldSpec,
+    criteria: &crucible_funnel::Criteria,
+) -> i32 {
+    let pooling = loaded
+        .file
+        .pooling
+        .as_ref()
+        .expect("INVARIANT: this path is taken only when `[pooling]` is declared");
+
+    let table = match crate::pooled::load_volume_roll_table(loaded, &pooling.root) {
+        Ok(table) => table,
+        Err((code, message)) => {
+            eprintln!("error: {message}");
+            return code;
+        }
+    };
+    let plans = match crate::pooled::plan_pool(
+        loaded,
+        &table,
+        &loaded.file.universe.instruments,
+        fold_spec,
+    ) {
+        Ok(plans) => plans,
+        Err((code, message)) => {
+            eprintln!("error: {message}");
+            return code;
+        }
+    };
+
+    let registry_path = args.out.join("registry.jsonl");
+    let mut registry = if args.hash_only {
+        Registry::ephemeral(&registry_path)
+    } else {
+        match Registry::open(&registry_path) {
+            Ok(registry) => registry,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return EXIT_USAGE;
+            }
+        }
+    };
+
+    let identity = crucible_funnel::walkforward::RunIdentity {
+        config_hash: loaded.config_hash,
+        root_seed: loaded.file.run.seed,
+        account_id: None,
+    };
+    let shared = crucible_funnel::funnel::SharedInputs {
+        grid: &loaded.grid,
+        spec: &loaded.spec,
+        criteria,
+        identity: &identity,
+        costs: Costs {
+            half_spread_ticks: loaded.file.execution.half_spread_ticks,
+            fee_per_contract_nano_usd: loaded.fee_per_contract_nano_usd,
+        },
+        qty: Qty(loaded.file.run.qty_contracts),
+    };
+    let now = timestamp();
+    let report = match crate::pooled::run_pooled_funnel(
+        loaded,
+        shared,
+        &plans,
+        &mut registry,
+        crate::pooled::PooledRunMeta {
+            hypothesis_family: &loaded.file.meta.hypothesis_family,
+            git_sha,
+            data_manifest_ids: &[],
+            now: &now,
+        },
+    ) {
+        Ok(report) => report,
+        Err((code, message)) => {
+            eprintln!("error: {message}");
+            return code;
+        }
+    };
+
+    if args.hash_only {
+        println!("{:016x}", pooled_verdict_hash(&report));
+        return 0;
+    }
+    print_pooled_report(loaded, &report, criteria);
+
+    // Exit 5 when every combo was killed: not a failure and not success, the
+    // same contract `funnel` already keeps (D-0075).
+    if report
+        .combos
+        .iter()
+        .all(|c| c.assessment.verdict == Verdict::Kill)
+    {
+        5
+    } else {
+        0
+    }
+}
+
+/// The pooled determinism hash (C7 pins this).
+///
+/// Reads the POOLED quantities — the verdict, the stage that decided it, the
+/// session union, the pooled returns and Sharpes — rather than any contract's
+/// own. A hash over per-contract numbers would be green while the pooling was
+/// wrong, which is the blindness D-0128 measured in the single-contract gate.
+fn pooled_verdict_hash(report: &crate::pooled::PooledFunnelReport) -> u64 {
+    let mut h = crate::Fnv64::new();
+    let i64_of = |n: usize| i64::try_from(n).unwrap_or(i64::MAX);
+    h.write_i64(i64_of(report.evaluation.oos_sessions));
+    h.write_i64(i64_of(report.evaluation.oos_trades));
+    h.write_i64(i64_of(report.evaluation.contracts_evaluated));
+    h.write_i64(i64_of(report.trials_after));
+    for c in &report.combos {
+        h.write_i64(i64_of(c.combo_index));
+        h.write_i64(match c.assessment.verdict {
+            Verdict::Kill => 0,
+            Verdict::Iterate => 1,
+            Verdict::Graduate => 2,
+        });
+        for byte in c.assessment.decided_at.to_string().bytes() {
+            h.write_i64(i64::from(byte));
+        }
+        h.write_i64(i64_of(c.evidence.oos_trades));
+        h.write_i64(i64_of(c.evidence.oos_sessions));
+        hash_f64(&mut h, Some(c.evidence.costed_return_pct));
+        hash_f64(&mut h, c.evidence.costed_sharpe);
+        hash_f64(&mut h, Some(c.evidence.free_fill_return_pct));
+        hash_f64(&mut h, c.evidence.sharpe_at_kill_level);
+        hash_f64(&mut h, c.evidence.random_entry_return_pct);
+        hash_f64(&mut h, c.evidence.buy_and_hold_return_pct);
+        for level in &c.sweep {
+            h.write_i64(level.half_ticks.unwrap_or(i64::MIN));
+            hash_f64(&mut h, Some(level.total_return_pct));
+            hash_f64(&mut h, level.sharpe_naive);
+            h.write_i64(level.fees_nano_usd);
+        }
+    }
+    h.finish()
+}
+
+fn print_pooled_report(
+    loaded: &crate::config::LoadedConfig,
+    report: &crate::pooled::PooledFunnelReport,
+    criteria: &crucible_funnel::Criteria,
+) {
+    let e = &report.evaluation;
+    println!("\ncrucible funnel — POOLED run");
+    println!(
+        "  root           {}",
+        loaded
+            .file
+            .pooling
+            .as_ref()
+            .map_or("?", |p| p.root.as_str())
+    );
+    println!(
+        "  sessions       {} distinct out-of-sample trading day(s) across {} contract(s)",
+        e.oos_sessions, e.contracts_evaluated
+    );
+    println!(
+        "  trades         {} pooled out-of-sample round-trip(s)",
+        e.oos_trades
+    );
+    println!(
+        "  trials         {} before, {} after — every pooled contract is a trial (D-0124),\n\
+         \x20                so the deflated Sharpe falls as the pool grows",
+        report.trials_before, report.trials_after
+    );
+    println!(
+        "  annualization  {:.1} bars/year, the MEAN over contributing contracts — an\n\
+         \x20                assumption, not a measurement: each contract measures its own from\n\
+         \x20                its own sample (D-0038/D-0039) and the pooled series concatenates them",
+        report.bars_per_year
+    );
+    for (instrument, reason) in &e.skipped {
+        println!("  SKIPPED        {instrument}: {reason}");
+    }
+    if e.skipped.is_empty() {
+        println!("  skipped        0 contract(s) — every declared contract contributed");
+    }
+    for gap in &e.gaps {
+        println!(
+            "  GAP            {} trading day(s) between two contracts",
+            gap.days()
+        );
+    }
+    println!(
+        "\n  max drawdown is NOT pooled: it is a path statistic and the pooled series is not a\n\
+         \x20 path any account walked (D-0119, D-0129).\n"
+    );
+    println!("  combo  verdict  decided at   OOS ret   Sharpe   trades  parameters");
+    for c in &report.combos {
+        println!(
+            "  {:>5}  {:<7}  {:<11}  {:+7.2}%  {:>7}  {:>6}  {}",
+            c.combo_index,
+            c.assessment.verdict.to_string().to_uppercase(),
+            c.assessment.decided_at.to_string(),
+            c.evidence.costed_return_pct,
+            c.evidence
+                .costed_sharpe
+                .map_or_else(|| "—".to_owned(), |s| format!("{s:.2}")),
+            c.evidence.oos_trades,
+            c.label,
+        );
+    }
+    println!(
+        "\n  ceiling is ITERATE: S3's battery is incomplete, so `Graduate` is unreachable\n\
+         \x20 by construction (D-0075). Criteria: {} trade(s), {} session(s) required.",
+        criteria.min_oos_trades, criteria.min_oos_sessions
+    );
 }
 
 #[cfg(test)]

@@ -87,6 +87,23 @@ pub fn run_cmd(args: &ComboArgs) -> i32 {
             return EXIT_USAGE;
         }
     };
+    // A pooled config is a FUNNEL run. Refused here rather than answered with
+    // `instruments[0]`: that is the D-0075 shape, a partial answer wearing a
+    // whole one's header, and it is the more dangerous of the two because a
+    // single-contract number is a plausible result rather than an obvious hole.
+    // C6b-iii lifted the config-layer refusal because `funnel` can now honour a
+    // pool; this one stays because combo still cannot.
+    if let Some(pooling) = loaded.file.pooling.as_ref() {
+        eprintln!(
+            "error: this config declares `[pooling].root = {:?}`, which pools contracts of one 
+                    root into a SINGLE verdict. `combo` replays one instrument, so it would 
+                    answer with the first contract alone and label it a pooled result.
+                    Run `crucible funnel --config <this config>` instead, or drop `[pooling]`
+                    and name one instrument.",
+            pooling.root
+        );
+        return EXIT_USAGE;
+    }
 
     let hash_only = args.hash_only;
     if !hash_only {

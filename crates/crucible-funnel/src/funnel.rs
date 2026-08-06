@@ -396,6 +396,7 @@ fn sharpe_dispersion(combos: &[ComboWalkForward]) -> Option<f64> {
 /// per-contract copy of one is a second opinion waiting to disagree with the
 /// first. They enter once, through [`PoolingInputs`], at the single point
 /// where N contributions become one [`Evidence`].
+#[derive(Clone, Debug)]
 pub struct ContractEvidence {
     /// The S1 free-fill screen's summary, for the report.
     pub free_fill_oos: crucible_engine::Summary,
