@@ -579,7 +579,7 @@ fn write_combo(h: &mut String, c: &ComboOutcome, criteria: &Criteria) {
     );
     for control in &c.controls {
         match &control.oos_stitched {
-            Some(s) => {
+            Some((s, _)) => {
                 let _ = write!(
                     h,
                     "<tr><td>{}{}</td><td>{:+.2}%</td><td>{}</td><td>{}</td><td>{} / {}</td>\

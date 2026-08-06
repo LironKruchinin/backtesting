@@ -132,6 +132,16 @@ pub struct CostLevel {
     pub half_ticks: i64,
     /// Pooled out-of-sample statistics at that level.
     pub oos_stitched: Summary,
+    /// Sufficient statistics of the very series [`CostLevel::oos_stitched`]
+    /// summarises, so this level can be pooled across contracts at C6 without
+    /// its curve being retained.
+    ///
+    /// A sibling field rather than a pair, unlike [`Control::oos_stitched`],
+    /// because there is no invariant here to protect: both are produced
+    /// unconditionally by one `pooled_of` call, so neither can be present
+    /// without the other. The type system is worth spending where a wrong
+    /// state is *representable*, and here it is not.
+    pub oos_stitched_stats: ReturnStats,
 }
 
 impl CostLevel {
@@ -161,11 +171,20 @@ pub const RANDOM_ENTRY_DRAWS: usize = 16;
 pub struct Control {
     /// `matched random-entry` or `buy-and-hold`.
     pub name: &'static str,
-    /// Pooled out-of-sample statistics, or `None` if it could not be built.
+    /// Pooled out-of-sample statistics and the sufficient statistics of the
+    /// same series, or `None` if the control could not be built.
     ///
     /// For the random-entry control this is the **median draw** by pooled
     /// out-of-sample return, not a single draw — see [`RANDOM_ENTRY_DRAWS`].
-    pub oos_stitched: Option<Summary>,
+    ///
+    /// One `Option` over the pair rather than two `Option`s side by side. A
+    /// control is the one place in this file where the series can be legitimately
+    /// absent, so two independent `Option`s would make "summary present,
+    /// statistics missing" a representable state that every consumer would then
+    /// have to decide what to do about — and C6 pools these across contracts,
+    /// where a silently missing contribution is a smaller denominator reported
+    /// as a result. The pair costs three call sites and removes the state.
+    pub oos_stitched: Option<(Summary, ReturnStats)>,
     /// Why it is absent, when it is. An absent control is reported as absent
     /// and fails its criterion — it never renders as a zero.
     pub absent_because: Option<String>,
@@ -188,7 +207,7 @@ impl Control {
     /// Pooled out-of-sample return, or `None` if the control is absent.
     #[must_use]
     pub fn return_pct(&self) -> Option<f64> {
-        self.oos_stitched.as_ref().map(|s| s.total_return_pct)
+        self.oos_stitched.as_ref().map(|(s, _)| s.total_return_pct)
     }
 }
 
@@ -293,6 +312,17 @@ fn sharpe_dispersion(combos: &[ComboWalkForward]) -> Option<f64> {
 /// the per-contract half cannot hand back evidence alone.
 struct ContractEvidence {
     free_fill_oos: crucible_engine::Summary,
+    /// Sufficient statistics of the S1 free-fill series, so C6 can pool the
+    /// screen across contracts the same way it pools everything else.
+    ///
+    /// The sweep's and the controls' statistics need no field here: they travel
+    /// inside [`CostLevel`] and [`Control`], beside the summaries they describe,
+    /// which is where they cannot drift out of step with them.
+    #[expect(
+        dead_code,
+        reason = "the carrier lands one commit ahead of its consumer, as every                   other seam in Block C did. C6a-iii-b reads it when it pools N                   of these into one Evidence; until then nothing may, because                   D-0117 still refuses every pooled config."
+    )]
+    free_fill_oos_stats: ReturnStats,
     sweep: Vec<CostLevel>,
     controls: [Control; 2],
     evidence: Evidence,
@@ -331,16 +361,16 @@ fn contract_evidence(
     pbo: &Result<crate::stats::pbo::Pbo, crate::stats::pbo::PboUnavailable>,
 ) -> ContractEvidence {
     // Step 3: the S1 screen, cost-free. The only sanctioned FreeFills use.
-    let free_fill_oos = pooled_of(&replay(inputs, index, &mut FreeFills), inputs, test_windows).0;
+    let (free_fill_oos, free_fill_oos_stats) =
+        pooled_of(&replay(inputs, index, &mut FreeFills), inputs, test_windows);
 
     // Step 4: the mandatory sweep.
     let sweep: Vec<CostLevel> = inputs
         .criteria
         .cost_sweep_half_ticks
         .iter()
-        .map(|&half_ticks| CostLevel {
-            half_ticks,
-            oos_stitched: pooled_of(
+        .map(|&half_ticks| {
+            let (oos_stitched, oos_stitched_stats) = pooled_of(
                 &replay(
                     inputs,
                     index,
@@ -348,8 +378,12 @@ fn contract_evidence(
                 ),
                 inputs,
                 test_windows,
-            )
-            .0,
+            );
+            CostLevel {
+                half_ticks,
+                oos_stitched,
+                oos_stitched_stats,
+            }
         })
         .collect();
 
@@ -397,6 +431,7 @@ fn contract_evidence(
     };
     ContractEvidence {
         free_fill_oos,
+        free_fill_oos_stats,
         sweep,
         controls,
         evidence,
@@ -677,6 +712,10 @@ pub fn run_funnel(
 
         let ContractEvidence {
             free_fill_oos,
+            // Bound and discarded rather than elided with `..`: the field
+            // exists, and this is the single-contract path that has nothing to
+            // pool it with. C6a-iii-b is where it stops being discarded.
+            free_fill_oos_stats: _,
             sweep,
             controls,
             evidence,
@@ -943,7 +982,7 @@ fn random_entry_control(
 
     // One stream per draw, domain-separated by its index, so the draws are
     // reproducible individually and no two of them share a schedule.
-    let mut draws: Vec<(u64, Summary)> = Vec::with_capacity(RANDOM_ENTRY_DRAWS);
+    let mut draws: Vec<(u64, Summary, ReturnStats)> = Vec::with_capacity(RANDOM_ENTRY_DRAWS);
     for i in 0..RANDOM_ENTRY_DRAWS {
         let seed = derive_control_seed(
             &inputs.identity.config_hash,
@@ -967,7 +1006,8 @@ fn random_entry_control(
                     inputs.params,
                 )
                 .expect("INVARIANT: the shared bar series is availability-ordered");
-                draws.push((seed, pooled_of(&result, inputs, test_windows).0));
+                let (summary, stats) = pooled_of(&result, inputs, test_windows);
+                draws.push((seed, summary, stats));
             }
             Err(ControlError::NothingToMatch) => {
                 return absent(
@@ -990,14 +1030,14 @@ fn random_entry_control(
     let strategy_pct = costed.oos_stitched.total_return_pct;
     let beaten = draws
         .iter()
-        .filter(|(_, s)| strategy_pct > s.total_return_pct)
+        .filter(|(_, s, _)| strategy_pct > s.total_return_pct)
         .count();
     // Lower median of an even sample: the pessimistic half, so a strategy that
     // ties the middle of the null does not clear the bar on a rounding choice.
-    let (seed, median) = draws.swap_remove((RANDOM_ENTRY_DRAWS - 1) / 2);
+    let (seed, median, median_stats) = draws.swap_remove((RANDOM_ENTRY_DRAWS - 1) / 2);
     Control {
         name,
-        oos_stitched: Some(median),
+        oos_stitched: Some((median, median_stats)),
         absent_because: None,
         seed: Some(seed),
         draws: RANDOM_ENTRY_DRAWS,
@@ -1030,7 +1070,7 @@ fn buy_and_hold_control(
         inputs.params,
     )
     .expect("INVARIANT: the shared bar series is availability-ordered");
-    let oos = pooled_of(&result, inputs, test_windows).0;
+    let (oos, oos_stats) = pooled_of(&result, inputs, test_windows);
     Control {
         name: "buy-and-hold",
         // One "draw", because owning the thing is not a random variable. The
@@ -1038,7 +1078,7 @@ fn buy_and_hold_control(
         // way for both controls rather than being a special case a reader has
         // to remember.
         draws_beaten: usize::from(strategy_pct > oos.total_return_pct),
-        oos_stitched: Some(oos),
+        oos_stitched: Some((oos, oos_stats)),
         absent_because: None,
         seed: None,
         draws: 1,

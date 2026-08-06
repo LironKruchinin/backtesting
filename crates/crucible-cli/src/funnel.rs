@@ -651,7 +651,7 @@ fn print_report(
         println!("  |  free_fills {:+.2}%", c.free_fill_oos.total_return_pct);
         for control in &c.controls {
             match &control.oos_stitched {
-                Some(s) => println!(
+                Some((s, _)) => println!(
                     "    {:<22} {:+.2}%{}  — this combo beat {} of {} draw(s)",
                     control.name,
                     s.total_return_pct,
