@@ -4850,3 +4850,13 @@ propose a superseding entry — don't silently diverge.
   C6b lifts the refusal. The single-contract path goes through the pooled one
   anyway, so C6b is a wiring change rather than a rewrite of the number five
   gates pin.
+  **Correction, recorded rather than rewritten.** The commit messages for
+  `5e412bd` and `63fdb76` both say "all ten gates". There are **nine** — five CLI
+  hash gates and four code-pinned digests, which is what `docs/MILESTONES.md`'s
+  table lists and what was actually run in both profiles. The tenth is the
+  pooled-run pin and it is **C7's**; it does not exist yet. Those commits are
+  pushed, so the miscount stays in their messages, and this line is what a
+  session reading them should find. Left as a correction rather than a rebase
+  for the reason D-0075 gives about absent numbers generally: a reader who meets
+  "ten gates" before C7 lands would conclude the pooled pin exists, which is a
+  more flattering claim than the true one.
