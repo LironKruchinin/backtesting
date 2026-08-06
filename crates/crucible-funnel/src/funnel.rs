@@ -517,6 +517,32 @@ pub fn run_funnel(
     // grid of one, where there was no search to correct for.
     let trial_sharpe_dispersion = sharpe_dispersion(&report.combos);
 
+    // **Deflation happens in PER-OBSERVATION units, and both inputs are
+    // converted here** (D-0125).
+    //
+    // `Summary::sharpe_naive` is ANNUALIZED — `crucible-engine::metrics`
+    // multiplies by `periods_per_year.sqrt()` — while `ReturnShape::n_returns`
+    // is a raw per-bar count. Bailey & Lopez de Prado's estimator requires
+    // both at ONE frequency, and `DeflationInputs::observed_sharpe` says so in
+    // its own doc: "already annualized or not, as long as `n_observations`
+    // matches it". They did not match. At 1-minute bars the factor is
+    // sqrt(525_949) ~ 725, which inflates the observed ratio far past anything
+    // the standard error can absorb, so `P(true Sharpe > 0)` saturates: 1.0000
+    // or 0.0000 and nothing between. A headline that looks maximally confident
+    // and carries no information.
+    //
+    // The DISPERSION is converted by the same factor, and that is not
+    // cosmetic. It is the sd of the grid's own annualized Sharpes, and it is
+    // what scales the expected-maximum z-score into Sharpe units — leaving it
+    // annualized while de-annualizing the observation would compare a number
+    // to a benchmark 725 times too large and kill every combo instead.
+    //
+    // Chosen direction: convert DOWN to per-observation rather than up,
+    // because `n_observations` is a count and cannot be rescaled without
+    // inventing a sample size.
+    let (deannualize, trial_sharpe_dispersion) =
+        deflation_units(inputs.params.bars_per_year, trial_sharpe_dispersion);
+
     let mut combos = Vec::with_capacity(report.combos.len());
     for costed in report.combos {
         let index = costed.id.combo_index;
@@ -578,7 +604,7 @@ pub fn run_funnel(
             deflated: costed.oos_pooled.sharpe_naive.and_then(|observed| {
                 let shape = costed.oos_pooled.return_shape;
                 crate::stats::deflated::deflated_sharpe(crate::stats::deflated::DeflationInputs {
-                    observed_sharpe: observed,
+                    observed_sharpe: deannualize(observed),
                     skew: shape.skew?,
                     kurtosis: shape.kurtosis?,
                     n_observations: shape.n_returns,
@@ -951,4 +977,69 @@ pub fn survivors(report: &FunnelReport) -> Vec<&ComboOutcome> {
         .iter()
         .filter(|c| c.assessment.verdict != crate::Verdict::Kill)
         .collect()
+}
+
+/// Converts a grid's ANNUALIZED Sharpes into the per-observation units a
+/// deflated Sharpe requires (D-0125).
+///
+/// Returns the conversion to apply to an observed Sharpe, and the converted
+/// trial dispersion. Extracted as a named seam because the defect it replaces
+/// lived in the *wiring* rather than in the estimator: `stats::deflated` was
+/// always correct given matching inputs, and a unit test of the formula passes
+/// on the broken build. The control has to sit where the units are decided.
+///
+/// Both are divided by `sqrt(bars_per_year)`. Converting DOWN rather than up,
+/// because `n_observations` is a count and cannot be rescaled without
+/// inventing a sample size.
+fn deflation_units(
+    bars_per_year: f64,
+    trial_sharpe_dispersion: Option<f64>,
+) -> (impl Fn(f64) -> f64, Option<f64>) {
+    let annualization = bars_per_year.sqrt();
+    (
+        move |annualized: f64| annualized / annualization,
+        trial_sharpe_dispersion.map(|sd| sd / annualization),
+    )
+}
+
+#[cfg(test)]
+mod deflation_units_tests {
+    use super::deflation_units;
+
+    /// One minute bars: 525,949 per year, so the factor is ~725.
+    #[test]
+    fn both_inputs_are_divided_by_the_annualization_factor() {
+        let bpy = 525_949.0_f64;
+        let (deannualize, dispersion) = deflation_units(bpy, Some(7.25));
+        let expected = bpy.sqrt();
+        assert!(
+            (deannualize(expected) - 1.0).abs() < 1e-12,
+            "the observed ratio is converted"
+        );
+        assert!(
+            (dispersion.expect("some") - 7.25 / expected).abs() < 1e-12,
+            "and the DISPERSION by the same factor — leaving it annualized would              compare a converted observation against a benchmark {expected:.0}x too large              and kill every combo instead of passing every one"
+        );
+    }
+
+    /// The factor is real at trading frequencies — a conversion that did
+    /// nothing would satisfy an invariance test but not this.
+    #[test]
+    fn the_conversion_is_not_the_identity_at_bar_frequencies() {
+        for bpy in [525_949.0_f64, 8_765.8, 252.0] {
+            let (deannualize, _) = deflation_units(bpy, None);
+            assert!(
+                (deannualize(1.0) - 1.0).abs() > 1e-6,
+                "bars_per_year {bpy} must actually rescale, or the fix is a no-op"
+            );
+        }
+    }
+
+    /// Absent dispersion stays absent: a grid of one had no search to correct
+    /// for, and converting `None` must not manufacture a benchmark.
+    #[test]
+    fn an_absent_dispersion_is_not_invented() {
+        let (_, dispersion) = deflation_units(525_949.0, None);
+        assert!(dispersion.is_none());
+    }
 }

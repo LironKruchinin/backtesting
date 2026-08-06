@@ -4622,3 +4622,47 @@ propose a superseding entry — don't silently diverge.
   left for it, because D-0074's insert-before-run means the identity a run is
   recorded under exists before the run does. An identity derived after the loop
   produced numbers would be insert-after-run wearing the right name.
+- **D-0125** (2026-08-06) -- **A deflated Sharpe is computed in PER-OBSERVATION
+  units, and both the observed ratio and the trial dispersion are converted
+  there.** The run path passed an ANNUALIZED `sharpe_naive` against a per-bar
+  `n_returns`, which are different frequencies, and Bailey & López de Prado's
+  estimator requires one.
+  **The symptom was a headline that looked maximally confident and carried no
+  information.** At 1-minute bars the annualization factor is
+  `sqrt(525_949) ≈ 725`. The observed ratio inflates by that; the standard
+  error cannot absorb it; `P(true Sharpe > 0)` saturates to **exactly 1.0000**
+  or 0.0000 and nothing between. Measured: the mismatched form returns 1.0 at
+  1-minute bars *and* at 1-hour bars, where the factor is still ~94.
+  **The dispersion is converted by the same factor, and that half is not
+  cosmetic.** It is the standard deviation of the grid's own annualized
+  Sharpes, and it scales the expected-maximum z-score into Sharpe units.
+  De-annualizing the observation while leaving the benchmark annualized would
+  compare a converted number against a threshold ~725× too large and kill every
+  combo — the same defect with its sign flipped. `DeflationInputs` already said
+  this in its own doc ("already annualized or not — as long as
+  `n_observations` matches it"); nothing enforced it.
+  **Converted DOWN rather than up**, because `n_observations` is a count and
+  cannot be rescaled without inventing a sample size.
+  **The prescribed control was insufficient, and finding that out is the useful
+  part.** A 1m-vs-1h invariance was specified: the same returns must deflate to
+  the same DSR at either annualization. It passes on the BROKEN build too,
+  because the broken build saturates at both frequencies — **saturation is
+  invariant**. What discriminates is not stability but informativeness: a DSR
+  strictly inside (0, 1) rather than pinned to an endpoint. Both assertions are
+  kept, and the entry records why the second is the load-bearing one.
+  **The first control also could not fail, for a different reason worth
+  recording.** A unit test of `stats::deflated` with hand-built matching inputs
+  proves the *formula* and passes on the broken build, because the defect was
+  never in the estimator — it was in the wiring. Restoring the defect in
+  `funnel.rs` left 177 tests green. The conversion is therefore extracted as
+  `deflation_units`, a named seam where the units are decided, and the controls
+  sit there. Same lesson as `eval_range` and `warmup_trim`: a check has to live
+  where the decision is made, not where the arithmetic is.
+  **No determinism gate moved, and that is a finding rather than a relief.**
+  Both smoke configs kill every combo before S3, and the hashes cover verdicts,
+  returns, naive Sharpes, the sweep, the controls and the day records — **not
+  the deflated Sharpe**. So the nine gates could not have detected this defect
+  in either direction, and a fix to the project's headline overfitting statistic
+  landed without moving a single pinned value. That is the fixture-reach
+  limitation D-0122 recorded, in the place it matters most: a gate certifies
+  what its fixture reaches, and no combo in either fixture reaches S3.

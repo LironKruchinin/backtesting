@@ -539,3 +539,102 @@ fn the_deflated_sharpe_determinism_hash_is_pinned() {
          numbers; if this changed on purpose, re-derive it and say so in a decision entry."
     );
 }
+
+// ---------------------------------------------------------------------------
+// D-0125 — deflation is unit-consistent, and the invariance proves it.
+// ---------------------------------------------------------------------------
+
+/// **The same returns deflate to the same DSR whatever frequency the Sharpe
+/// was annualized at**, once the observation and the denominator are put in
+/// matching units.
+///
+/// This is an INVARIANCE, and an invariance has the mirror image of the
+/// strict-inequality trap: it passes vacuously when the transformation changed
+/// nothing. So the annualized Sharpes are asserted to DIFFER first — a
+/// positive control on the fixture itself (D-0118 applied to an equality
+/// rather than to a search). Without it, "the DSR is unchanged at 1m and 1h"
+/// is trivially true of a test where 1m and 1h produced the same number.
+#[test]
+fn the_deflated_sharpe_does_not_depend_on_the_annualization_frequency() {
+    let mut rng = ChaCha8Rng::seed_from_u64(11);
+    let returns = series(&mut rng, 2_000, 0.12);
+    let (per_observation, skew, kurtosis) = moments(&returns).expect("moments");
+
+    // Bars per year at two grains: 1-minute and 1-hour on a 24/5-ish calendar.
+    let minute_bpy = 525_949.0_f64;
+    let hour_bpy = 8_765.8_f64;
+
+    // What `crucible-engine::metrics` would have reported at each grain.
+    let annualized_at = |bpy: f64| per_observation * bpy.sqrt();
+    let m = annualized_at(minute_bpy);
+    let h = annualized_at(hour_bpy);
+
+    // THE POSITIVE CONTROL ON THE FIXTURE. If these were equal the invariance
+    // below would hold for a reason that has nothing to do with the fix.
+    assert!(
+        (m - h).abs() > 1.0,
+        "the fixture must actually exercise two annualizations: 1m gave {m}, 1h gave {h}"
+    );
+
+    // The de-annualization the run path now performs before deflating.
+    let dsr_at = |annualized: f64, bpy: f64| {
+        deflated_sharpe(DeflationInputs {
+            observed_sharpe: annualized / bpy.sqrt(),
+            skew,
+            kurtosis,
+            n_observations: returns.len(),
+            n_trials: 24,
+            trial_sharpe_dispersion: None,
+        })
+        .expect("valid inputs")
+        .dsr
+    };
+    let from_minutes = dsr_at(m, minute_bpy);
+    let from_hours = dsr_at(h, hour_bpy);
+    assert_eq!(
+        from_minutes.to_bits(),
+        from_hours.to_bits(),
+        "same returns, same trials, two annualizations: {from_minutes} vs {from_hours}"
+    );
+
+    // And the converse that gives the invariance teeth: feeding the ANNUALIZED
+    // ratio against a per-bar `n_observations` — the defect this replaced —
+    // does NOT produce the same answer, and saturates. A test that only
+    // asserted the equality above would pass on the broken build too, because
+    // the broken build is also self-consistent at a single frequency.
+    let broken = |annualized: f64| {
+        deflated_sharpe(DeflationInputs {
+            observed_sharpe: annualized,
+            skew,
+            kurtosis,
+            n_observations: returns.len(),
+            n_trials: 24,
+            trial_sharpe_dispersion: None,
+        })
+        .expect("valid inputs")
+        .dsr
+    };
+    // THE DISCRIMINATOR, and it is not the equality above.
+    //
+    // Measured while writing this: the mismatched-units form saturates to
+    // EXACTLY 1.0 at BOTH frequencies — at 1h the annualized ratio is still
+    // ~94x the per-observation one, far past what the standard error can
+    // absorb. So the broken build is frequency-invariant too, and the
+    // invariance assertion alone PASSES on it. Saturation is invariant.
+    //
+    // What separates fixed from broken is therefore not that the answer is
+    // stable but that it is INFORMATIVE: a DSR strictly inside (0, 1) rather
+    // than pinned to an endpoint. That is the assertion which fails on the
+    // defect, and it is why the prescribed 1m-vs-1h invariance needed a
+    // companion rather than standing alone.
+    assert_eq!(broken(m), 1.0, "the defect saturates at 1m");
+    assert_eq!(
+        broken(h),
+        1.0,
+        "and at 1h — so equality alone cannot detect it"
+    );
+    assert!(
+        from_minutes > 0.0 && from_minutes < 1.0,
+        "a deflated Sharpe that carries information is strictly inside (0, 1);          {from_minutes} is an endpoint, which is what the mismatch produced"
+    );
+}
