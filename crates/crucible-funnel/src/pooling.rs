@@ -505,3 +505,65 @@ pub fn pool_evaluations(
         per_contract,
     })
 }
+
+/// The **effective registration hash** for one pooled contract's run (D-0124).
+///
+/// # Why a composite rather than a wider key
+///
+/// A pooled run replays the same strategy over several contracts, and each
+/// contract is its own run and its own **trial** — D-0114 requires N contracts
+/// to charge N trials, because each is a separate opportunity for the grid to
+/// have got lucky. The identity therefore has to distinguish them.
+///
+/// It does so by *deriving a different `config_hash`*, exactly as D-0106
+/// derives one when `[s0]` is declared, rather than by adding a contract field
+/// to [`RunKey`](crate::registry::RunKey). That choice is not stylistic:
+/// `RunKey` is **persisted** and `TrialKey` is **derived at read time**, so a
+/// new key field is a persisted-shape change and drags in §8's reader-first
+/// sequencing under a contract D-0083 and D-0105 both constrain. A composite
+/// changes no stored shape, and every existing reader keeps working.
+///
+/// The same contract appearing twice hashes the same and therefore collides
+/// into **one** trial, which is correct — it is one run of one contract, and
+/// D-0115 refuses the duplicate declaration that would produce it anyway.
+///
+/// # What is bound, and why the window is in it
+///
+/// Strategy, contract, and **front window**. The window belongs in the
+/// identity because it is what the run was evaluated on: rebuild the `.v` roll
+/// table against a longer archive and a contract's front window can move
+/// (D-0045 already refuses a replay outside the table's build span), which
+/// makes it a different run of the same strategy on the same symbol. Two runs
+/// that are not comparable must not share a trial.
+///
+/// Boundaries are the window's own nanosecond instants, never civil dates —
+/// C4b-i exists because a date round-trip moved them to UTC midnight, and an
+/// identity built from the rounded form would call two different windows the
+/// same run.
+#[must_use]
+pub fn pooled_registration_hash(
+    strategy_hash: &str,
+    instrument: &str,
+    front_window_start_ns: i64,
+    front_window_end_ns: i64,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    // Domain separation, and versioned: a change to what is bound below is a
+    // change to run identity, and it must not silently alias the old scheme.
+    hasher.update(b"crucible-pooled-registration/1\0");
+    hash_text(&mut hasher, strategy_hash);
+    hash_text(&mut hasher, instrument);
+    hasher.update(&front_window_start_ns.to_le_bytes());
+    hasher.update(&front_window_end_ns.to_le_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+/// Length-prefixed so that concatenation is unambiguous: without it,
+/// `("ab", "c")` and `("a", "bc")` would hash alike and two different runs
+/// could share a trial.
+fn hash_text(hasher: &mut blake3::Hasher, text: &str) {
+    let bytes = text.as_bytes();
+    let len = u64::try_from(bytes.len()).expect("text length fits the 64-bit identity encoding");
+    hasher.update(&len.to_le_bytes());
+    hasher.update(bytes);
+}

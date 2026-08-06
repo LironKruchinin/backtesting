@@ -103,9 +103,31 @@ use crate::stages::{Criteria, Verdict};
 /// the code that wrote it is five years gone.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct RunKey {
-    /// Effective registration hash, lowercase hex. This is the D-0012
-    /// strategy hash for ordinary runs and the D-0106 composite when S0 is
-    /// declared.
+    /// Effective registration hash, lowercase hex. **Three composites can
+    /// produce it, and this list is exhaustive:**
+    ///
+    /// 1. **D-0012** — the plain strategy hash, blake3 over the canonicalized
+    ///    config. Ordinary runs.
+    /// 2. **D-0106** — `crucible-s0-registration/1` over strategy + the `[s0]`
+    ///    declaration + the delivered data window, when `[s0]` is declared.
+    /// 3. **D-0124** — `crucible-pooled-registration/1` over strategy +
+    ///    contract + front window, for one contract of a pooled run. N pooled
+    ///    contracts yield N identities and therefore N trials (D-0114); the
+    ///    same contract twice yields one.
+    ///
+    /// Each is a *derived* hash rather than a wider key, deliberately: this
+    /// struct is **persisted** and `TrialKey` is **derived at read time**, so a
+    /// new field here is a stored-shape change and drags in §8's reader-first
+    /// sequencing under a contract D-0083 and D-0105 both constrain. A
+    /// composite changes no stored shape and every existing reader keeps
+    /// working.
+    ///
+    /// **A FOURTH composite is the point at which this field is RENAMED.**
+    /// Three meanings are still enumerable in a doc comment a reader will
+    /// actually finish; four is a field whose name has quietly stopped
+    /// describing its contents, which is how a reader six months out builds a
+    /// wrong model of what a row identifies. The threshold is named here so it
+    /// is a decision someone makes rather than a line someone drifts across.
     pub config_hash: String,
     /// The evaluated account (`configs/accounts/*.toml` stem), or `None` when
     /// the run is not being scored against one. Part of the identity because

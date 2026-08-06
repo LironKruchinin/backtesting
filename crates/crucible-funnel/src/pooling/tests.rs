@@ -541,3 +541,166 @@ fn sorting_the_gap_scan_leaves_the_per_contract_report_in_declaration_order() {
     assert_eq!(forward.oos_sessions, reversed.oos_sessions);
     assert_eq!(forward.oos_trades, reversed.oos_trades);
 }
+
+// ---------------------------------------------------------------------------
+// Pooled trial identity (D-0124). Design B: a third composite in the effective
+// `config_hash`, never a wider `RunKey`.
+// ---------------------------------------------------------------------------
+
+/// **The converse, and it comes first.** The same contract over the same
+/// window must hash the SAME — otherwise "N contracts charge N trials" would
+/// be satisfied by a hash that simply varies, including one that varies per
+/// call, and the trial count would be noise rather than a count.
+///
+/// It is also the correctness claim in its own right: a duplicate contract
+/// collides into one trial, because it is one run of one contract.
+#[test]
+fn the_same_contract_and_window_hash_the_same() {
+    let a = pooled_registration_hash(
+        "strat",
+        "ESH2024",
+        1_702_332_000_000_000_001,
+        1_710_190_800_000_000_001,
+    );
+    let b = pooled_registration_hash(
+        "strat",
+        "ESH2024",
+        1_702_332_000_000_000_001,
+        1_710_190_800_000_000_001,
+    );
+    assert_eq!(a, b, "identity must be a function of its inputs");
+    assert_eq!(a.len(), 64, "blake3 lowercase hex");
+}
+
+/// Different contracts of one root are different runs and different trials.
+#[test]
+fn different_contracts_hash_differently() {
+    let h = pooled_registration_hash("strat", "ESH2024", 10, 20);
+    let m = pooled_registration_hash("strat", "ESM2024", 10, 20);
+    assert_ne!(h, m, "two contracts are two runs and two trials (D-0114)");
+}
+
+/// The window is bound, so a rebuilt roll table that moves a contract's front
+/// window makes a different run — two results that are not comparable must not
+/// share a trial.
+///
+/// The instants are one NANOSECOND apart, which is the resolution C4b-i exists
+/// to protect: an identity built from civil dates would call these the same
+/// run, because both round to the same day.
+#[test]
+fn a_front_window_one_nanosecond_different_is_a_different_run() {
+    let a = pooled_registration_hash(
+        "strat",
+        "ESH2024",
+        1_702_332_000_000_000_001,
+        1_710_190_800_000_000_001,
+    );
+    let b = pooled_registration_hash(
+        "strat",
+        "ESH2024",
+        1_702_332_000_000_000_001,
+        1_710_190_800_000_000_002,
+    );
+    assert_ne!(
+        a, b,
+        "the window is part of the identity, at its own resolution"
+    );
+    let c = pooled_registration_hash(
+        "strat",
+        "ESH2024",
+        1_702_332_000_000_000_002,
+        1_710_190_800_000_000_001,
+    );
+    assert_ne!(a, c);
+}
+
+/// A different strategy is a different run even on the same contract and
+/// window — the composite extends the D-0012 hash rather than replacing it.
+#[test]
+fn the_strategy_hash_still_separates_runs() {
+    let a = pooled_registration_hash("strat-a", "ESH2024", 10, 20);
+    let b = pooled_registration_hash("strat-b", "ESH2024", 10, 20);
+    assert_ne!(a, b);
+}
+
+/// Fields are length-prefixed, so concatenation cannot alias. Without it
+/// `("ab","c")` and `("a","bc")` would hash alike and two different runs would
+/// share a trial — the exact failure the trial count exists to prevent.
+#[test]
+fn adjacent_fields_cannot_alias_by_concatenation() {
+    let a = pooled_registration_hash("ab", "c", 1, 2);
+    let b = pooled_registration_hash("a", "bc", 1, 2);
+    assert_ne!(a, b, "length prefixes must make the boundary unambiguous");
+}
+
+/// **N contracts yield N DISTINCT identities**, which is what makes
+/// `Registry::trials_for` return N rather than one.
+///
+/// The count is derived from the pool rather than declared, so a caller cannot
+/// claim a trial count that disagrees with the evidence (D-0114).
+#[test]
+fn n_contracts_yield_n_distinct_identities() {
+    let contracts = ["ESH2024", "ESM2024", "ESU2024", "ESZ2024"];
+    let hashes: std::collections::BTreeSet<String> = contracts
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let start = 1_000 + (i as i64) * 100;
+            pooled_registration_hash("strat", c, start, start + 90)
+        })
+        .collect();
+    assert_eq!(hashes.len(), contracts.len(), "four contracts, four trials");
+
+    // And the duplicate collides rather than inflating the count.
+    let mut with_dup = hashes.clone();
+    with_dup.insert(pooled_registration_hash("strat", "ESH2024", 1_000, 1_090));
+    assert_eq!(
+        with_dup.len(),
+        contracts.len(),
+        "the same contract twice is one trial, not two"
+    );
+}
+
+/// **The trial count is CONSUMED, not merely recorded.** This is the control
+/// that crosses from the registry into block B's statistics, and it is the one
+/// that would still fail if pooling charged N trials into a page that deflated
+/// by one.
+///
+/// Pooling N contracts charges N trials (D-0114), and a deflated Sharpe
+/// corrected for N trials must be strictly lower than the same observation
+/// corrected for one. Strictly: a correction that ignored its denominator
+/// would return the same number and `<=` would not notice.
+#[test]
+fn the_deflated_sharpe_falls_as_the_pool_grows() {
+    use crate::stats::deflated::{DeflationInputs, deflated_sharpe};
+    let at = |n_trials: usize| {
+        deflated_sharpe(DeflationInputs {
+            observed_sharpe: 0.12,
+            skew: -0.09,
+            kurtosis: 2.9,
+            n_observations: 2_000,
+            n_trials,
+            trial_sharpe_dispersion: None,
+        })
+        .expect("valid inputs")
+        .dsr
+    };
+    let one = at(1);
+    let four = at(4);
+    let sixteen = at(16);
+    assert!(
+        four < one,
+        "four pooled contracts are four trials and must deflate harder than one: \
+         {four} vs {one}"
+    );
+    assert!(
+        sixteen < four,
+        "and sixteen harder than four: {sixteen} vs {four}"
+    );
+    // The converse: the observation itself is unchanged, so what moved is the
+    // correction rather than the measurement.
+    assert!(
+        (0.0..=1.0).contains(&one) && (0.0..=1.0).contains(&sixteen),
+        "a DSR is a probability"
+    );
+}

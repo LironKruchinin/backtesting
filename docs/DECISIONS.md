@@ -4575,3 +4575,50 @@ propose a superseding entry — don't silently diverge.
   entry by line number; every reference is by number, which is exactly why the
   numbering has to be trustworthy. What was repaired is the file's ordering,
   which is a property of the record rather than a claim inside it.
+- **D-0124** (2026-08-06) -- **A pooled contract's run is identified by a THIRD
+  composite in the effective `config_hash` — strategy + contract + front window
+  — never by a wider `RunKey`.** N pooled contracts then yield N distinct
+  `TrialKey`s and charge N trials (D-0114), the same contract twice collides
+  into one, and no persisted shape changes.
+  **Why not widen the key, which is the obvious design.** `RunKey` is
+  **persisted** and `TrialKey` is **derived at read time**. Adding a contract
+  field is therefore a stored-shape change, and §8's reader-first rule then
+  requires the reader on `main` before any writer emits the new shape — under a
+  contract D-0083 (voided runs still counting correctly) and D-0105 both
+  constrain. A derived composite changes nothing stored, so every existing
+  reader keeps working and every historical row keeps meaning what it meant.
+  This is the same device D-0106 already used for S0, and reusing it rather
+  than inventing a second mechanism is most of the argument.
+  **What is bound, and why the window is in it.** The front window is part of
+  the identity because it is *what the run was evaluated on*. Rebuild the `.v`
+  roll table against a longer archive and a contract's front window can move,
+  which makes a different run of the same strategy on the same symbol — and two
+  results that are not comparable must not share a trial. The boundaries are
+  the window's own nanosecond instants, never civil dates: C4b-i exists because
+  a date round-trip moved them to UTC midnight, and an identity built from the
+  rounded form would call two different windows the same run.
+  Fields are length-prefixed, so `("ab","c")` and `("a","bc")` cannot alias
+  into one trial, and the domain tag is versioned so a future change to what is
+  bound cannot silently collide with this scheme.
+  **The rename threshold is named rather than left to drift.**
+  `RunKey.config_hash` now enumerates all three composites (D-0012 strategy,
+  D-0106 S0, this one), and **a fourth is the point at which the field is
+  renamed.** Three meanings are still enumerable in a doc comment a reader will
+  finish; four is a field whose name has stopped describing its contents, which
+  is how a reader six months out builds a wrong model of what a row identifies.
+  **N pooled contracts are NOT N independent searches, and the count is used
+  anyway.** Pooling is one search over a larger sample: the same strategy, the
+  same grid, more data. Charging N trials therefore **over-deflates** — the
+  deflated Sharpe falls by more than the multiple-testing argument strictly
+  justifies. That is accepted for the reason `docs/plans/m3-full.md` gives for
+  Block E's sixteen accounts: the preferred error is against the strategy, and
+  an over-deflated Sharpe makes a real edge harder to claim while an
+  under-deflated one makes a spurious edge easier to publish. **It is stated
+  where it renders** — C5 puts the sentence on the scorecard — so a reader sees
+  a conservative correction rather than mistaking it for a precise one. Nobody
+  may "fix" this by dividing the contract dimension out; that needs its own
+  entry and a control showing it does not resurrect a known-spurious edge.
+  **The identity is computed BEFORE the replay**, at the seam the pooled replay
+  left for it, because D-0074's insert-before-run means the identity a run is
+  recorded under exists before the run does. An identity derived after the loop
+  produced numbers would be insert-after-run wearing the right name.

@@ -41,7 +41,7 @@ use crucible_data::catalog::TsRange;
 use crucible_data::continuous::{ContinuousError, RollTable, read_roll_table};
 use crucible_data::ingest::window::{civil_from_days, days_from_civil};
 use crucible_engine::{BacktestParams, FreeFills, run};
-use crucible_funnel::pooling::ContractEvaluation;
+use crucible_funnel::pooling::{ContractEvaluation, pooled_registration_hash};
 use crucible_funnel::walkforward::{FoldPlan, FoldSpec, RunTrace};
 
 use crate::combo::{PooledWindow, Series, SliceFeed, annualization, collect_events_in_window};
@@ -65,6 +65,11 @@ pub(crate) struct PooledContractPlan {
     pub day_keys: Vec<i64>,
     /// Distinct trading-day keys of the front window, ascending.
     pub front_window_days: Vec<i64>,
+    /// The front window this contract was evaluated on, as INSTANTS. Part of
+    /// its run identity (D-0124): a rebuilt roll table can move a front
+    /// window, which makes a different run of the same strategy on the same
+    /// symbol, and two results that are not comparable must not share a trial.
+    pub front_window: TsRange,
     /// Warmup bars this contract's OWN curated history supplied before its
     /// front window opened, and what the grid needed — `Some` only when it
     /// fell short, in which case nothing else here is meaningful and the
@@ -284,6 +289,7 @@ pub(crate) fn plan_pool(
                 series,
                 day_keys: Vec::new(),
                 front_window_days: Vec::new(),
+                front_window: window,
                 insufficient_warmup: Some((available, needed)),
                 dropped_tail_day: None,
                 dropped_tail_bars: 0,
@@ -354,6 +360,7 @@ pub(crate) fn plan_pool(
             series,
             day_keys,
             front_window_days,
+            front_window: window,
             insufficient_warmup: None,
             dropped_tail_day,
             dropped_tail_bars,
@@ -626,7 +633,7 @@ pub(crate) fn replay_pool(
     loaded: &LoadedConfig,
     plans: &[PooledContractPlan],
     combo_index: usize,
-) -> Vec<ContractEvaluation> {
+) -> Vec<PooledRun> {
     plans
         .iter()
         .map(|contract| {
@@ -634,31 +641,51 @@ pub(crate) fn replay_pool(
             // is evaluated as zero — `pool_evaluations` turns it into a skip
             // with the reason, printed even when the count is zero (D-0070).
             let Some(fold_plan) = contract.plan.as_ref() else {
-                return ContractEvaluation {
-                    instrument: contract.instrument.clone(),
-                    front_window_days: contract.front_window_days.clone(),
-                    oos_day_keys: Vec::new(),
-                    oos_trades: 0,
-                    insufficient_warmup: contract.insufficient_warmup,
-                    folds: 0,
-                    fold_needs_sessions: contract.fold_needs_sessions,
+                return PooledRun {
+                    registration_hash: pooled_registration_hash(
+                        &loaded.config_hash.to_string(),
+                        &contract.instrument,
+                        contract.front_window.start_ts().0,
+                        contract.front_window.end_ts().0,
+                    ),
+                    evaluation: ContractEvaluation {
+                        instrument: contract.instrument.clone(),
+                        front_window_days: contract.front_window_days.clone(),
+                        oos_day_keys: Vec::new(),
+                        oos_trades: 0,
+                        insufficient_warmup: contract.insufficient_warmup,
+                        folds: 0,
+                        fold_needs_sessions: contract.fold_needs_sessions,
+                    },
                 };
             };
 
-            // ---- THE REGISTRY CLAIM GOES HERE (C4c) -------------------------
+            // ---- RUN IDENTITY, BEFORE THE REPLAY (D-0074, D-0124) -----------
             //
-            // D-0074's insert-before-run: the run is claimed BEFORE it
-            // executes, so a crash leaves a claimed-and-unfinished row rather
-            // than a run nobody knows happened. C4c binds the identity —
-            // Design B, a third composite in `RunKey.config_hash` over
-            // strategy + contract + front window, as D-0106 binds strategy +
-            // S0 + data window — and charges one trial per contract.
+            // Computed here, ahead of the replay, because D-0074's
+            // insert-before-run means the identity a run will be recorded
+            // under exists before the run does: a crash then leaves a
+            // claimed-and-unfinished row rather than a run nobody knows
+            // happened. The position is the contract — an identity derived
+            // *after* the loop produced numbers would be insert-after-run
+            // wearing the right name.
             //
-            // Deliberately an empty seam rather than an inlined `todo!()` or a
-            // call that does nothing: the ordering is the contract, and a
-            // claim added *after* this loop works would be insert-after-run
-            // wearing the right name. C4c fills the hole; it does not
-            // rearrange the loop.
+            // Design B: a third composite in the effective `config_hash`
+            // rather than a wider `RunKey`, because `RunKey` is persisted and
+            // `TrialKey` derived, so a contract field would be a
+            // persisted-shape change under §8's reader-first rule. N
+            // contracts give N identities and therefore N trials (D-0114);
+            // the same contract twice gives one.
+            //
+            // What remains for the orchestration (C5/C6) is to hand this to
+            // `Registry::claim` — the identity is settled here so that call
+            // has nothing left to decide.
+            let registration_hash = pooled_registration_hash(
+                &loaded.config_hash.to_string(),
+                &contract.instrument,
+                contract.front_window.start_ts().0,
+                contract.front_window.end_ts().0,
+            );
             // -----------------------------------------------------------------
 
             let events = &contract.series.events;
@@ -695,38 +722,53 @@ pub(crate) fn replay_pool(
                 params.bars_per_year,
             );
 
-            ContractEvaluation {
-                instrument: contract.instrument.clone(),
-                front_window_days: contract.front_window_days.clone(),
-                oos_day_keys: contract.oos_day_keys(),
-                // Read off the pooled summary rather than recounted: the
-                // window that owns a round-trip is the one containing its
-                // closing fill, and that decision is made in exactly one place.
-                oos_trades: oos.round_trips,
-                insufficient_warmup: contract.insufficient_warmup,
-                folds: fold_plan.folds().len(),
-                fold_needs_sessions: contract.fold_needs_sessions,
+            PooledRun {
+                registration_hash,
+                evaluation: ContractEvaluation {
+                    instrument: contract.instrument.clone(),
+                    front_window_days: contract.front_window_days.clone(),
+                    oos_day_keys: contract.oos_day_keys(),
+                    // Read off the pooled summary rather than recounted: the
+                    // window that owns a round-trip is the one containing its
+                    // closing fill, and that decision is made in exactly one place.
+                    oos_trades: oos.round_trips,
+                    insufficient_warmup: contract.insufficient_warmup,
+                    folds: fold_plan.folds().len(),
+                    fold_needs_sessions: contract.fold_needs_sessions,
+                },
             }
         })
         .collect()
 }
 
+/// One pooled contract's run: what it is registered as, and what it measured.
+///
+/// The identity travels WITH the evidence rather than being recomputed by
+/// whoever records it — a second derivation of "which run is this" is the same
+/// class of bug D-0071 refuses for "which day is this".
+pub(crate) struct PooledRun {
+    /// Effective registration hash for this contract's run (D-0124).
+    pub registration_hash: String,
+    /// The evidence admission judges on.
+    pub evaluation: ContractEvaluation,
+}
+
 #[cfg(test)]
-mod replay_pool_tests {
+pub(super) mod replay_pool_tests {
     use super::*;
     use crate::combo::collect_events_for;
     use crucible_funnel::walkforward::FoldScheme;
 
     /// A real grid over a SYNTHETIC source, so the replay is exercised end to
     /// end with no archive. `combo-smoke.toml` declares `source = "synthetic"`.
-    fn loaded() -> LoadedConfig {
+    pub(super) fn loaded() -> LoadedConfig {
         crate::config::load(std::path::Path::new("../../configs/combo-smoke.toml"))
             .expect("the shipped smoke config loads")
     }
 
     /// One planned contract over `events`, with `train`/`test` sessions and a
     /// day key every `per_day` bars.
-    fn plan_of(
+    pub(super) fn plan_of(
         loaded: &LoadedConfig,
         name: &str,
         events: Vec<MarketEvent>,
@@ -748,6 +790,7 @@ mod replay_pool_tests {
             },
             day_keys,
             front_window_days,
+            front_window: TsRange::new(Ts(1), Ts(2)).expect("range"),
             insufficient_warmup: None,
             dropped_tail_day: None,
             dropped_tail_bars: 0,
@@ -785,13 +828,19 @@ mod replay_pool_tests {
         ];
         let out = replay_pool(&loaded, &plans, 0);
         assert_eq!(out.len(), 2);
-        assert_eq!(out[0].oos_trades, out[1].oos_trades);
-        assert_eq!(out[0].oos_day_keys, out[1].oos_day_keys);
-        assert_eq!(out[0].folds, out[1].folds);
-        assert!(out[0].folds > 0, "the fixture must actually fold");
+        assert_eq!(out[0].evaluation.oos_trades, out[1].evaluation.oos_trades);
+        assert_eq!(
+            out[0].evaluation.oos_day_keys,
+            out[1].evaluation.oos_day_keys
+        );
+        assert_eq!(out[0].evaluation.folds, out[1].evaluation.folds);
+        assert!(
+            out[0].evaluation.folds > 0,
+            "the fixture must actually fold"
+        );
         // Order is declaration order, never completion order (§2.2).
-        assert_eq!(out[0].instrument, "AAA");
-        assert_eq!(out[1].instrument, "BBB");
+        assert_eq!(out[0].evaluation.instrument, "AAA");
+        assert_eq!(out[1].evaluation.instrument, "BBB");
     }
 
     /// `oos_trades` counts the TEST windows, not the whole run — which is what
@@ -829,11 +878,11 @@ mod replay_pool_tests {
         );
         let n = replay_pool(&loaded, &[plan_of(&loaded, "N", events, 40, narrow)], 0);
         assert!(
-            w[0].folds > 0 && n[0].folds > 0,
+            w[0].evaluation.folds > 0 && n[0].evaluation.folds > 0,
             "both geometries must fold"
         );
         assert!(
-            n[0].oos_day_keys.len() < w[0].oos_day_keys.len(),
+            n[0].evaluation.oos_day_keys.len() < w[0].evaluation.oos_day_keys.len(),
             "the narrow geometry must cover fewer sessions, or the comparison is empty"
         );
         // STRICT, and the strictness is the whole control. A replay that
@@ -842,13 +891,13 @@ mod replay_pool_tests {
         // would be decoration — which is exactly what the mutation control
         // caught when it was first written that way.
         assert!(
-            n[0].oos_trades < w[0].oos_trades,
+            n[0].evaluation.oos_trades < w[0].evaluation.oos_trades,
             "fewer out-of-sample sessions must yield strictly fewer out-of-sample trades: \
              narrow {} over {} session(s), wide {} over {}",
-            n[0].oos_trades,
-            n[0].oos_day_keys.len(),
-            w[0].oos_trades,
-            w[0].oos_day_keys.len()
+            n[0].evaluation.oos_trades,
+            n[0].evaluation.oos_day_keys.len(),
+            w[0].evaluation.oos_trades,
+            w[0].evaluation.oos_day_keys.len()
         );
     }
 
@@ -865,14 +914,59 @@ mod replay_pool_tests {
         short.plan = None;
         short.insufficient_warmup = Some((3, 40));
         let out = replay_pool(&loaded, &[short], 0);
-        assert_eq!(out[0].oos_trades, 0);
-        assert!(out[0].oos_day_keys.is_empty());
-        assert_eq!(out[0].folds, 0);
+        assert_eq!(out[0].evaluation.oos_trades, 0);
+        assert!(out[0].evaluation.oos_day_keys.is_empty());
+        assert_eq!(out[0].evaluation.folds, 0);
         assert_eq!(
-            out[0].insufficient_warmup,
+            out[0].evaluation.insufficient_warmup,
             Some((3, 40)),
             "the reason survives the replay — a zero with no reason is what \
              D-0070's pattern refuses"
         );
+    }
+}
+
+#[cfg(test)]
+mod pooled_identity_tests {
+    use super::*;
+    use crate::combo::collect_events_for;
+    use crucible_funnel::walkforward::FoldScheme;
+
+    /// The seam is WIRED, not merely present: a pool of two contracts comes
+    /// back with two different registration hashes, so `Registry::claim` will
+    /// charge two trials (D-0114, D-0124).
+    ///
+    /// `pooling`'s own tests prove the hash function separates its inputs.
+    /// This proves `replay_pool` actually calls it with the contract that was
+    /// replayed — a correct function invoked with a constant would pass those
+    /// and fail this.
+    #[test]
+    fn each_contract_in_a_pool_carries_its_own_registration_hash() {
+        let loaded = super::replay_pool_tests::loaded();
+        let events = collect_events_for(&loaded, "SYN:RW")
+            .expect("synthetic")
+            .events;
+        let spec = FoldSpec {
+            scheme: FoldScheme::Rolling,
+            train_days: 5,
+            test_days: 2,
+            step_days: 2,
+        };
+        let plans = vec![
+            super::replay_pool_tests::plan_of(&loaded, "ESH2024", events.clone(), 40, spec),
+            super::replay_pool_tests::plan_of(&loaded, "ESM2024", events, 40, spec),
+        ];
+        let out = replay_pool(&loaded, &plans, 0);
+        assert_ne!(
+            out[0].registration_hash, out[1].registration_hash,
+            "two contracts must be two runs and therefore two trials"
+        );
+        assert_eq!(out[0].registration_hash.len(), 64);
+        // The converse: the identity is a function of the contract, so the
+        // same pool replayed again reproduces it. A hash that varied per call
+        // would satisfy the assertion above and destroy the trial count.
+        let again = replay_pool(&loaded, &plans, 0);
+        assert_eq!(out[0].registration_hash, again[0].registration_hash);
+        assert_eq!(out[1].registration_hash, again[1].registration_hash);
     }
 }
