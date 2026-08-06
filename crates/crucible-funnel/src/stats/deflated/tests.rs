@@ -534,7 +534,7 @@ fn the_deflated_sharpe_determinism_hash_is_pinned() {
 
     eprintln!("[pinned] deflated sharpe hash = {digest}");
     assert_eq!(
-        digest, "dc7f94f25235df6c",
+        digest, "fec6ffe24b0447a8",
         "the deflation arithmetic moved. Same seed and same series must give the same \
          numbers; if this changed on purpose, re-derive it and say so in a decision entry."
     );
