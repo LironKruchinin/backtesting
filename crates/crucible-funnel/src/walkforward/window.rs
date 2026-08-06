@@ -36,7 +36,7 @@
 use std::ops::Range;
 
 use crucible_core::prelude::*;
-use crucible_engine::{ClosedTrade, FeeEvent, Summary};
+use crucible_engine::{ClosedTrade, FeeEvent, ReturnStats, Summary};
 
 /// One replay, indexed so any window can be cut out of it.
 ///
@@ -115,6 +115,30 @@ impl<'a> RunTrace<'a> {
         initial_cash_nano_usd: NanoUsd,
         bars_per_year: f64,
     ) -> Summary {
+        self.pooled_with_stats(windows, initial_cash_nano_usd, bars_per_year)
+            .0
+    }
+
+    /// As [`Self::pooled`], and also the stitched series' **sufficient
+    /// statistics** — so a caller that must pool across contracts can do so
+    /// without retaining the curve.
+    ///
+    /// A sibling rather than a widened [`Self::pooled`] deliberately.
+    /// `pooled` has nine call sites; changing its signature would edit all of
+    /// them and give a moved determinism gate nine candidate causes, which is
+    /// the property these commits are split to preserve. `pooled` delegates
+    /// here and keeps its contract exactly, so no caller changes.
+    ///
+    /// The curve itself never leaves this function: `ReturnStats` is 48 bytes
+    /// against ~880 KB for the per-bar series it summarises, which is D-0071's
+    /// trade and why the reducer exists at all.
+    #[must_use]
+    pub fn pooled_with_stats(
+        &self,
+        windows: &[Range<usize>],
+        initial_cash_nano_usd: NanoUsd,
+        bars_per_year: f64,
+    ) -> (Summary, ReturnStats) {
         let mut curve: Vec<(Ts, NanoUsd)> = Vec::new();
         let mut level = initial_cash_nano_usd;
         let mut trades: Vec<ClosedTrade> = Vec::new();
@@ -163,7 +187,11 @@ impl<'a> RunTrace<'a> {
             }
         }
 
-        Summary::compute(&curve, &trades, fees_nano_usd, bars_per_year)
+        let stats = ReturnStats::of(&curve);
+        (
+            Summary::compute(&curve, &trades, fees_nano_usd, bars_per_year),
+            stats,
+        )
     }
 }
 
