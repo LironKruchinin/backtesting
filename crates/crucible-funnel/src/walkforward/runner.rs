@@ -32,7 +32,7 @@
 use crucible_core::prelude::*;
 use crucible_engine::{
     AccountCapture, AccountSeries, BacktestParams, BacktestResult, ClosedTrade, DayRecord,
-    EngineError, Summary, WorstDayDistribution, run_capturing,
+    EngineError, ReturnStats, Summary, WorstDayDistribution, run_capturing,
 };
 use crucible_strategies::combo::{ComboId, ConfigHash, Grid};
 
@@ -89,6 +89,22 @@ pub struct ComboWalkForward {
     pub folds: Vec<FoldResult>,
     /// The headline: every test window pooled, and nothing else.
     pub oos_stitched: Summary,
+    /// The **sufficient statistics** of the very series [`Self::oos_stitched`]
+    /// summarises — carried so that a statistic pooled across *contracts* can
+    /// be formed without any contract's curve being retained.
+    ///
+    /// It cannot be recovered from `oos_stitched` later. A [`Summary`] keeps
+    /// the *shape* of its return series (`n`, skew, kurtosis) but not the
+    /// undivided sums a second series can be combined into, and rebuilding
+    /// them would mean keeping the curve — which at ~880 KB per combo per
+    /// contract is the cost [`ReturnStats`] exists to refuse (D-0071's trade,
+    /// pinned by `a_return_stats_is_forty_eight_bytes`).
+    ///
+    /// Inert today: nothing reads it, and it reaches no hash. Landing the
+    /// carrier one commit ahead of its consumer is the inert-first ordering
+    /// the rest of Block C used, and it is why adding this field must move no
+    /// determinism gate.
+    pub oos_stitched_stats: ReturnStats,
     /// Every training window pooled. A diagnostic, never a headline — the
     /// combos were chosen by a human looking at something, and this is the
     /// sample they looked at.
@@ -362,7 +378,10 @@ impl<'a, M: FillModel + Clone> GridRun<'a, M> {
             .collect();
 
         let test_windows: Vec<_> = plan.folds().iter().map(|f| f.test.bars.clone()).collect();
-        let oos_stitched = trace.pooled(&test_windows, cash, per_year);
+        // `pooled` is `pooled_with_stats(..).0`, so taking both changes no
+        // arithmetic — the Summary is produced by the same call it always was.
+        let (oos_stitched, oos_stitched_stats) =
+            trace.pooled_with_stats(&test_windows, cash, per_year);
         // Training windows overlap between folds under both schemes, so they
         // are pooled as the union rather than concatenated — a bar that
         // appears in three folds' training samples is still one bar.
@@ -387,6 +406,7 @@ impl<'a, M: FillModel + Clone> GridRun<'a, M> {
             conflicting_signals: strategy.inner().conflicting_signals(),
             folds,
             oos_stitched,
+            oos_stitched_stats,
             is_pooled,
             whole_run: result.summary.clone(),
             cancelled_at_eof: result.cancelled_at_eof,

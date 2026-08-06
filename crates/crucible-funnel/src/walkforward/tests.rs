@@ -350,6 +350,85 @@ fn the_out_of_sample_headline_excludes_the_training_windows() {
     assert_eq!(combo.is_pooled.round_trips, 3);
 }
 
+/// The carried sufficient statistics describe the out-of-sample stitch, and
+/// nothing else on the combo.
+///
+/// ## What the numbers are, by hand
+///
+/// The test windows are bars 30..42, 42..54 and 54..66 (the layout table
+/// above). They tile, so the stitch pushes one anchor — bar 29, at the initial
+/// $100,000 — and then one point per bar: 1 + 36 = 37 points, hence **36
+/// returns**.
+///
+/// Rebased on $100,000, that curve is, from the episode table in the module
+/// docs:
+///
+/// | bars | equity | why |
+/// |---|---|---|
+/// | 29 (anchor), 30, 31 | 100,000 | flat, then long at 104 marked at 104 |
+/// | 32 | 100,500 | marked at day 5's 114 peak: +10 pts × $50 |
+/// | 33–44 | 100,100 | marked at 106, the +$100 realized at bar 34, day 6 flat, day 7 long at 106 marked at 106 |
+/// | 45 | 99,950 | marked at 103: −3 pts |
+/// | 46–55 | 99,950 | the −$150 realized at bar 46, day 8 flat, day 9 long at 102 marked at 102 |
+/// | 56 | 100,350 | marked at day 9's 110 peak: +8 pts |
+/// | 57–65 | 100,150 | marked at 106, the +$200 realized at bar 58, day 10 flat |
+///
+/// so `net_delta_nano_usd` = 100,150 − 100,000 = **+$150**, the same headline
+/// the test above derives, and exactly five of the 36 returns are nonzero.
+///
+/// ## Why the last two assertions are here
+///
+/// `n` and the net delta are only evidence if the *other* windows on this
+/// combo would have answered differently — a check that passes whichever
+/// series it was handed is a formality. They would not: `is_pooled` stitches
+/// bars 6..54 anchored at bar 5, so 48 returns and +$350, and `whole_run`
+/// covers all 72 bars for +$550. Both discriminations are asserted rather
+/// than asserted-about.
+#[test]
+fn the_carried_statistics_describe_the_out_of_sample_stitch() {
+    let ev = events();
+    let g = grid(IntAxis::Fixed(2));
+    let plan =
+        FoldPlan::build(&day_keys(ev.len()), g.max_warmup_bars(), fold_spec()).expect("plans");
+    let report = run_grid(
+        &ev,
+        &day_keys(ev.len()),
+        &g,
+        &plan,
+        &spec(),
+        &params(),
+        &identity(),
+        &FreeFills,
+    )
+    .expect("runs");
+    let combo = &report.combos[0];
+    let stats = combo.oos_stitched_stats;
+
+    // 3 test windows × 12 bars, plus the one anchor the tiling stitch pushes.
+    assert_eq!(stats.n, 36);
+    assert_eq!(dollars(stats.net_delta_nano_usd), 150);
+
+    // The moments belong to the series the published Summary describes, and
+    // agree with it bit-for-bit rather than to a tolerance — `ReturnStats` and
+    // `ReturnShape` form their powers at the same points, deliberately, so a
+    // divergence here is two implementations drifting apart.
+    assert_eq!(stats.shape(), combo.oos_stitched.return_shape);
+
+    // The discrimination. Wiring this field from either neighbour would change
+    // both numbers above.
+    assert_eq!(combo.is_pooled.return_shape.n_returns, 48);
+    assert_eq!(
+        dollars(combo.is_pooled.final_equity_nano_usd) - 100_000,
+        350,
+        "is_pooled must differ from the stitch, or `n` and the net delta prove nothing"
+    );
+    assert_eq!(
+        dollars(combo.whole_run.final_equity_nano_usd) - 100_000,
+        550,
+        "whole_run must differ from the stitch, for the same reason"
+    );
+}
+
 /// One Sharpe, in closed form, because a Sharpe nobody has done on paper is a
 /// number nobody has checked.
 ///
