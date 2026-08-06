@@ -472,12 +472,19 @@ The quant-research payload. Specs live in `crucible-funnel` module docs.
             moves S2 → S3 for a config that passes everything; the ceiling does
             not move with it (D-0075)
 
-      **The nine live determinism gates**, as of D-0110 — five doc-pinned
+      **The ten live determinism gates**, as of D-0131 — six doc-pinned
       values across four hash-emitting CLI entry points (`funnel` is pinned
-      against two configs) and four code-pinned digest assertions. Kept as one
+      against three configs) and four code-pinned digest assertions. Kept as one
       table because the eight-vs-nine count had to be settled by measurement
       once already (D-0108), and a table that lags the code re-creates exactly
-      that:
+      that.
+
+      **The tenth needs the ARCHIVE and the other nine do not.** `pooled run`
+      replays six real ES contracts, so it cannot be derived on a checkout with
+      no `curated/` tree or no `.v` roll table, while every other gate runs on a
+      synthetic feed. A machine that cannot produce it must report it as
+      UNAVAILABLE rather than as passing — an absent gate reported green is the
+      exact failure D-0108 and D-0116 were both written about:
 
       **The third column is load-bearing.** A batched sweep that greps for a
       test name which does not exist prints nothing and looks exactly like a
@@ -499,6 +506,7 @@ The quant-research payload. Specs live in `crucible-funnel` module docs.
       | truncation | `91b9ff5b9bbcdb25` | `stats::truncation::tests::the_truncation_sweep_is_pinned` |
       | deflated Sharpe | `fec6ffe24b0447a8` | `stats::deflated::tests::the_deflated_sharpe_determinism_hash_is_pinned` |
       | **block-B battery** | **`ef703dfd8d19fdd3`** | `stats::pbo::pinned::the_block_b_battery_is_pinned` (D-0110) |
+      | **pooled run** | **`30c62df587156ae9`** | `crucible funnel --config configs/pooled-es-smoke.toml --out <tmp> --hash-only` (D-0131) |
 
       > **RESOLVED 2026-08-06 (D-0122), and the row above carries its new
       > value.** `the_deflated_sharpe_determinism_hash_is_pinned` produced

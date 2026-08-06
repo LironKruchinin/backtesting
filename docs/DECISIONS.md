@@ -4977,3 +4977,40 @@ propose a superseding entry — don't silently diverge.
   this commit — a gate's silence is evidence about its fixture. The pooled path's
   own pin is **C7's**, and until it exists the evidence for this orchestration is
   the controls above and nothing else.
+- **D-0131** (2026-08-07) -- **The tenth determinism gate: the pooled run,
+  `30c62df587156ae9`, over six real ES contracts. It hashes the POOLED
+  quantities, and it is the first gate that needs the archive.**
+  `crucible funnel --config configs/pooled-es-smoke.toml --out <tmp>
+  --hash-only`. Derived twice in dev and twice in release; **all four agreed**,
+  and that agreement — not the value — is the acceptance property, because a
+  value is only a pin once the thing producing it is shown to be stable across
+  the two profiles a §2.2 violation would separate.
+  **What it hashes, and why that is the point.** The verdict and deciding stage,
+  the session UNION, the pooled trade sum, the trial count, and each combo's
+  pooled return, Sharpe, kill-level Sharpe, both control returns and every
+  pooled sweep level. Deliberately **no per-contract number**. D-0128 measured
+  the single-contract funnel gate going green while the costed channel was
+  swapped for the free-fill one, because `verdict_hash` reads the per-contract
+  artifacts directly and reaches the pooled evidence only through
+  `(verdict, decided_at)`. A pooled gate built the same way would be blind in
+  the same place, so this one reads the pooled quantities and nothing else.
+  **It needs the ARCHIVE, and the other nine do not.** Every other gate runs on
+  a synthetic feed and is derivable from a bare checkout. This one replays six
+  real ES front windows and cannot be produced without `curated/` and the `.v`
+  roll table. A machine that cannot produce it must report it **UNAVAILABLE**,
+  never green: a gate that silently passes because it did not run is the exact
+  failure D-0108 and D-0116 were both written about, and this is the first gate
+  in the project where "did not run" is a normal condition rather than a bug.
+  **The count is now ten, and two commit messages still say ten wrongly.**
+  D-0128 recorded a correction: `5e412bd` and `63fdb76` claimed "all ten gates"
+  when there were nine and the tenth did not exist. That correction stands as
+  written — those commits were wrong when they were made — and this entry is
+  what makes the number right going forward. A reader meeting both should
+  understand the sequence: nine through `235fb40`, ten from here.
+  **The config is a HARNESS, not an idea**, and is `configs/pooled-es-smoke.toml`
+  — the same SMA crossover `combo-smoke.toml` runs on a random walk, run instead
+  on real ES front-month windows so the pooling machinery is exercised against
+  real session calendars. Its geometry is **declared with its basis** (26/10/10,
+  the largest whole-fold layout fitting a measured ~66-session front window) and
+  is explicitly not a blessed default, which is D-0119's rule and the thing that
+  killed H-007 and H-008 when they inherited combo-smoke's 5/2/2.
