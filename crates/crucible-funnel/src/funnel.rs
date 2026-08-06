@@ -1112,18 +1112,22 @@ fn replay<M: FillModel>(inputs: &FunnelInputs<'_>, index: usize, fills: &mut M) 
 ///
 /// Widened rather than given a sibling, which is the opposite call from
 /// [`RunTrace::pooled_with_stats`] one layer down, for the reason that made
-/// that one a sibling: blast radius is the symptom, caller need is the cause.
-/// `pooled` had nine callers when that call was made and has seven now — this
-/// commit and the one before it each took one — and the majority of them want a
-/// `Summary` alone, so widening it would have charged every uninterested call
-/// site for the one interested caller. `pooled_of` has four: the S1 free-fill
-/// screen, each cost-sweep level, each random-entry draw and buy-and-hold.
-/// Every one of them is a series `ContractEvidence` must be able to pool across
-/// contracts, so *all four* want the statistics, and a sibling here would leave
-/// `pooled_of` with no callers at all.
+/// that one a sibling: blast radius is the symptom, **caller need is the
+/// cause**.
 ///
-/// The four take `.0` for one commit. Storing what they now receive is the next
-/// one, kept separate so that a moved gate has a single candidate cause.
+/// Most callers of `pooled` want a `Summary` alone, so widening *it* would
+/// charge every uninterested call site for the one interested caller. Every
+/// caller of `pooled_of` produces a series that must be poolable across
+/// contracts — the S1 free-fill screen, each cost-sweep level, each
+/// random-entry draw, buy-and-hold — so all of them want the statistics, and a
+/// sibling here would have been left with no callers at all.
+///
+/// Stated as the property rather than as call-site counts, and that is a
+/// repair. This comment used to say "nine callers, and seven now"; a count is a
+/// snapshot wearing a property's clothes, it was already one commit out of date
+/// when it was read, and the number was never what decided the question. What
+/// decides it is whether the majority of callers want the new return value —
+/// which is checkable by reading them, and stays true as they come and go.
 fn pooled_of(
     result: &BacktestResult,
     inputs: &FunnelInputs<'_>,

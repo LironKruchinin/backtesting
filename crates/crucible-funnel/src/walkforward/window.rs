@@ -123,11 +123,18 @@ impl<'a> RunTrace<'a> {
     /// statistics** — so a caller that must pool across contracts can do so
     /// without retaining the curve.
     ///
-    /// A sibling rather than a widened [`Self::pooled`] deliberately.
-    /// `pooled` has nine call sites; changing its signature would edit all of
-    /// them and give a moved determinism gate nine candidate causes, which is
-    /// the property these commits are split to preserve. `pooled` delegates
-    /// here and keeps its contract exactly, so no caller changes.
+    /// A sibling rather than a widened [`Self::pooled`] deliberately. **Most
+    /// callers of `pooled` want a `Summary` alone** — that is what calling it
+    /// rather than this function means — so changing its signature would edit
+    /// every one of them and give a moved determinism gate as many candidate
+    /// causes as it has call sites, which is the property these commits are
+    /// split to preserve. `pooled` delegates here and keeps its contract
+    /// exactly, so no caller changes.
+    ///
+    /// The count that used to stand here — "nine call sites" — had already
+    /// aged to seven by the time anyone re-read it. The property is what
+    /// decides the sibling-versus-widen question, and unlike the count it
+    /// stays true as callers come and go.
     ///
     /// The curve itself never leaves this function: `ReturnStats` is 48 bytes
     /// against ~880 KB for the per-bar series it summarises, which is D-0071's
