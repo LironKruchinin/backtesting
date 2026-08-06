@@ -500,6 +500,27 @@ The quant-research payload. Specs live in `crucible-funnel` module docs.
       | deflated Sharpe | `dc7f94f25235df6c` | `stats::deflated::tests::the_deflated_sharpe_determinism_hash_is_pinned` |
       | **block-B battery** | **`ef703dfd8d19fdd3`** | `stats::pbo::pinned::the_block_b_battery_is_pinned` (D-0110) |
 
+      > **UNRESOLVED, and it makes one row above profile-dependent** (found
+      > 2026-08-06). `cargo test --release` fails
+      > `the_deflated_sharpe_determinism_hash_is_pinned`: the deflation
+      > arithmetic produces **`fec6ffe24b0447a8`** under `--release` against the
+      > pinned `dc7f94f25235df6c` under `dev`. Both profiles are green
+      > *individually*; they disagree with each other. That is a **§2.2
+      > question** — "same config + same data ⇒ bit-identical results" does not
+      > carve out an optimization level — and the pinned value is currently a
+      > statement about a build profile rather than about the arithmetic.
+      > **CI has never run `--release` tests** (`ci.yml` runs `cargo test
+      > --workspace` and `--workspace --all-features`), which is why sixteen
+      > months of green never surfaced it. Proven pre-existing at `3c29c99` by
+      > stashing an unrelated diff and re-running on the verified-clean tree.
+      > **It blocks C4d and C7 as specified**: both require a hash *derived
+      > twice*, and two derivations in one profile agree while the other profile
+      > disagrees — so "which profile do we pin?" has to be answered before
+      > either can be done correctly. Pinning a profile-dependent value pins a
+      > rumor. Not diagnosed: the cause could be float contraction, constant
+      > folding at a different precision, or a real ordering bug, and guessing
+      > between them is what §7 refuses.
+
       **The planted defect they were measured against already existed**:
       `controls::LeakyZScore` (a full-sample z-score, §2.1's named lookahead),
       and `crucible-funnel/tests/planted_leak.rs` recorded that the gates
