@@ -62,17 +62,7 @@ impl Summary {
             }
         }
 
-        // Per-bar simple returns for the naive Sharpe.
-        let mut rets = Vec::with_capacity(equity.len().saturating_sub(1));
-        for w in equity.windows(2) {
-            let prev = nano_usd_to_f64(w[0].1);
-            let curr = nano_usd_to_f64(w[1].1);
-            if prev > 0.0 {
-                rets.push(curr / prev - 1.0);
-            }
-        }
-        let sharpe_naive = sharpe(&rets, bars_per_year);
-        let return_shape = ReturnShape::of(&rets);
+        let (sharpe_naive, return_shape) = sharpe_and_shape(equity, bars_per_year);
 
         let wins = closed_trades.iter().filter(|t| t.net_nano_usd > 0).count();
         let win_rate = if closed_trades.is_empty() {
@@ -94,6 +84,47 @@ impl Summary {
             fees_nano_usd,
         }
     }
+}
+
+/// The **path-independent** half of a [`Summary`]: the naive Sharpe and the
+/// shape of the series it was computed on.
+///
+/// # Why this is a separate function
+///
+/// A [`Summary`] also carries `max_drawdown_pct`, and a drawdown is meaningful
+/// only over a curve an account actually walked. A curve stitched across
+/// CONTRACTS is not one: its seams join windows months apart, so a drawdown
+/// measured over it describes a path nobody took (D-0119). Block C therefore
+/// needs the Sharpe and the moments of a stitched curve **without** the
+/// drawdown — and the safe way to provide that is a function that never
+/// computes one, rather than a `Summary` whose fields mean different things
+/// depending on which path produced it.
+///
+/// The precedent is `AdjustedPrice` (D-0042): a value meaningful in one space
+/// and corrupting in another is separated by a type that cannot cross, not by
+/// a convention readers must remember. A computed-then-discarded drawdown
+/// would be one refactor away from being surfaced, and the person doing that
+/// refactor would see a field sitting there looking available.
+///
+/// [`Summary::compute`] calls this, so there is exactly one implementation of
+/// the arithmetic and the two paths cannot drift.
+#[must_use]
+pub fn sharpe_and_shape(
+    equity: &[(Ts, NanoUsd)],
+    bars_per_year: f64,
+) -> (Option<f64>, ReturnShape) {
+    // Per-bar simple returns for the naive Sharpe.
+    let mut rets = Vec::with_capacity(equity.len().saturating_sub(1));
+    for w in equity.windows(2) {
+        let prev = nano_usd_to_f64(w[0].1);
+        let curr = nano_usd_to_f64(w[1].1);
+        if prev > 0.0 {
+            rets.push(curr / prev - 1.0);
+        }
+    }
+    let sharpe_naive = sharpe(&rets, bars_per_year);
+    let return_shape = ReturnShape::of(&rets);
+    (sharpe_naive, return_shape)
 }
 
 /// The shape of the return series a naive Sharpe was computed on.
