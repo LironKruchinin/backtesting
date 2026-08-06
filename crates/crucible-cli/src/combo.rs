@@ -294,7 +294,7 @@ pub(crate) fn collect_events_for(
 pub(crate) fn collect_events_in_window(
     loaded: &LoadedConfig,
     instrument: &str,
-    window: Option<TsRange>,
+    window: Option<PooledWindow>,
 ) -> Result<Series, (i32, String)> {
     match &loaded.file.data {
         DataSource::Synthetic {
@@ -918,6 +918,29 @@ mod tests {
     }
 }
 
+/// What a pooled contract's replay may READ, and what it may JUDGE.
+///
+/// Two ranges rather than one plus a bar count, because they answer different
+/// questions and D-0121 rules that the distinction stays in the type: a
+/// signature that conflated them would be the seam where it gets lost.
+///
+/// - `lead_in` is what the feed reads. It reaches back into **this contract's
+///   own** curated history so the grid's warmup is consumed before the
+///   evaluation window opens. It starts at the epoch rather than at a computed
+///   lookback, which makes D-0121's first condition structural instead of
+///   arithmetic: a single instrument's partition contains no other contract's
+///   bars, so warming on the outgoing contract's series — stitching, and
+///   D-0076 territory — is not expressible here rather than merely avoided.
+/// - `evaluation` is the front window, and governs evaluation, session counting
+///   and trade attribution. Nothing widens it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PooledWindow {
+    /// Bars the feed may read: this contract's history up to the window's end.
+    pub lead_in: TsRange,
+    /// The front window, which governs what may be judged.
+    pub evaluation: TsRange,
+}
+
 /// The evaluation range a curated replay reads, and the label that names it.
 ///
 /// **This is C4b-i's seam**, extracted so it can be tested without an archive.
@@ -943,22 +966,26 @@ mod tests {
 fn eval_range(
     config_start: &str,
     config_end: &str,
-    window: Option<TsRange>,
+    window: Option<PooledWindow>,
 ) -> Result<(TsRange, String), (i32, String)> {
     match window {
         // Passed through untouched. The label carries the exact instants
         // beside the readable span, because the whole point is that the
         // boundary is not a date: a label reading only "2024-03-08..2024-06-07"
         // is what the discarded round trip looked like from the outside.
-        Some(range) => {
+        Some(w) => {
+            // The READ range is the lead-in; the label names the EVALUATION
+            // window, because that is what governs the result. Labelling the
+            // read range would report a span reaching back to the contract's
+            // first bar, which is not the window anything was judged on.
             let label = format!(
-                "{}..{} front window (exact {}ns..{}ns)",
-                date_of(range.start_ts()),
-                date_of(range.end_ts()),
-                range.start_ts().0,
-                range.end_ts().0
+                "{}..{} front window (exact {}ns..{}ns), read from this contract's own history                  for warmup",
+                date_of(w.evaluation.start_ts()),
+                date_of(w.evaluation.end_ts()),
+                w.evaluation.start_ts().0,
+                w.evaluation.end_ts().0
             );
-            Ok((range, label))
+            Ok((w.lead_in, label))
         }
         None => {
             let s = parse_civil_date(config_start).ok_or_else(|| {
@@ -1007,7 +1034,14 @@ mod eval_range_tests {
     #[test]
     fn a_front_window_override_reaches_the_feed_unrounded() {
         let w = front_window();
-        let (range, label) = eval_range("2024-01-01", "2024-04-01", Some(w)).expect("valid");
+        // lead_in == evaluation here: a contract needing no lead-in is a
+        // legitimate window, and it keeps this test about ROUNDING rather than
+        // about the split, which the next test covers.
+        let pw = PooledWindow {
+            lead_in: w,
+            evaluation: w,
+        };
+        let (range, label) = eval_range("2024-01-01", "2024-04-01", Some(pw)).expect("valid");
 
         assert_eq!(range, w, "the front window must arrive unmodified");
         assert_eq!(
@@ -1067,5 +1101,44 @@ mod eval_range_tests {
         let err = eval_range("2024-01", "2024-02-01", None).expect_err("refused");
         assert_eq!(err.0, EXIT_USAGE);
         assert!(err.1.contains("data.start"));
+    }
+}
+
+#[cfg(test)]
+mod pooled_window_tests {
+    use super::*;
+
+    /// The feed reads the LEAD-IN and the label names the EVALUATION window,
+    /// and the two must not be confused (D-0121's third condition).
+    ///
+    /// Labelling the read range would report a span reaching back to the
+    /// contract's first bar — a window nothing was judged on — which is exactly
+    /// the misreport a single-range signature would have made unavoidable.
+    #[test]
+    fn the_read_range_is_the_lead_in_and_the_label_names_the_evaluation_window() {
+        let roll = Ts(1_709_920_800_000_000_000);
+        let evaluation = TsRange::new(roll.plus_ns(1), roll.plus_ns(90 * 86_400 * 1_000_000_000))
+            .expect("range");
+        let lead_in = TsRange::new(Ts(0), evaluation.end_ts()).expect("range");
+        let (range, label) = eval_range(
+            "2024-01-01",
+            "2024-04-01",
+            Some(PooledWindow {
+                lead_in,
+                evaluation,
+            }),
+        )
+        .expect("valid");
+
+        assert_eq!(range, lead_in, "the feed reads the lead-in");
+        assert_ne!(range, evaluation, "which is not the evaluation window");
+        assert!(
+            label.contains(&evaluation.start_ts().0.to_string()),
+            "the label states the evaluation window's own instant: {label}"
+        );
+        assert!(
+            !label.contains("1970"),
+            "and never the lead-in's epoch start, which nothing was judged on: {label}"
+        );
     }
 }

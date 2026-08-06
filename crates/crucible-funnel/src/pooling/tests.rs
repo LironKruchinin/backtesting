@@ -268,6 +268,7 @@ fn evaluation(
         front_window_days: (front.0..=front.1).collect(),
         oos_day_keys: oos.to_vec(),
         oos_trades: trades,
+        insufficient_warmup: None,
         folds,
         fold_needs_sessions: 36,
     }

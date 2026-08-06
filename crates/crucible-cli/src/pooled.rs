@@ -42,7 +42,7 @@ use crucible_data::continuous::{ContinuousError, RollTable, read_roll_table};
 use crucible_data::ingest::window::{civil_from_days, days_from_civil};
 use crucible_funnel::walkforward::{FoldPlan, FoldSpec};
 
-use crate::combo::{Series, collect_events_in_window};
+use crate::combo::{PooledWindow, Series, collect_events_in_window};
 use crate::config::LoadedConfig;
 use crate::pull::{EXIT_USAGE, data_dir};
 
@@ -63,6 +63,11 @@ pub(crate) struct PooledContractPlan {
     pub day_keys: Vec<i64>,
     /// Distinct trading-day keys of the front window, ascending.
     pub front_window_days: Vec<i64>,
+    /// Warmup bars this contract's OWN curated history supplied before its
+    /// front window opened, and what the grid needed — `Some` only when it
+    /// fell short, in which case nothing else here is meaningful and the
+    /// contract is skipped with a count (D-0121).
+    pub insufficient_warmup: Option<(usize, usize)>,
     /// The trailing trading day the **window** cut, dropped from evaluation —
     /// or `None` when the window ended on a session close, which is what a
     /// roll boundary does.
@@ -245,7 +250,47 @@ pub(crate) fn plan_pool(
         // the roll date went wholesale to the incoming contract: exactly the
         // silent off-by-one `front_window`'s own doc is about, reintroduced one
         // layer above the function that was careful about it.
-        let series = collect_events_in_window(loaded, instrument, Some(window))?;
+        //
+        // Read over a LEAD-IN and judged over the front window (D-0121). The
+        // lead-in reaches back into this contract's own curated history so the
+        // grid's warmup is spent BEFORE the evaluation window opens, which is
+        // what makes the pooled session count a property of the pool rather
+        // than of the grid: without it, warmup comes out of the front window
+        // and evaluable sessions fall as indicator periods rise, so "does this
+        // pool clear 250 sessions?" would depend on the Bollinger length.
+        let pooled = PooledWindow {
+            lead_in: TsRange::new(Ts(0), window.end_ts())
+                .map_err(|e| (EXIT_USAGE, format!("{instrument}: lead-in range: {e}")))?,
+            evaluation: window,
+        };
+        let mut series = collect_events_in_window(loaded, instrument, Some(pooled))?;
+
+        // Exactly `needed` bars of warmup, never more and never fewer, so
+        // every contract in the pool enters its evaluation window having
+        // consumed an identical number of bars (§2.6). Trimming the surplus is
+        // what makes that literal rather than approximate.
+        let needed = loaded.grid.max_warmup_bars();
+        let trim = warmup_trim(&series.events, window.start_ts(), needed);
+        let Ok(drop_head) = trim else {
+            let (available, needed) = trim.expect_err("INVARIANT: the Ok arm is bound above");
+            // Skipped, counted, and NOT evaluated on a shorter window. The
+            // alternative D-0121 names and refuses is letting evaluation start
+            // late: that reintroduces the grid-dependence above for exactly the
+            // contracts nearest the chain head, and does it without a count.
+            planned.push(PooledContractPlan {
+                instrument: instrument.clone(),
+                series,
+                day_keys: Vec::new(),
+                front_window_days: Vec::new(),
+                insufficient_warmup: Some((available, needed)),
+                dropped_tail_day: None,
+                dropped_tail_bars: 0,
+                plan: None,
+                fold_needs_sessions: needs,
+            });
+            continue;
+        };
+        series.events.drain(..drop_head);
 
         // The D-0071 device: computed once, here, and read by every consumer.
         let mut day_keys: Vec<i64> = series
@@ -253,7 +298,9 @@ pub(crate) fn plan_pool(
             .iter()
             .map(|event| days_from_civil(calendar.trading_day(event.avail_ts())))
             .collect();
-        let mut front_window_days = day_keys.clone();
+        // The front window's days are the EVALUATION portion only — the first
+        // `needed` bars are warmup and are not sessions this contract offers.
+        let mut front_window_days = day_keys[needed..].to_vec();
         front_window_days.dedup();
 
         // A trading day the WINDOW cut is dropped and counted — the symmetric
@@ -280,7 +327,6 @@ pub(crate) fn plan_pool(
         // in the flattering direction. Dropping it here makes the property
         // something the code enforces rather than something re-measured every
         // time data lands.
-        let mut series = series;
         let (dropped_tail_day, dropped_tail_bars) =
             match trailing_fragment(&calendar, window, &day_keys) {
                 Some((day, bars)) => {
@@ -298,12 +344,15 @@ pub(crate) fn plan_pool(
         // `None` rather than refused: the pool reports it as skipped with a
         // count, and a deliberately short contract is a legitimate member of a
         // pool that simply contributes nothing (D-0119).
-        let plan = FoldPlan::build(&day_keys, loaded.grid.max_warmup_bars(), fold_spec).ok();
+        // `needed` bars of warmup sit at the head of `day_keys`, so the fold
+        // plan's evaluation window opens exactly at `front_start` — never late.
+        let plan = FoldPlan::build(&day_keys, needed, fold_spec).ok();
         planned.push(PooledContractPlan {
             instrument: instrument.clone(),
             series,
             day_keys,
             front_window_days,
+            insufficient_warmup: None,
             dropped_tail_day,
             dropped_tail_bars,
             plan,
@@ -424,5 +473,116 @@ mod trailing_fragment_tests {
             trailing_fragment(&cal, window, &[key - 3, key - 1, key]),
             Some((key, 1))
         );
+    }
+}
+
+/// Leading bars to drop so that **exactly** `needed` warmup bars precede
+/// `front_start`.
+///
+/// `Ok(drop)` when this contract's own history can supply the warmup;
+/// `Err((available, needed))` when it cannot, which is a skip and never a
+/// shortened evaluation window (D-0121).
+///
+/// Trimming the surplus rather than keeping it is what makes §2.6 literal
+/// across a pool: every contract enters its evaluation window having consumed
+/// an identical number of bars, so no contract's indicators are warmer than
+/// another's. And because the warmup sits at the head, `FoldPlan::build`'s
+/// evaluation window opens exactly at `front_start` — never late, which is the
+/// third option D-0121 names and refuses.
+///
+/// Separated from [`plan_pool`] so it is testable without an archive, for the
+/// same reason [`crate::combo::eval_range`] was: the planner needs a
+/// `LoadedConfig` and curated Parquet, and a check that runs only against the
+/// archive is a check nobody runs.
+fn warmup_trim(
+    events: &[MarketEvent],
+    front_start: Ts,
+    needed: usize,
+) -> Result<usize, (usize, usize)> {
+    let available = events.partition_point(|event| event.avail_ts() < front_start);
+    if available < needed {
+        return Err((available, needed));
+    }
+    Ok(available - needed)
+}
+
+#[cfg(test)]
+mod warmup_trim_tests {
+    use super::*;
+    use crucible_data::SyntheticFeed;
+
+    /// 1,000 bars; `front_start` is bar 500's availability, so 500 bars of
+    /// history precede the evaluation window.
+    fn bars() -> Vec<MarketEvent> {
+        let mut feed = SyntheticFeed::random_walk(
+            7,
+            1_000,
+            TimeFrame::M1,
+            Price::from_points_str("4500").expect("price"),
+            Price::from_points_str("0.25").expect("tick"),
+            4,
+        );
+        std::iter::from_fn(|| feed.next_event()).collect()
+    }
+
+    /// **The converse, written first.** A contract with ample lead-in must lose
+    /// NOTHING from its evaluation window. Without this, a lead-in that
+    /// silently shortened every contract — or one that dropped the whole
+    /// history — passes the skip test below while being wrong everywhere, which
+    /// is the failure shape the D4 and trailing-fragment converses both caught.
+    #[test]
+    fn ample_lead_in_costs_the_evaluation_window_nothing() {
+        let events = bars();
+        let front_start = events[500].avail_ts();
+        let drop = warmup_trim(&events, front_start, 10).expect("ample");
+        assert_eq!(drop, 490, "490 surplus, keeping exactly 10");
+
+        let kept = &events[drop..];
+        let still_before = kept.partition_point(|e| e.avail_ts() < front_start);
+        assert_eq!(still_before, 10, "exactly the warmup the grid asked for");
+        assert_eq!(
+            kept.len() - still_before,
+            events.len() - 500,
+            "every evaluation bar survives — the trim touches the head only"
+        );
+    }
+
+    /// Condition 2, asserted directly: evaluation opens exactly at
+    /// `front_start`, which is what lets `FoldPlan` treat the head as warmup.
+    #[test]
+    fn evaluation_opens_exactly_at_front_start_not_at_warmup_end() {
+        let events = bars();
+        let front_start = events[500].avail_ts();
+        let drop = warmup_trim(&events, front_start, 40).expect("ample");
+        let kept = &events[drop..];
+        assert_eq!(
+            kept[40].avail_ts(),
+            front_start,
+            "the bar after the warmup IS the front window's first bar"
+        );
+    }
+
+    /// A contract whose own history is too short is refused, with both numbers,
+    /// rather than evaluated on a window shortened by the difference.
+    #[test]
+    fn a_short_history_is_a_skip_carrying_both_numbers() {
+        let events = bars();
+        let front_start = events[500].avail_ts();
+        assert_eq!(warmup_trim(&events, front_start, 600), Err((500, 600)));
+        // The chain head, measured: ESM2010 has zero bars before its front
+        // window, because its curated data and its front window both begin
+        // 2010-06-06.
+        let none_before = events[0].avail_ts();
+        assert_eq!(warmup_trim(&events, none_before, 40), Err((0, 40)));
+    }
+
+    /// The exact boundary: enough and not one bar more is enough, and drops
+    /// nothing. An off-by-one here would skip a contract that qualifies.
+    #[test]
+    fn exactly_enough_history_qualifies_and_drops_nothing() {
+        let events = bars();
+        let front_start = events[500].avail_ts();
+        assert_eq!(warmup_trim(&events, front_start, 500), Ok(0));
+        assert_eq!(warmup_trim(&events, front_start, 501), Err((500, 501)));
     }
 }

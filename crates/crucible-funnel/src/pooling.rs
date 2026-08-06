@@ -222,6 +222,18 @@ pub enum SkipReason {
         /// Sessions one fold needs: `train_days + test_days`.
         needed: usize,
     },
+    /// Its **own** curated history could not supply the grid's warmup, so the
+    /// front window could only be evaluated by spending part of itself on
+    /// warmup — which is the coupling D-0121 exists to remove (evaluable
+    /// sessions would fall as the grid's warmup rose). Skipped rather than
+    /// evaluated on a shorter window, and never warmed on the previous
+    /// contract's bars, which would be stitching (D-0076).
+    InsufficientWarmup {
+        /// Bars this contract had before its front window opened.
+        available: usize,
+        /// Bars the grid's widest indicator needs (§2.6).
+        needed: usize,
+    },
 }
 
 impl std::fmt::Display for SkipReason {
@@ -230,6 +242,11 @@ impl std::fmt::Display for SkipReason {
             Self::NoCompleteFold { sessions, needed } => write!(
                 f,
                 "{sessions} front-month session(s), but one fold needs {needed}"
+            ),
+            Self::InsufficientWarmup { available, needed } => write!(
+                f,
+                "{available} bar(s) of its own history before the front window, \
+                 but the grid's warmup needs {needed}"
             ),
         }
     }
@@ -252,6 +269,11 @@ pub struct ContractEvaluation {
     pub oos_day_keys: Vec<i64>,
     /// Round-trips closed in those out-of-sample windows.
     pub oos_trades: usize,
+    /// Warmup bars this contract's OWN curated history supplied before its
+    /// front window opened, and what the grid needed — `Some` only when it
+    /// fell short (D-0121). Judged before `folds`, because a contract that
+    /// cannot warm up never got a fold plan to begin with.
+    pub insufficient_warmup: Option<(usize, usize)>,
     /// Complete folds the front window fitted. Zero means the contract is
     /// skipped and contributes nothing.
     pub folds: usize,
@@ -394,6 +416,16 @@ pub fn pool_evaluations(
     let mut evaluated: Vec<&ContractEvaluation> = Vec::new();
 
     for contract in contracts {
+        // Judged before the fold check: a contract whose own history cannot
+        // supply the grid's warmup never got a fold plan, so `folds == 0`
+        // would report the wrong reason for the right skip (D-0121).
+        if let Some((available, needed)) = contract.insufficient_warmup {
+            skipped.push((
+                contract.instrument.clone(),
+                SkipReason::InsufficientWarmup { available, needed },
+            ));
+            continue;
+        }
         if contract.folds == 0 {
             skipped.push((
                 contract.instrument.clone(),
