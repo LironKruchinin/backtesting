@@ -422,8 +422,36 @@ pub fn pool_evaluations(
     // out-of-sample days are already broken up by its training windows, and
     // reporting those would bury the hole that matters — a contract missing
     // from the middle of the pool.
+    //
+    // Scanned in TIME order, which is not the order the contracts arrived in.
+    // A pool is a *set*: the sequence they were typed into the config is not a
+    // fact about the market, and until this sort existed the scan inherited it.
+    // Declared newest-first, `first > last + 1` never held and a genuine hole
+    // rendered as "contiguous" — the honesty device reporting the opposite of
+    // the truth. Declared out of sequence, it invented a hole that another
+    // contract covered.
+    //
+    // The key is a total order — (first day, last day, symbol) — rather than
+    // the first day alone, so the answer cannot depend on the input order even
+    // when two contracts share a first day. Ties broken by a stable sort on
+    // declaration order would still be deterministic, but only because the
+    // input was; §2.2 wants the result to be independent of it.
+    //
+    // `per_contract` deliberately keeps declaration order: it is a report of
+    // what was asked for, not a set, exactly as `pool_sessions` treats its own.
+    let mut chronological = evaluated.clone();
+    chronological.sort_by(|a, b| {
+        let key = |c: &&ContractEvaluation| {
+            (
+                c.front_window_days[0],
+                *c.front_window_days.last().expect("nonempty checked"),
+                c.instrument.clone(),
+            )
+        };
+        key(a).cmp(&key(b))
+    });
     let mut gaps = Vec::new();
-    for pair in evaluated.windows(2) {
+    for pair in chronological.windows(2) {
         let (before, after) = (pair[0], pair[1]);
         let last = *before.front_window_days.last().expect("nonempty checked");
         let first = *after.front_window_days.first().expect("nonempty checked");

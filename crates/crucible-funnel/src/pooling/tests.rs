@@ -451,3 +451,92 @@ fn unequal_contracts_are_summed_from_measurement_not_extrapolated() {
         "N x the first contract's count is not the pooled count"
     );
 }
+
+/// A pool is a **set** of contracts, and the order they were typed into a
+/// config is not a fact about the market. The gap scan walks consecutive front
+/// windows, so it has to walk them in *time* order — and until C4b-i it walked
+/// them in declaration order.
+///
+/// This is the control `pool_evaluations` did not have while
+/// `the_pooled_count_is_deterministic_and_order_independent` covered
+/// `pool_sessions`. The asymmetry is how the defect survived: the arithmetic
+/// was order-independent and the reporting built on it was not.
+#[test]
+fn a_hole_is_found_whichever_order_the_pool_is_declared_in() {
+    // ESH 10..=13, ESM 14..=17, ESU 30..=33 — one hole, days 18..=29.
+    let h = evaluation("ESH2024", (10, 13), &[12, 13], 4, 1);
+    let m = evaluation("ESM2024", (14, 17), &[16, 17], 4, 1);
+    let u = evaluation("ESU2024", (30, 33), &[32, 33], 4, 1);
+
+    let forward = pool_evaluations(&[h.clone(), m.clone(), u.clone()]).expect("poolable");
+    let reversed = pool_evaluations(&[u.clone(), m.clone(), h.clone()]).expect("poolable");
+    let shuffled = pool_evaluations(&[m, u, h]).expect("poolable");
+
+    assert_eq!(
+        forward.gaps, reversed.gaps,
+        "reversing must not hide a hole"
+    );
+    assert_eq!(forward.gaps, shuffled.gaps, "nor must shuffling");
+    assert_eq!(forward.gaps.len(), 1);
+    assert_eq!(forward.gaps[0].from_day, 18);
+    assert_eq!(forward.gaps[0].to_day, 29);
+    assert_eq!(forward.gaps[0].days(), 12);
+    // The bound contracts are named in TIME order too. A gap reported as
+    // "between ESU2024 and ESM2024" would be a hole running backwards.
+    assert_eq!(
+        forward.gaps[0].between,
+        ("ESM2024".to_owned(), "ESU2024".to_owned())
+    );
+    assert_eq!(reversed.gaps[0].between, forward.gaps[0].between);
+    assert!(!reversed.is_contiguous());
+    assert!(
+        !reversed.render().contains("contiguous"),
+        "the render is the honesty device; declaring backwards must not silence it"
+    );
+}
+
+/// The converse, and it is the one that makes the test above mean something:
+/// a scan that reported a hole for every out-of-order pool would pass that
+/// test while being useless. A genuinely contiguous pool declared backwards
+/// has no hole and says so.
+#[test]
+fn a_contiguous_pool_declared_out_of_order_invents_no_hole() {
+    let h = evaluation("ESH2024", (10, 13), &[12, 13], 4, 1);
+    let m = evaluation("ESM2024", (14, 17), &[16, 17], 4, 1);
+
+    let forward = pool_evaluations(&[h.clone(), m.clone()]).expect("poolable");
+    let reversed = pool_evaluations(&[m, h]).expect("poolable");
+
+    assert!(
+        forward.gaps.is_empty(),
+        "14 follows 13 with nothing missing"
+    );
+    assert!(
+        reversed.gaps.is_empty(),
+        "and reversing does not create one"
+    );
+    assert!(reversed.is_contiguous());
+    assert!(reversed.render().contains("contiguous"));
+}
+
+/// Sorting the gap scan must not reorder the report. `per_contract` follows
+/// declaration order because it echoes what the config asked for — the same
+/// split `the_pooled_count_is_deterministic_and_order_independent` asserts for
+/// `pool_sessions`.
+#[test]
+fn sorting_the_gap_scan_leaves_the_per_contract_report_in_declaration_order() {
+    let h = evaluation("ESH2024", (10, 13), &[12, 13], 4, 1);
+    let m = evaluation("ESM2024", (14, 17), &[16, 17], 4, 1);
+
+    let forward = pool_evaluations(&[h.clone(), m.clone()]).expect("poolable");
+    let reversed = pool_evaluations(&[m, h]).expect("poolable");
+
+    let names = |p: &PooledEvaluation| -> Vec<String> {
+        p.per_contract.iter().map(|(s, _, _)| s.clone()).collect()
+    };
+    assert_eq!(names(&forward), ["ESH2024", "ESM2024"]);
+    assert_eq!(names(&reversed), ["ESM2024", "ESH2024"]);
+    // The pooled numbers themselves are order-independent, as they must be.
+    assert_eq!(forward.oos_sessions, reversed.oos_sessions);
+    assert_eq!(forward.oos_trades, reversed.oos_trades);
+}
