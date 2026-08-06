@@ -627,8 +627,8 @@ fn print_report(
             c.label,
             c.assessment.verdict,
             c.assessment.decided_at,
-            c.costed.oos_pooled.total_return_pct,
-            c.costed.oos_pooled.round_trips,
+            c.costed.oos_stitched.total_return_pct,
+            c.costed.oos_stitched.round_trips,
             control_gap(c, 0),
             control_gap(c, 1),
         );
@@ -645,12 +645,12 @@ fn print_report(
             print!(
                 "  {}t {:+.2}%",
                 level.ticks(),
-                level.oos_pooled.total_return_pct
+                level.oos_stitched.total_return_pct
             );
         }
         println!("  |  free_fills {:+.2}%", c.free_fill_oos.total_return_pct);
         for control in &c.controls {
-            match &control.oos_pooled {
+            match &control.oos_stitched {
                 Some(s) => println!(
                     "    {:<22} {:+.2}%{}  — this combo beat {} of {} draw(s)",
                     control.name,
@@ -690,7 +690,7 @@ fn print_report(
 fn control_gap(c: &ComboOutcome, which: usize) -> String {
     c.controls[which].return_pct().map_or_else(
         || "ABSENT".to_owned(),
-        |control| format!("{:+.2}%", c.costed.oos_pooled.total_return_pct - control),
+        |control| format!("{:+.2}%", c.costed.oos_stitched.total_return_pct - control),
     )
 }
 
@@ -725,13 +725,13 @@ fn verdict_hash(report: &FunnelReport) -> u64 {
             h.write_i64(i64::from(byte));
         }
         h.write_i64(i64_of(c.oos_sessions));
-        hash_f64(&mut h, Some(c.costed.oos_pooled.total_return_pct));
-        hash_f64(&mut h, c.costed.oos_pooled.sharpe_naive);
+        hash_f64(&mut h, Some(c.costed.oos_stitched.total_return_pct));
+        hash_f64(&mut h, c.costed.oos_stitched.sharpe_naive);
         hash_f64(&mut h, Some(c.free_fill_oos.total_return_pct));
         for level in &c.sweep {
             h.write_i64(level.half_ticks);
-            hash_f64(&mut h, Some(level.oos_pooled.total_return_pct));
-            hash_f64(&mut h, level.oos_pooled.sharpe_naive);
+            hash_f64(&mut h, Some(level.oos_stitched.total_return_pct));
+            hash_f64(&mut h, level.oos_stitched.sharpe_naive);
         }
         for control in &c.controls {
             hash_f64(&mut h, control.return_pct());

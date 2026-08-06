@@ -323,25 +323,25 @@ fn the_out_of_sample_headline_excludes_the_training_windows() {
     let combo = &report.combos[0];
 
     assert_eq!(dollars(combo.whole_run.final_equity_nano_usd), 100_550);
-    assert_eq!(dollars(combo.oos_pooled.final_equity_nano_usd), 100_150);
+    assert_eq!(dollars(combo.oos_stitched.final_equity_nano_usd), 100_150);
     assert_eq!(
         dollars(combo.whole_run.final_equity_nano_usd)
-            - dollars(combo.oos_pooled.final_equity_nano_usd),
+            - dollars(combo.oos_stitched.final_equity_nano_usd),
         400,
         "the difference is exactly day 2's training-window round-trip"
     );
 
     // Three round-trips out of sample, two of them winners: +$100, −$150,
     // +$200.
-    assert_eq!(combo.oos_pooled.round_trips, 3);
-    assert_eq!(combo.oos_pooled.win_rate, Some(2.0 / 3.0));
+    assert_eq!(combo.oos_stitched.round_trips, 3);
+    assert_eq!(combo.oos_stitched.win_rate, Some(2.0 / 3.0));
 
     // The pooled out-of-sample drawdown runs from the $100,500 mark at bar 32
     // to the $99,950 trough at bar 45: 550/100,500 = 0.547263681592039…%.
     assert!(
-        (combo.oos_pooled.max_drawdown_pct - 100.0 * 550.0 / 100_500.0).abs() < 1e-9,
+        (combo.oos_stitched.max_drawdown_pct - 100.0 * 550.0 / 100_500.0).abs() < 1e-9,
         "{}",
-        combo.oos_pooled.max_drawdown_pct
+        combo.oos_stitched.max_drawdown_pct
     );
 
     // The training windows union to bars 6..54, anchored at bar 5: $100,000
@@ -499,16 +499,16 @@ fn two_runs_are_bit_identical() {
     for (x, y) in a.combos.iter().zip(&b.combos) {
         assert_eq!(x.id, y.id);
         assert_eq!(
-            x.oos_pooled.final_equity_nano_usd,
-            y.oos_pooled.final_equity_nano_usd
+            x.oos_stitched.final_equity_nano_usd,
+            y.oos_stitched.final_equity_nano_usd
         );
         assert_eq!(
-            x.oos_pooled.sharpe_naive.map(f64::to_bits),
-            y.oos_pooled.sharpe_naive.map(f64::to_bits)
+            x.oos_stitched.sharpe_naive.map(f64::to_bits),
+            y.oos_stitched.sharpe_naive.map(f64::to_bits)
         );
         assert_eq!(
-            x.oos_pooled.max_drawdown_pct.to_bits(),
-            y.oos_pooled.max_drawdown_pct.to_bits()
+            x.oos_stitched.max_drawdown_pct.to_bits(),
+            y.oos_stitched.max_drawdown_pct.to_bits()
         );
         for (fx, fy) in x.folds.iter().zip(&y.folds) {
             assert_eq!(
@@ -953,17 +953,17 @@ fn the_parallel_scheduler_agrees_with_the_serial_one() {
         assert_eq!(s.id, p.id, "grid-index order, not completion order");
         assert_eq!(s.label, p.label);
         assert_eq!(
-            s.oos_pooled.final_equity_nano_usd,
-            p.oos_pooled.final_equity_nano_usd
+            s.oos_stitched.final_equity_nano_usd,
+            p.oos_stitched.final_equity_nano_usd
         );
         assert_eq!(
-            s.oos_pooled.sharpe_naive.map(f64::to_bits),
-            p.oos_pooled.sharpe_naive.map(f64::to_bits),
+            s.oos_stitched.sharpe_naive.map(f64::to_bits),
+            p.oos_stitched.sharpe_naive.map(f64::to_bits),
             "bit-identical, not approximately equal (§2.2)"
         );
         assert_eq!(
-            s.oos_pooled.max_drawdown_pct.to_bits(),
-            p.oos_pooled.max_drawdown_pct.to_bits()
+            s.oos_stitched.max_drawdown_pct.to_bits(),
+            p.oos_stitched.max_drawdown_pct.to_bits()
         );
         assert_eq!(s.folds.len(), p.folds.len());
         for (a, b) in s.folds.iter().zip(&p.folds) {

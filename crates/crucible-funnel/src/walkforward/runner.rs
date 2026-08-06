@@ -88,7 +88,7 @@ pub struct ComboWalkForward {
     /// Per-fold in-sample and out-of-sample statistics.
     pub folds: Vec<FoldResult>,
     /// The headline: every test window pooled, and nothing else.
-    pub oos_pooled: Summary,
+    pub oos_stitched: Summary,
     /// Every training window pooled. A diagnostic, never a headline — the
     /// combos were chosen by a human looking at something, and this is the
     /// sample they looked at.
@@ -362,7 +362,7 @@ impl<'a, M: FillModel + Clone> GridRun<'a, M> {
             .collect();
 
         let test_windows: Vec<_> = plan.folds().iter().map(|f| f.test.bars.clone()).collect();
-        let oos_pooled = trace.pooled(&test_windows, cash, per_year);
+        let oos_stitched = trace.pooled(&test_windows, cash, per_year);
         // Training windows overlap between folds under both schemes, so they
         // are pooled as the union rather than concatenated — a bar that
         // appears in three folds' training samples is still one bar.
@@ -386,7 +386,7 @@ impl<'a, M: FillModel + Clone> GridRun<'a, M> {
             suppressed_intents: strategy.suppressed_intents(),
             conflicting_signals: strategy.inner().conflicting_signals(),
             folds,
-            oos_pooled,
+            oos_stitched,
             is_pooled,
             whole_run: result.summary.clone(),
             cancelled_at_eof: result.cancelled_at_eof,

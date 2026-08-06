@@ -329,7 +329,7 @@ fn print_oos_table(report: &WalkForwardReport) {
         "combo", "parameters", "OOS return", "max DD", "trades", "Sharpe", "win%", "whole-run"
     );
     for c in &report.combos {
-        let s = &c.oos_pooled;
+        let s = &c.oos_stitched;
         println!(
             "  {:>5}  {:<34} {:>9.2}% {:>8.2}% {:>7} {} {} {:>10.2}%",
             c.id.combo_index,
@@ -435,7 +435,7 @@ fn report_hash(plan: &FoldPlan, report: &WalkForwardReport) -> u64 {
             hash_summary(&mut h, &r.is);
             hash_summary(&mut h, &r.oos);
         }
-        hash_summary(&mut h, &c.oos_pooled);
+        hash_summary(&mut h, &c.oos_stitched);
         hash_summary(&mut h, &c.is_pooled);
         hash_summary(&mut h, &c.whole_run);
     }

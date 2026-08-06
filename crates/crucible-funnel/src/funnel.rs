@@ -129,7 +129,7 @@ pub struct CostLevel {
     /// Half-spread, in half-ticks (`0 / 1 / 2 / 4`).
     pub half_ticks: i64,
     /// Pooled out-of-sample statistics at that level.
-    pub oos_pooled: Summary,
+    pub oos_stitched: Summary,
 }
 
 impl CostLevel {
@@ -163,11 +163,11 @@ pub struct Control {
     ///
     /// For the random-entry control this is the **median draw** by pooled
     /// out-of-sample return, not a single draw — see [`RANDOM_ENTRY_DRAWS`].
-    pub oos_pooled: Option<Summary>,
+    pub oos_stitched: Option<Summary>,
     /// Why it is absent, when it is. An absent control is reported as absent
     /// and fails its criterion — it never renders as a zero.
     pub absent_because: Option<String>,
-    /// The seed of the draw that produced [`Control::oos_pooled`]. `None` for
+    /// The seed of the draw that produced [`Control::oos_stitched`]. `None` for
     /// the deterministic buy-and-hold control, which has nothing to draw.
     pub seed: Option<u64>,
     /// Draws taken. 1 for a deterministic control.
@@ -186,7 +186,7 @@ impl Control {
     /// Pooled out-of-sample return, or `None` if the control is absent.
     #[must_use]
     pub fn return_pct(&self) -> Option<f64> {
-        self.oos_pooled.as_ref().map(|s| s.total_return_pct)
+        self.oos_stitched.as_ref().map(|s| s.total_return_pct)
     }
 }
 
@@ -258,7 +258,7 @@ pub struct FunnelReport {
 fn sharpe_dispersion(combos: &[ComboWalkForward]) -> Option<f64> {
     let sharpes: Vec<f64> = combos
         .iter()
-        .filter_map(|c| c.oos_pooled.sharpe_naive)
+        .filter_map(|c| c.oos_stitched.sharpe_naive)
         .filter(|s| s.is_finite())
         .collect();
     if sharpes.len() < 2 {
@@ -561,7 +561,7 @@ pub fn run_funnel(
             .iter()
             .map(|&half_ticks| CostLevel {
                 half_ticks,
-                oos_pooled: pooled_of(
+                oos_stitched: pooled_of(
                     &replay(
                         inputs,
                         index,
@@ -576,19 +576,19 @@ pub fn run_funnel(
         // Step 5: the controls, under the declared costs.
         let controls = [
             random_entry_control(inputs, &costed, &test_windows),
-            buy_and_hold_control(inputs, &test_windows, costed.oos_pooled.total_return_pct),
+            buy_and_hold_control(inputs, &test_windows, costed.oos_stitched.total_return_pct),
         ];
 
         let evidence = Evidence {
-            oos_trades: costed.oos_pooled.round_trips,
+            oos_trades: costed.oos_stitched.round_trips,
             oos_sessions,
             free_fill_return_pct: free_fill_oos.total_return_pct,
-            costed_return_pct: costed.oos_pooled.total_return_pct,
-            costed_sharpe: costed.oos_pooled.sharpe_naive,
+            costed_return_pct: costed.oos_stitched.total_return_pct,
+            costed_sharpe: costed.oos_stitched.sharpe_naive,
             sharpe_at_kill_level: sweep
                 .iter()
                 .find(|l| l.half_ticks == inputs.criteria.kill_if_dead_half_ticks)
-                .and_then(|l| l.oos_pooled.sharpe_naive),
+                .and_then(|l| l.oos_stitched.sharpe_naive),
             random_entry_return_pct: controls[0].return_pct(),
             buy_and_hold_return_pct: controls[1].return_pct(),
             // The permutation harness is not wired into the run path yet:
@@ -601,8 +601,8 @@ pub fn run_funnel(
             // with no Sharpe, or with a flat window that has no higher
             // moments, has no deflated Sharpe either, and that is an absence
             // rather than a zero.
-            deflated: costed.oos_pooled.sharpe_naive.and_then(|observed| {
-                let shape = costed.oos_pooled.return_shape;
+            deflated: costed.oos_stitched.sharpe_naive.and_then(|observed| {
+                let shape = costed.oos_stitched.return_shape;
                 crate::stats::deflated::deflated_sharpe(crate::stats::deflated::DeflationInputs {
                     observed_sharpe: deannualize(observed),
                     skew: shape.skew?,
@@ -825,7 +825,7 @@ fn random_entry_control(
     let name = "matched random-entry";
     let absent = |why: String| Control {
         name,
-        oos_pooled: None,
+        oos_stitched: None,
         absent_because: Some(why),
         seed: None,
         draws: 0,
@@ -894,7 +894,7 @@ fn random_entry_control(
             .total_cmp(&b.1.total_return_pct)
             .then(a.0.cmp(&b.0))
     });
-    let strategy_pct = costed.oos_pooled.total_return_pct;
+    let strategy_pct = costed.oos_stitched.total_return_pct;
     let beaten = draws
         .iter()
         .filter(|(_, s)| strategy_pct > s.total_return_pct)
@@ -904,7 +904,7 @@ fn random_entry_control(
     let (seed, median) = draws.swap_remove((RANDOM_ENTRY_DRAWS - 1) / 2);
     Control {
         name,
-        oos_pooled: Some(median),
+        oos_stitched: Some(median),
         absent_because: None,
         seed: Some(seed),
         draws: RANDOM_ENTRY_DRAWS,
@@ -945,7 +945,7 @@ fn buy_and_hold_control(
         // way for both controls rather than being a special case a reader has
         // to remember.
         draws_beaten: usize::from(strategy_pct > oos.total_return_pct),
-        oos_pooled: Some(oos),
+        oos_stitched: Some(oos),
         absent_because: None,
         seed: None,
         draws: 1,

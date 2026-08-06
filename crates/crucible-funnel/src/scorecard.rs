@@ -492,7 +492,7 @@ fn write_verdicts(h: &mut String, report: &FunnelReport) {
          <th>OOS Sharpe</th><th>trades</th><th>sessions</th></tr></thead><tbody>",
     );
     for c in &report.combos {
-        let s = &c.costed.oos_pooled;
+        let s = &c.costed.oos_stitched;
         let _ = write!(
             h,
             "<tr><td>{}</td><td class=\"mono\">{}</td><td><span class=\"verdict {}\">{}</span>\
@@ -573,12 +573,12 @@ fn write_combo(h: &mut String, c: &ComboOutcome, criteria: &Criteria) {
         h,
         "<tr><td><strong>this combo</strong></td><td>{:+.2}%</td><td>{}</td><td>{}</td>\
          <td class=\"dim\">—</td><td class=\"dim\">—</td></tr>",
-        c.costed.oos_pooled.total_return_pct,
-        opt(c.costed.oos_pooled.sharpe_naive),
-        c.costed.oos_pooled.round_trips
+        c.costed.oos_stitched.total_return_pct,
+        opt(c.costed.oos_stitched.sharpe_naive),
+        c.costed.oos_stitched.round_trips
     );
     for control in &c.controls {
-        match &control.oos_pooled {
+        match &control.oos_stitched {
             Some(s) => {
                 let _ = write!(
                     h,
@@ -625,7 +625,7 @@ fn write_combo(h: &mut String, c: &ComboOutcome, criteria: &Criteria) {
          <th>max DD</th><th>OOS Sharpe</th><th>fees</th></tr></thead><tbody>",
     );
     for level in &c.sweep {
-        let s = &level.oos_pooled;
+        let s = &level.oos_stitched;
         let marker = if level.half_ticks == criteria.kill_if_dead_half_ticks {
             " <span class=\"dim\">← kill level</span>"
         } else {
@@ -686,7 +686,7 @@ fn write_combo(h: &mut String, c: &ComboOutcome, criteria: &Criteria) {
 }
 
 fn write_trade_stats(h: &mut String, c: &ComboOutcome) {
-    let s = &c.costed.oos_pooled;
+    let s = &c.costed.oos_stitched;
     let longs = c
         .costed
         .round_trip_bars
@@ -768,7 +768,7 @@ fn sweep_chart(c: &ComboOutcome) -> String {
     let values: Vec<(String, f64)> = c
         .sweep
         .iter()
-        .map(|l| (format!("{}t", l.ticks()), l.oos_pooled.total_return_pct))
+        .map(|l| (format!("{}t", l.ticks()), l.oos_stitched.total_return_pct))
         .collect();
     bar_chart("pooled OOS return by half-spread", &values)
 }
