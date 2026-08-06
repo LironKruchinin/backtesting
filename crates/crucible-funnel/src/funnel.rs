@@ -270,7 +270,15 @@ fn sharpe_dispersion(combos: &[ComboWalkForward]) -> Option<f64> {
     )]
     let n = sharpes.len() as f64;
     let mean = sharpes.iter().sum::<f64>() / n;
-    let variance = sharpes.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / (n - 1.0);
+    // `d * d`, not `powi(2)` (D-0126).
+    let variance = sharpes
+        .iter()
+        .map(|s| {
+            let d = s - mean;
+            d * d
+        })
+        .sum::<f64>()
+        / (n - 1.0);
     let sd = variance.sqrt();
     (sd.is_finite() && sd > 0.0).then_some(sd)
 }

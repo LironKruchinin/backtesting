@@ -175,7 +175,17 @@ impl ReturnShape {
         )]
         let n = rets.len() as f64;
         let mean = rets.iter().sum::<f64>() / n;
-        let m2 = rets.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / n;
+        // `x*x`, not `powi(2)` (D-0126). Squaring has one association, so there is
+        // nothing to choose here — but `powi(2)` still diverges by one ULP on 725 of
+        // 1,512,658 dev samples, because LLVM's -O0 expansion is not a multiply.
+        let m2 = rets
+            .iter()
+            .map(|r| {
+                let d = r - mean;
+                d * d
+            })
+            .sum::<f64>()
+            / n;
         // A flat window has no third or fourth standardized moment: the
         // denominator is zero and every candidate answer is a fabrication.
         // `None` is what this codebase already means by "no opinion" (D-0080),
@@ -223,7 +233,8 @@ impl ReturnShape {
             // third power in the *derivation* rather than the accumulation,
             // and it is no safer for being one line instead of a fold.
             skew: Some(m3 / (sd * sd * sd)),
-            kurtosis: Some(m4 / m2.powi(2)),
+            // `m2 * m2`, not `powi(2)` (D-0126).
+            kurtosis: Some(m4 / (m2 * m2)),
         }
     }
 }
@@ -238,7 +249,15 @@ fn sharpe(rets: &[f64], periods_per_year: f64) -> Option<f64> {
     )]
     let n = rets.len() as f64;
     let mean = rets.iter().sum::<f64>() / n;
-    let var = rets.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0);
+    // `d * d`, not `powi(2)` (D-0126).
+    let var = rets
+        .iter()
+        .map(|r| {
+            let d = r - mean;
+            d * d
+        })
+        .sum::<f64>()
+        / (n - 1.0);
     let sd = var.sqrt();
     if sd == 0.0 {
         return None;

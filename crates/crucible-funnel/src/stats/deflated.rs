@@ -196,7 +196,10 @@ pub fn deflated_sharpe(inputs: DeflationInputs) -> Option<Deflated> {
     }
 
     // The non-normality correction on the Sharpe's variance.
-    let variance = 1.0 - skew * observed_sharpe + (kurtosis - 1.0) / 4.0 * observed_sharpe.powi(2);
+    // `observed_sharpe * observed_sharpe`, not `powi(2)` (D-0126). This site is
+    // inside the estimator D-0122 was written to repair, and D-0122 left it.
+    let variance =
+        1.0 - skew * observed_sharpe + (kurtosis - 1.0) / 4.0 * (observed_sharpe * observed_sharpe);
     if !variance.is_finite() || variance <= 0.0 {
         return None;
     }
@@ -388,7 +391,15 @@ pub fn moments(returns: &[f64]) -> Option<(f64, f64, f64)> {
     }
     let n = returns.len() as f64;
     let mean = returns.iter().sum::<f64>() / n;
-    let variance = returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / n;
+    // `d * d`, not `powi(2)` (D-0126). Also inside D-0122's estimator.
+    let variance = returns
+        .iter()
+        .map(|r| {
+            let d = r - mean;
+            d * d
+        })
+        .sum::<f64>()
+        / n;
     if variance <= 0.0 || !variance.is_finite() {
         return None;
     }
