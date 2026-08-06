@@ -125,6 +125,40 @@ pub struct FunnelInputs<'a> {
     pub now: &'a str,
 }
 
+/// The **per-contract** half of a funnel run's inputs.
+///
+/// Measured rather than guessed at: of everything [`contract_evidence`] and its
+/// three helpers read off [`FunnelInputs`], exactly two things differ between
+/// contracts of one pooled run — the bar series, and the annualization derived
+/// from it. The grid, the spec, the costs, the criteria, the run identity and
+/// the position size are shared by every contract, and a per-contract copy of
+/// any of them would be a second opinion waiting to disagree with the first.
+///
+/// So the split is two fields, not a parallel `FunnelInputs`. That is the whole
+/// bridge C6b needs: a contract's evidence can now be produced from *its own*
+/// series while every shared decision stays in one place.
+///
+/// `bars_per_year` is genuinely per contract and not an oversight —
+/// `crucible combo` measures it from the sample, because real `ohlcv` data has
+/// no bar for an interval that did not trade (D-0038, D-0039), and two
+/// contracts' front windows do not contain the same number of traded minutes.
+/// A pooled run that annualized every contract by the first one's factor would
+/// be scaling each contract's Sharpe by another contract's trading intensity.
+#[derive(Clone, Copy, Debug)]
+/// It carries no `instrument` yet, deliberately. A pooled report must name
+/// which contract a contribution came from, but `FunnelInputs` has no such
+/// field to hand over and adding one would widen a public struct and both its
+/// construction sites inside a commit whose entire claim is that nothing
+/// changed. The symbol arrives in C6b-i-b, from `replay_pool`, which is where
+/// real per-contract identities exist.
+pub struct ContractSeries<'a> {
+    /// This contract's bar series — the same slice its fold plan was built
+    /// from (§2.6).
+    pub events: &'a [MarketEvent],
+    /// Capital and annualization for this contract.
+    pub params: &'a BacktestParams,
+}
+
 /// One level of the mandatory cost-sensitivity sweep.
 #[derive(Clone, Debug)]
 pub struct CostLevel {
@@ -364,13 +398,17 @@ struct ContractEvidence {
 /// every one of them is genuinely per contract.
 fn contract_evidence(
     inputs: &FunnelInputs<'_>,
+    contract: ContractSeries<'_>,
     index: usize,
     costed: &ComboWalkForward,
     test_windows: &[Range<usize>],
 ) -> ContractEvidence {
     // Step 3: the S1 screen, cost-free. The only sanctioned FreeFills use.
-    let (free_fill_oos, free_fill_oos_stats) =
-        pooled_of(&replay(inputs, index, &mut FreeFills), inputs, test_windows);
+    let (free_fill_oos, free_fill_oos_stats) = pooled_of(
+        &replay(inputs, contract, index, &mut FreeFills),
+        contract,
+        test_windows,
+    );
 
     // Step 4: the mandatory sweep.
     let sweep: Vec<CostLevel> = inputs
@@ -381,10 +419,11 @@ fn contract_evidence(
             let (oos_stitched, oos_stitched_stats) = pooled_of(
                 &replay(
                     inputs,
+                    contract,
                     index,
                     &mut inputs.costs.at_half_ticks(half_ticks, inputs.spec.tick),
                 ),
-                inputs,
+                contract,
                 test_windows,
             );
             CostLevel {
@@ -397,8 +436,13 @@ fn contract_evidence(
 
     // Step 5: the controls, under the declared costs.
     let controls = [
-        random_entry_control(inputs, costed, test_windows),
-        buy_and_hold_control(inputs, test_windows, costed.oos_stitched.total_return_pct),
+        random_entry_control(inputs, contract, costed, test_windows),
+        buy_and_hold_control(
+            inputs,
+            contract,
+            test_windows,
+            costed.oos_stitched.total_return_pct,
+        ),
     ];
 
     ContractEvidence {
@@ -896,6 +940,19 @@ pub fn run_funnel(
     let (deannualize, trial_sharpe_dispersion) =
         deflation_units(inputs.params.bars_per_year, trial_sharpe_dispersion);
 
+    // The one contract this build replays, in the shape a pool takes. D-0117
+    // refuses every `[pooling]` config, so a funnel run has exactly one — and
+    // naming it `ContractSeries` here rather than reaching into `inputs` is the
+    // bridge: `contract_evidence` no longer knows whether its series came from
+    // a single-contract run or from one member of a pool.
+    //
+    // `instrument` is the config's declared universe entry, which
+    // `collect_events` already narrowed to one (D-0117 again).
+    let series = ContractSeries {
+        events: inputs.events,
+        params: inputs.params,
+    };
+
     // The grid-level half of every combo's evidence, built once. None of it
     // varies by combo or by contract, which is the property that lets the pool
     // below be assessed once rather than reconciled.
@@ -914,7 +971,7 @@ pub fn run_funnel(
     for costed in report.combos {
         let index = costed.id.combo_index;
 
-        let contract = contract_evidence(inputs, index, &costed, &test_windows);
+        let contract = contract_evidence(inputs, series, index, &costed, &test_windows);
         // `rest` is empty at the only call site in this build, and that is
         // D-0117 holding rather than an omission: every well-formed `[pooling]`
         // config is refused, so no funnel run has a second contract to pool.
@@ -1095,13 +1152,25 @@ fn metrics_of(s: &Summary) -> RunMetrics {
 /// changes the mark-to-market path, which changes the drawdown and the Sharpe.
 /// Subtracting an estimated cost from a finished equity curve would get the
 /// final dollar right and every other number wrong.
-fn replay<M: FillModel>(inputs: &FunnelInputs<'_>, index: usize, fills: &mut M) -> BacktestResult {
+fn replay<M: FillModel>(
+    inputs: &FunnelInputs<'_>,
+    contract: ContractSeries<'_>,
+    index: usize,
+    fills: &mut M,
+) -> BacktestResult {
     let mut strategy = inputs.grid.aligned_strategy(index);
     let mut feed = SliceFeed {
-        events: inputs.events,
+        events: contract.events,
         at: 0,
     };
-    run(&mut feed, &mut strategy, fills, inputs.spec, inputs.params).expect(
+    run(
+        &mut feed,
+        &mut strategy,
+        fills,
+        inputs.spec,
+        contract.params,
+    )
+    .expect(
         "INVARIANT: the shared bar series is availability-ordered; the declared-cost replay \
              over the identical slice already succeeded",
     )
@@ -1130,13 +1199,13 @@ fn replay<M: FillModel>(inputs: &FunnelInputs<'_>, index: usize, fills: &mut M) 
 /// which is checkable by reading them, and stays true as they come and go.
 fn pooled_of(
     result: &BacktestResult,
-    inputs: &FunnelInputs<'_>,
+    contract: ContractSeries<'_>,
     test_windows: &[Range<usize>],
 ) -> (Summary, ReturnStats) {
     RunTrace::new(&result.equity, &result.closed_trades, &result.fee_events).pooled_with_stats(
         test_windows,
-        inputs.params.initial_cash_nano_usd,
-        inputs.params.bars_per_year,
+        contract.params.initial_cash_nano_usd,
+        contract.params.bars_per_year,
     )
 }
 
@@ -1155,6 +1224,7 @@ fn pooled_of(
 /// window, where the pooled curve does not look.
 fn random_entry_control(
     inputs: &FunnelInputs<'_>,
+    contract: ContractSeries<'_>,
     costed: &ComboWalkForward,
     test_windows: &[Range<usize>],
 ) -> Control {
@@ -1198,7 +1268,7 @@ fn random_entry_control(
         match RandomEntry::matched_across(seed, &per_window, inputs.qty) {
             Ok(mut control) => {
                 let mut feed = SliceFeed {
-                    events: inputs.events,
+                    events: contract.events,
                     at: 0,
                 };
                 let mut fills = inputs.costs.declared(inputs.spec.tick);
@@ -1207,10 +1277,10 @@ fn random_entry_control(
                     &mut control,
                     &mut fills,
                     inputs.spec,
-                    inputs.params,
+                    contract.params,
                 )
                 .expect("INVARIANT: the shared bar series is availability-ordered");
-                let (summary, stats) = pooled_of(&result, inputs, test_windows);
+                let (summary, stats) = pooled_of(&result, contract, test_windows);
                 draws.push((seed, summary, stats));
             }
             Err(ControlError::NothingToMatch) => {
@@ -1257,12 +1327,13 @@ fn random_entry_control(
 /// not what owning it for the whole series would have.
 fn buy_and_hold_control(
     inputs: &FunnelInputs<'_>,
+    contract: ContractSeries<'_>,
     test_windows: &[Range<usize>],
     strategy_pct: f64,
 ) -> Control {
     let mut control = BuyAndHold::new(inputs.grid.max_warmup_bars(), inputs.qty);
     let mut feed = SliceFeed {
-        events: inputs.events,
+        events: contract.events,
         at: 0,
     };
     let mut fills = inputs.costs.declared(inputs.spec.tick);
@@ -1271,10 +1342,10 @@ fn buy_and_hold_control(
         &mut control,
         &mut fills,
         inputs.spec,
-        inputs.params,
+        contract.params,
     )
     .expect("INVARIANT: the shared bar series is availability-ordered");
-    let (oos, oos_stats) = pooled_of(&result, inputs, test_windows);
+    let (oos, oos_stats) = pooled_of(&result, contract, test_windows);
     Control {
         name: "buy-and-hold",
         // One "draw", because owning the thing is not a random variable. The
