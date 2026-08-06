@@ -40,9 +40,11 @@ use crucible_data::calendar::Calendar;
 use crucible_data::catalog::TsRange;
 use crucible_data::continuous::{ContinuousError, RollTable, read_roll_table};
 use crucible_data::ingest::window::{civil_from_days, days_from_civil};
-use crucible_funnel::walkforward::{FoldPlan, FoldSpec};
+use crucible_engine::{BacktestParams, FreeFills, run};
+use crucible_funnel::pooling::ContractEvaluation;
+use crucible_funnel::walkforward::{FoldPlan, FoldSpec, RunTrace};
 
-use crate::combo::{PooledWindow, Series, collect_events_in_window};
+use crate::combo::{PooledWindow, Series, SliceFeed, annualization, collect_events_in_window};
 use crate::config::LoadedConfig;
 use crate::pull::{EXIT_USAGE, data_dir};
 
@@ -584,5 +586,293 @@ mod warmup_trim_tests {
         let front_start = events[500].avail_ts();
         assert_eq!(warmup_trim(&events, front_start, 500), Ok(0));
         assert_eq!(warmup_trim(&events, front_start, 501), Err((500, 501)));
+    }
+}
+
+/// Replays one combo across every planned contract of a pool.
+///
+/// # What this does NOT do, and the omissions are the design
+///
+/// **It does not decide which trades are out of sample.** [`RunTrace::pooled`]
+/// already attributes a round-trip to the window containing its **closing**
+/// fill (D-0063: a round-trip opened in a training window and closed in a test
+/// window is a test-window trade), and its bar index comes from `closed_ts`.
+/// Counting them again here would be a second derivation of the same fact,
+/// which is exactly the class of bug D-0071 exists to refuse — the one that
+/// puts a breach on two different dates in two reports.
+///
+/// **It does not decide which sessions are out of sample.** Those come off
+/// [`PooledContractPlan::oos_day_keys`], which reads the fold plan.
+/// [`FoldPlan`] stays the sole boundary authority.
+///
+/// **It does not claim registry runs.** That seam is named below and left
+/// empty for C4c.
+///
+/// # §2.6 across a pool
+///
+/// Every contract is replayed through `Grid::aligned_strategy`, so the
+/// suppression window is the grid's max warmup for all of them, and
+/// [`plan_pool`] has already trimmed each series so exactly that many bars
+/// precede the evaluation window (D-0121). No contract's indicators are warmer
+/// than another's, and no contract's evaluation opens later than another's
+/// relative to its own front window.
+///
+/// Results are returned in `plans` order, which is the caller's declaration
+/// order, so the merge is by run identity rather than by completion order
+/// (§2.2). Nothing here is parallel; when it is, the same rule applies and
+/// `crucible-funnel::scheduler` already collects by index rather than by
+/// finish.
+pub(crate) fn replay_pool(
+    loaded: &LoadedConfig,
+    plans: &[PooledContractPlan],
+    combo_index: usize,
+) -> Vec<ContractEvaluation> {
+    plans
+        .iter()
+        .map(|contract| {
+            // A contract that could not be planned contributes no evidence and
+            // is evaluated as zero — `pool_evaluations` turns it into a skip
+            // with the reason, printed even when the count is zero (D-0070).
+            let Some(fold_plan) = contract.plan.as_ref() else {
+                return ContractEvaluation {
+                    instrument: contract.instrument.clone(),
+                    front_window_days: contract.front_window_days.clone(),
+                    oos_day_keys: Vec::new(),
+                    oos_trades: 0,
+                    insufficient_warmup: contract.insufficient_warmup,
+                    folds: 0,
+                    fold_needs_sessions: contract.fold_needs_sessions,
+                };
+            };
+
+            // ---- THE REGISTRY CLAIM GOES HERE (C4c) -------------------------
+            //
+            // D-0074's insert-before-run: the run is claimed BEFORE it
+            // executes, so a crash leaves a claimed-and-unfinished row rather
+            // than a run nobody knows happened. C4c binds the identity —
+            // Design B, a third composite in `RunKey.config_hash` over
+            // strategy + contract + front window, as D-0106 binds strategy +
+            // S0 + data window — and charges one trial per contract.
+            //
+            // Deliberately an empty seam rather than an inlined `todo!()` or a
+            // call that does nothing: the ordering is the contract, and a
+            // claim added *after* this loop works would be insert-after-run
+            // wearing the right name. C4c fills the hole; it does not
+            // rearrange the loop.
+            // -----------------------------------------------------------------
+
+            let events = &contract.series.events;
+            let mut strategy = loaded.grid.aligned_strategy(combo_index);
+            let mut feed = SliceFeed { events, at: 0 };
+            let params = BacktestParams {
+                initial_cash_nano_usd: loaded.initial_cash_nano_usd,
+                bars_per_year: annualization(loaded, events),
+            };
+            let expect = "INVARIANT: a collected bar series is already availability-ordered";
+            let result = if loaded.file.execution.fill_model == "free_fills" {
+                run(
+                    &mut feed,
+                    &mut strategy,
+                    &mut FreeFills,
+                    &loaded.spec,
+                    &params,
+                )
+                .expect(expect)
+            } else {
+                let mut fills = loaded.spread_cross_fills();
+                run(&mut feed, &mut strategy, &mut fills, &loaded.spec, &params).expect(expect)
+            };
+
+            let trace = RunTrace::new(&result.equity, &result.closed_trades, &result.fee_events);
+            let test_windows: Vec<std::ops::Range<usize>> = fold_plan
+                .folds()
+                .iter()
+                .map(|fold| fold.test.bars.clone())
+                .collect();
+            let oos = trace.pooled(
+                &test_windows,
+                params.initial_cash_nano_usd,
+                params.bars_per_year,
+            );
+
+            ContractEvaluation {
+                instrument: contract.instrument.clone(),
+                front_window_days: contract.front_window_days.clone(),
+                oos_day_keys: contract.oos_day_keys(),
+                // Read off the pooled summary rather than recounted: the
+                // window that owns a round-trip is the one containing its
+                // closing fill, and that decision is made in exactly one place.
+                oos_trades: oos.round_trips,
+                insufficient_warmup: contract.insufficient_warmup,
+                folds: fold_plan.folds().len(),
+                fold_needs_sessions: contract.fold_needs_sessions,
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod replay_pool_tests {
+    use super::*;
+    use crate::combo::collect_events_for;
+    use crucible_funnel::walkforward::FoldScheme;
+
+    /// A real grid over a SYNTHETIC source, so the replay is exercised end to
+    /// end with no archive. `combo-smoke.toml` declares `source = "synthetic"`.
+    fn loaded() -> LoadedConfig {
+        crate::config::load(std::path::Path::new("../../configs/combo-smoke.toml"))
+            .expect("the shipped smoke config loads")
+    }
+
+    /// One planned contract over `events`, with `train`/`test` sessions and a
+    /// day key every `per_day` bars.
+    fn plan_of(
+        loaded: &LoadedConfig,
+        name: &str,
+        events: Vec<MarketEvent>,
+        per_day: usize,
+        spec: FoldSpec,
+    ) -> PooledContractPlan {
+        let warmup = loaded.grid.max_warmup_bars();
+        let day_keys: Vec<i64> = (0..events.len()).map(|i| (i / per_day) as i64).collect();
+        let mut front_window_days = day_keys[warmup..].to_vec();
+        front_window_days.dedup();
+        let plan = FoldPlan::build(&day_keys, warmup, spec).ok();
+        PooledContractPlan {
+            instrument: name.to_owned(),
+            series: Series {
+                events,
+                data_manifest_ids: Vec::new(),
+                description: format!("fixture {name}"),
+                caveats: Vec::new(),
+            },
+            day_keys,
+            front_window_days,
+            insufficient_warmup: None,
+            dropped_tail_day: None,
+            dropped_tail_bars: 0,
+            plan,
+            fold_needs_sessions: spec.train_days + spec.test_days,
+        }
+    }
+
+    fn spec() -> FoldSpec {
+        FoldSpec {
+            scheme: FoldScheme::Rolling,
+            train_days: 5,
+            test_days: 2,
+            step_days: 2,
+        }
+    }
+
+    /// **The converse, and it runs first.** Two contracts carrying the SAME
+    /// bars must produce identical evidence.
+    ///
+    /// Without it, a replay that leaked state between contracts — a strategy
+    /// reused instead of rebuilt, an equity curve continued rather than
+    /// restarted — would still pass a test that only checked one contract, and
+    /// would corrupt every pool of more than one. It is also §2.6 stated
+    /// operationally: identical input, identical treatment.
+    #[test]
+    fn two_contracts_with_the_same_bars_produce_identical_evidence() {
+        let loaded = loaded();
+        let events = collect_events_for(&loaded, "SYN:RW")
+            .expect("synthetic")
+            .events;
+        let plans = vec![
+            plan_of(&loaded, "AAA", events.clone(), 40, spec()),
+            plan_of(&loaded, "BBB", events, 40, spec()),
+        ];
+        let out = replay_pool(&loaded, &plans, 0);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].oos_trades, out[1].oos_trades);
+        assert_eq!(out[0].oos_day_keys, out[1].oos_day_keys);
+        assert_eq!(out[0].folds, out[1].folds);
+        assert!(out[0].folds > 0, "the fixture must actually fold");
+        // Order is declaration order, never completion order (§2.2).
+        assert_eq!(out[0].instrument, "AAA");
+        assert_eq!(out[1].instrument, "BBB");
+    }
+
+    /// `oos_trades` counts the TEST windows, not the whole run — which is what
+    /// makes it out-of-sample evidence rather than a run total.
+    ///
+    /// The third case is what gives it teeth: the same replay over the same
+    /// bars, with a geometry whose test windows cover strictly fewer sessions,
+    /// must not report more trades. A count read off the whole run would be
+    /// identical under both and this would not fire.
+    #[test]
+    fn oos_trades_counts_the_test_windows_and_not_the_whole_run() {
+        let loaded = loaded();
+        let events = collect_events_for(&loaded, "SYN:RW")
+            .expect("synthetic")
+            .events;
+        let wide = FoldSpec {
+            scheme: FoldScheme::Rolling,
+            train_days: 2,
+            test_days: 5,
+            step_days: 5,
+        };
+        // `step_days > test_days` is legal (D-0062 refuses only the reverse),
+        // so this geometry reaches roughly one session in five — a large,
+        // deliberate gap rather than a marginal one.
+        let narrow = FoldSpec {
+            scheme: FoldScheme::Rolling,
+            train_days: 5,
+            test_days: 1,
+            step_days: 5,
+        };
+        let w = replay_pool(
+            &loaded,
+            &[plan_of(&loaded, "W", events.clone(), 40, wide)],
+            0,
+        );
+        let n = replay_pool(&loaded, &[plan_of(&loaded, "N", events, 40, narrow)], 0);
+        assert!(
+            w[0].folds > 0 && n[0].folds > 0,
+            "both geometries must fold"
+        );
+        assert!(
+            n[0].oos_day_keys.len() < w[0].oos_day_keys.len(),
+            "the narrow geometry must cover fewer sessions, or the comparison is empty"
+        );
+        // STRICT, and the strictness is the whole control. A replay that
+        // counted the whole run rather than the test windows returns the same
+        // number for both geometries, so `<=` would still hold and this test
+        // would be decoration — which is exactly what the mutation control
+        // caught when it was first written that way.
+        assert!(
+            n[0].oos_trades < w[0].oos_trades,
+            "fewer out-of-sample sessions must yield strictly fewer out-of-sample trades: \
+             narrow {} over {} session(s), wide {} over {}",
+            n[0].oos_trades,
+            n[0].oos_day_keys.len(),
+            w[0].oos_trades,
+            w[0].oos_day_keys.len()
+        );
+    }
+
+    /// A contract that could not be planned contributes nothing AND keeps its
+    /// reason, so `pool_evaluations` can render the right skip rather than
+    /// inferring one from a zero.
+    #[test]
+    fn an_unplannable_contract_contributes_nothing_and_carries_its_reason() {
+        let loaded = loaded();
+        let events = collect_events_for(&loaded, "SYN:RW")
+            .expect("synthetic")
+            .events;
+        let mut short = plan_of(&loaded, "SHORT", events, 40, spec());
+        short.plan = None;
+        short.insufficient_warmup = Some((3, 40));
+        let out = replay_pool(&loaded, &[short], 0);
+        assert_eq!(out[0].oos_trades, 0);
+        assert!(out[0].oos_day_keys.is_empty());
+        assert_eq!(out[0].folds, 0);
+        assert_eq!(
+            out[0].insufficient_warmup,
+            Some((3, 40)),
+            "the reason survives the replay — a zero with no reason is what \
+             D-0070's pattern refuses"
+        );
     }
 }

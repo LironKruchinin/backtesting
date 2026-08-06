@@ -196,9 +196,9 @@ fn run_with_fill_model(
 /// same bars for every combo" (§2.6) literal rather than aspirational: there
 /// is one series in memory, and a re-`open` of a Parquet file cannot drift
 /// from it because there is no re-`open`.
-struct SliceFeed<'a> {
-    events: &'a [MarketEvent],
-    at: usize,
+pub(crate) struct SliceFeed<'a> {
+    pub events: &'a [MarketEvent],
+    pub at: usize,
 }
 
 impl Feed for SliceFeed<'_> {
