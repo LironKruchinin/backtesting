@@ -172,17 +172,15 @@ pub(crate) fn plan_pool(
         let window = table
             .front_window(instrument)
             .map_err(|e| (EXIT_USAGE, format!("{instrument}: {e}")))?;
-        let (start, end) = (
-            crucible_data::ingest::window::civil_from_days(days_from_civil(
-                crucible_data::ingest::window::date_of(window.start_ts()),
-            ))
-            .to_string(),
-            crucible_data::ingest::window::civil_from_days(days_from_civil(
-                crucible_data::ingest::window::date_of(window.end_ts()),
-            ))
-            .to_string(),
-        );
-        let series = collect_events_in_window(loaded, instrument, Some((&start, &end)))?;
+        // Carried through as INSTANTS. C3a's window is
+        // `[roll_ts + 1ns, next_roll_ts + 1ns)` and a `roll_ts` is an instant
+        // inside a session, so a civil-date round trip here moved both ends to
+        // UTC midnight — the middle of a CME trading day, which opens 17:00 CT
+        // the evening before. The replay then began and ended mid-session and
+        // the roll date went wholesale to the incoming contract: exactly the
+        // silent off-by-one `front_window`'s own doc is about, reintroduced one
+        // layer above the function that was careful about it.
+        let series = collect_events_in_window(loaded, instrument, Some(window))?;
 
         // The D-0071 device: computed once, here, and read by every consumer.
         let day_keys: Vec<i64> = series

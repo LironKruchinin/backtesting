@@ -27,11 +27,12 @@ use std::path::PathBuf;
 use crucible_core::prelude::*;
 use crucible_data::SyntheticFeed;
 use crucible_data::calendar::{Calendar, SessionClock, SessionId};
+use crucible_data::catalog::TsRange;
 use crucible_data::continuous::ContinuousAlias;
 use crucible_data::curated::CuratedError;
 use crucible_data::curated::resample::ResampleError;
 use crucible_data::ingest::range_from_dates;
-use crucible_data::ingest::window::parse_civil_date;
+use crucible_data::ingest::window::{date_of, parse_civil_date};
 use crucible_engine::{BacktestParams, BacktestResult, FreeFills, INTRABAR_CONVENTION, run};
 use crucible_strategies::Aligned;
 use crucible_strategies::combo::{
@@ -260,9 +261,21 @@ pub(crate) fn collect_events_for(
 
 /// One instrument over an *explicitly named* evaluation window (C2).
 ///
-/// `window` is `Some((start, end))` to replace `[data].start`/`[data].end` for
-/// this contract alone — inclusive start, exclusive end, like the config's own
-/// pair — and `None` to use the config's window unchanged.
+/// `window` is `Some(range)` to replace `[data].start`/`[data].end` for this
+/// contract alone — half-open, like the config's own pair — and `None` to use
+/// the config's window unchanged.
+///
+/// **It is a [`TsRange`] and not a pair of dates, and that is the whole of
+/// C4b-i.** A front window is `[roll_ts + 1ns, next_roll_ts + 1ns)` (C3a), and
+/// a `roll_ts` is an instant *inside* a session — CME's day opens at 17:00 CT
+/// the evening before. Rounding either end to a civil date moves it to UTC
+/// midnight, which lands in the middle of a session: each contract's replay
+/// then opens and closes mid-session, and the roll date goes wholesale to the
+/// incoming contract. The `+ 1ns` is the entire correctness content of
+/// `RollTable::front_window`, whose own doc says getting it wrong hands one
+/// session to the wrong contract *silently* at every roll — and this is the
+/// seam where it used to be discarded. Taking instants makes the round trip
+/// inexpressible rather than merely unlikely.
 ///
 /// **Why the window is a parameter rather than "the whole curated span".**
 /// A pooled run does not replay each contract over its full curated life:
@@ -281,7 +294,7 @@ pub(crate) fn collect_events_for(
 pub(crate) fn collect_events_in_window(
     loaded: &LoadedConfig,
     instrument: &str,
-    window: Option<(&str, &str)>,
+    window: Option<TsRange>,
 ) -> Result<Series, (i32, String)> {
     match &loaded.file.data {
         DataSource::Synthetic {
@@ -350,10 +363,11 @@ pub(crate) fn collect_events_in_window(
             // window to narrow — a generated series is defined by its seed and
             // bar count — so the override is curated-only and the synthetic arm
             // refuses one rather than ignoring it.
-            let (start, end) = match window {
-                Some((s, e)) => (s, e),
-                None => (start.as_str(), end.as_str()),
-            };
+            //
+            // The two arms differ in KIND, not only in value, and the label
+            // says which one produced the bars. A config's pair is a pair of
+            // dates and a date means the whole day; a front window is a pair of
+            // instants and its boundary is one nanosecond after a roll.
             // Still refused, for a *different* reason than before D-0076.
             //
             // The old reason — nothing could say which of the two price series
@@ -384,20 +398,7 @@ pub(crate) fn collect_events_in_window(
                     ),
                 ));
             }
-            let s = parse_civil_date(start).ok_or_else(|| {
-                (
-                    EXIT_USAGE,
-                    format!("data.start {start:?} is not a YYYY-MM-DD calendar date"),
-                )
-            })?;
-            let e = parse_civil_date(end).ok_or_else(|| {
-                (
-                    EXIT_USAGE,
-                    format!("data.end {end:?} is not a YYYY-MM-DD calendar date"),
-                )
-            })?;
-            let range = range_from_dates((s.year, s.month, s.day), (e.year, e.month, e.day))
-                .map_err(|err| (EXIT_USAGE, err.to_string()))?;
+            let (range, window_label) = eval_range(start, end, window)?;
             let dir = data_dir().map_err(|msg| (EXIT_USAGE, msg))?;
             let id = InstrumentId::new(instrument);
             // The archive holds 1s and 1m; anything coarser is aggregated on
@@ -435,7 +436,7 @@ pub(crate) fn collect_events_in_window(
             let caveats = grain_caveats(&feed);
             Ok(Series {
                 description: format!(
-                    "curated {instrument} {start}..{end} — {grain}, {} source file(s)",
+                    "curated {instrument} {window_label} — {grain}, {} source file(s)",
                     data_manifest_ids.len()
                 ),
                 data_manifest_ids,
@@ -914,5 +915,157 @@ mod tests {
         let position = session_position(cme().session_clock(utc(1_704_319_200)));
         assert!((position.minutes_to_close - 0.0).abs() < 1e-9);
         assert_eq!(position.phase, SessionPhase::PostRegular);
+    }
+}
+
+/// The evaluation range a curated replay reads, and the label that names it.
+///
+/// **This is C4b-i's seam**, extracted so it can be tested without an archive.
+/// A pooled run overrides the config's window with the contract's front window
+/// from the `.v` roll table, and the two are different *kinds* of thing:
+///
+/// - the config's `[data].start`/`[data].end` are **dates**, and a date means
+///   the whole UTC day, so they become a range through [`range_from_dates`];
+/// - a front window is a pair of **instants**, `[roll_ts + 1ns, next_roll_ts +
+///   1ns)` (C3a), and a `roll_ts` falls *inside* a session — CME's trading day
+///   opens at 17:00 CT the evening before.
+///
+/// Until C4b-i the override was rounded to civil dates here, which moved both
+/// ends to UTC midnight: the middle of a session. Every contract's replay then
+/// opened and closed mid-session and the roll date went wholesale to the
+/// incoming contract — the silent off-by-one `RollTable::front_window`'s own
+/// doc warns about, reintroduced one layer above the function that was careful
+/// about it.
+///
+/// # Errors
+/// [`EXIT_USAGE`] when the config's dates are not `YYYY-MM-DD`, or do not form
+/// a range. An override is already a validated [`TsRange`] and cannot fail.
+fn eval_range(
+    config_start: &str,
+    config_end: &str,
+    window: Option<TsRange>,
+) -> Result<(TsRange, String), (i32, String)> {
+    match window {
+        // Passed through untouched. The label carries the exact instants
+        // beside the readable span, because the whole point is that the
+        // boundary is not a date: a label reading only "2024-03-08..2024-06-07"
+        // is what the discarded round trip looked like from the outside.
+        Some(range) => {
+            let label = format!(
+                "{}..{} front window (exact {}ns..{}ns)",
+                date_of(range.start_ts()),
+                date_of(range.end_ts()),
+                range.start_ts().0,
+                range.end_ts().0
+            );
+            Ok((range, label))
+        }
+        None => {
+            let s = parse_civil_date(config_start).ok_or_else(|| {
+                (
+                    EXIT_USAGE,
+                    format!("data.start {config_start:?} is not a YYYY-MM-DD calendar date"),
+                )
+            })?;
+            let e = parse_civil_date(config_end).ok_or_else(|| {
+                (
+                    EXIT_USAGE,
+                    format!("data.end {config_end:?} is not a YYYY-MM-DD calendar date"),
+                )
+            })?;
+            let range = range_from_dates((s.year, s.month, s.day), (e.year, e.month, e.day))
+                .map_err(|err| (EXIT_USAGE, err.to_string()))?;
+            // Byte-identical to what this produced before C4b-i, so every
+            // existing determinism gate holds.
+            Ok((range, format!("{config_start}..{config_end}")))
+        }
+    }
+}
+
+#[cfg(test)]
+mod eval_range_tests {
+    use super::*;
+
+    /// 2024-03-08 18:00:00Z — an instant well inside a CME session, which is
+    /// what a `roll_ts` is. The front window opens one nanosecond later (C3a).
+    const ROLL_TS: Ts = Ts(1_709_920_800_000_000_000);
+
+    fn front_window() -> TsRange {
+        TsRange::new(
+            ROLL_TS.plus_ns(1),
+            ROLL_TS.plus_ns(90 * 86_400 * 1_000_000_000),
+        )
+        .expect("nonempty")
+    }
+
+    /// The control for D4: an override must reach the feed bit-identical.
+    ///
+    /// The second assertion is what fires on the defect, and it is the reason
+    /// the first is not decoration — it shows that the rounded form is a
+    /// *different instant*, so "equal to the input" and "equal to the rounded
+    /// input" cannot both hold.
+    #[test]
+    fn a_front_window_override_reaches_the_feed_unrounded() {
+        let w = front_window();
+        let (range, label) = eval_range("2024-01-01", "2024-04-01", Some(w)).expect("valid");
+
+        assert_eq!(range, w, "the front window must arrive unmodified");
+        assert_eq!(
+            range.start_ts(),
+            ROLL_TS.plus_ns(1),
+            "C3a's +1ns is the whole correctness content and must survive"
+        );
+
+        let rounded = range_from_dates(
+            {
+                let d = date_of(w.start_ts());
+                (d.year, d.month, d.day)
+            },
+            {
+                let d = date_of(w.end_ts());
+                (d.year, d.month, d.day)
+            },
+        )
+        .expect("valid");
+        assert_ne!(
+            range, rounded,
+            "midnight is a different instant from a mid-session roll — this is \
+             the defect, and a test that could not tell them apart would be \
+             decoration"
+        );
+        assert_ne!(range.start_ts(), rounded.start_ts());
+
+        assert!(
+            label.contains("ns"),
+            "the label states the exact instants, so a rounded window is \
+             visible in a report rather than only in the arithmetic"
+        );
+    }
+
+    /// The converse: with no override the config's pair is still a pair of
+    /// DATES, unchanged byte for byte. Without this, a fix that turned every
+    /// window into instants would pass the test above while moving four
+    /// determinism gates.
+    #[test]
+    fn the_config_window_is_untouched_and_still_means_whole_days() {
+        let (range, label) = eval_range("2024-01-01", "2024-02-01", None).expect("valid");
+        assert_eq!(label, "2024-01-01..2024-02-01");
+        assert_eq!(
+            range,
+            range_from_dates((2024, 1, 1), (2024, 2, 1)).expect("valid")
+        );
+        assert_eq!(
+            range.start_ts().0 % (86_400 * 1_000_000_000),
+            0,
+            "a date means UTC midnight, which is correct for a config window"
+        );
+    }
+
+    /// A malformed config date is still a usage error, not a panic.
+    #[test]
+    fn a_config_date_that_is_not_a_date_is_refused() {
+        let err = eval_range("2024-01", "2024-02-01", None).expect_err("refused");
+        assert_eq!(err.0, EXIT_USAGE);
+        assert!(err.1.contains("data.start"));
     }
 }
