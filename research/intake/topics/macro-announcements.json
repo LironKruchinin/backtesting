@@ -1,0 +1,9 @@
+{
+  "topic": "macro-announcements",
+  "hypothesis_family_hint": "TODO(human) — one family for the whole idea, not one parameterization",
+  "queries": [
+    "macroeconomic announcement returns index futures",
+    "FOMC announcement drift Treasury futures",
+    "employment inflation release commodity currency futures"
+  ]
+}

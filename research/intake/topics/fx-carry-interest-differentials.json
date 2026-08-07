@@ -1,0 +1,11 @@
+{
+  "topic": "fx-carry-interest-differentials",
+  "hypothesis_family_hint": "fx-carry-interest-differential",
+  "queries": [
+    "carry trade forward premium puzzle exchange rate",
+    "uncovered interest parity failure currency returns",
+    "currency futures interest rate differential predictability",
+    "covered interest parity deviation cross currency basis",
+    "euro dollar exchange rate risk premium futures"
+  ]
+}

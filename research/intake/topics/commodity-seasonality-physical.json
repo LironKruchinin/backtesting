@@ -1,0 +1,11 @@
+{
+  "topic": "commodity-seasonality-physical",
+  "hypothesis_family_hint": "commodity-physical-seasonality",
+  "queries": [
+    "seasonality commodity futures returns harvest weather",
+    "gasoline heating oil demand season futures price pattern",
+    "temperature weather shock energy futures returns",
+    "seasonal risk premium agricultural energy futures",
+    "predictable seasonal component commodity prices"
+  ]
+}

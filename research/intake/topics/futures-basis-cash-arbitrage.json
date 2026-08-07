@@ -1,0 +1,11 @@
+{
+  "topic": "futures-basis-cash-arbitrage",
+  "hypothesis_family_hint": "futures-basis-mispricing",
+  "queries": [
+    "cash futures basis arbitrage mispricing index futures",
+    "cost of carry model futures fair value deviation",
+    "basis convergence at expiration futures spot",
+    "cheapest to deliver Treasury futures basis trade",
+    "no arbitrage bounds transaction costs futures pricing"
+  ]
+}

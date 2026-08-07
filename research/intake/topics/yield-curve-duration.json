@@ -1,0 +1,11 @@
+{
+  "topic": "yield-curve-duration",
+  "hypothesis_family_hint": "zn-curve-duration-signal",
+  "queries": [
+    "yield curve slope predicts bond excess returns",
+    "duration risk premium Treasury futures returns",
+    "level slope curvature factors term structure interest rates",
+    "bond futures hedging duration convexity",
+    "forward rate predictor of excess bond return"
+  ]
+}

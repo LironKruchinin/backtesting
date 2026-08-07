@@ -1,0 +1,11 @@
+{
+  "topic": "metals-lease-rates-carry",
+  "hypothesis_family_hint": "metals-carry-lease-rate",
+  "queries": [
+    "gold lease rate forward offered rate GOFO",
+    "precious metals carry cost of carry futures",
+    "gold futures basis interest rate arbitrage",
+    "silver platinum palladium futures term structure",
+    "convenience yield precious metals inventory"
+  ]
+}
