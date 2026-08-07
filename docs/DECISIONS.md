@@ -5100,13 +5100,45 @@ propose a superseding entry — don't silently diverge.
   synthetic `5 / 2 / 2` to `21 / 4 / 4` and pooled over eight ES contracts. The
   RATIO is conventionally sourced, the SCALE is the trading month, and the part
   that is neither is stated rather than hidden.**
-  **This is an amendment to a PRE-REGISTRATION, and the record has to say so.**
-  Made 2026-08-07, before either hypothesis had ever been run: the registry
-  carries **zero rows** for both families, verified before the edit. No result
-  influenced this change, because no result exists. That is the only condition
-  under which a registered geometry may be rewritten at all — an amendment made
-  after seeing a number is not an amendment, it is the thing pre-registration
-  exists to prevent.
+  **This is an amendment to a PRE-REGISTRATION, and the record has to say so —
+  including the part this entry first got WRONG.**
+  **Correction, made the same day, before the entry had any downstream reader.**
+  This paragraph originally read "before either hypothesis had ever been run:
+  the registry carries zero rows for both families, verified before the edit."
+  **That was false, and the way it was reached is worse than the error.** The
+  check grepped `results/registry.jsonl` for `H-007|H-008|overreaction`; the
+  registry stores `hypothesis_family`, never a hypothesis ID, so the pattern
+  could not match and returned nothing. A negative search was read as absence
+  without a positive control — the exact failure D-0118 exists to prevent,
+  committed by the session that had run positive controls on four other searches
+  the same day. The control that would have caught it costs one command:
+  `grep -oE '"hypothesis_family":"[^"]*"' | sort | uniq -c`.
+  **What is actually true.** Both hypotheses were run on **2026-07-31**. H-007's
+  family carries 2,900 run rows and **200 verdicts, every one `kill` at
+  `admission`**; H-008's carries 720 run rows and 48 verdicts, likewise all
+  `kill` at `admission`. So the amendment was made *after* runs existed, not
+  before.
+  **Why the amendment stands anyway, and this is an argument rather than a
+  reassurance.** The only result ever produced for either family is an admission
+  kill — a refusal for want of sessions, taken before any equity curve was
+  scored. **No performance number was ever produced, so none could have been
+  seen, so none could have shaped this geometry.** And the registrations
+  *predicted that outcome themselves*, in writing, before the run: H-007's own
+  text says "the sample floors are deliberately unsatisfiable" and its
+  `[walk_forward]` comment computed the ~54-session shortfall in advance. An
+  amendment responding to a sample-adequacy failure the registration forecast is
+  a different act from one responding to a Sharpe it did not.
+  **What did NOT change is the load-bearing half**: `min_oos_trades = 200`,
+  `min_oos_sessions = 250`, the grid, the rules, the execution assumption and
+  every performance threshold are untouched. What changed is the fold geometry
+  and the contract list — the two things that decide whether there is enough
+  evidence to judge, never what counts as passing.
+  **The trial count carries the history, and that is correct.** The amendment
+  changes the config hash, so the pooled runs are new trials; the 2,900 and 720
+  already-charged runs stay charged to their families (D-0083 voids nothing
+  here). A future deflated Sharpe therefore divides by a count that includes the
+  killed search, which is the honest accounting — the family HAS been searched
+  before, and D-0124's preferred error is against the strategy.
   **What was wrong with `5 / 2 / 2`.** Both files took it verbatim from
   `configs/combo-smoke.toml` and said so, and the *intent* was right: a fold
   layout invented per hypothesis is a free parameter chosen by whoever wants the
