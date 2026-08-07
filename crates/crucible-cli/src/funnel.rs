@@ -980,6 +980,33 @@ fn run_pooled(
         .as_ref()
         .expect("INVARIANT: this path is taken only when `[pooling]` is declared");
 
+    // **A pooled config declaring `s0` is REFUSED, not run with S0 skipped.**
+    //
+    // This is D-0075's rule and it was violated here until 2026-08-07. The
+    // pooled path never ran S0, and `assess` reading absent S0 evidence
+    // reports `KILL` *decided at s0* — a verdict that looks exactly like a
+    // real predictor rejection and is nothing of the kind. Found by pointing
+    // H-008 at the pooled path (A4): every combo came back killed at s0 with
+    // no S0 measurement having been taken.
+    //
+    // `run_funnel` has always guarded this — `validate_s0_report` refuses when
+    // criteria declare S0 and its report is absent — and the pooled path
+    // bypassed that guard rather than repeating it. The refusal is the fix
+    // because pooled S0 is genuinely unimplemented: S0 measures a forward
+    // return join over one series, and which series a pooled run means is a
+    // question nobody has answered yet.
+    if criteria.runs(crucible_funnel::Stage::S0) {
+        eprintln!(
+            "error: this config declares `stages = [\"s0\", ...]` and a `[pooling]` block, and 
+                    pooled S0 is not implemented. It is refused rather than run with S0
+                    skipped: `assess` reading absent S0 evidence reports KILL *decided at
+                    s0*, which is indistinguishable from a real predictor rejection
+                    (D-0075). Drop `s0` from `stages` to pool the trading gates, or run
+                    the config against a single contract where S0 does run."
+        );
+        return EXIT_USAGE;
+    }
+
     let table = match crate::pooled::load_volume_roll_table(loaded, &pooling.root) {
         Ok(table) => table,
         Err((code, message)) => {

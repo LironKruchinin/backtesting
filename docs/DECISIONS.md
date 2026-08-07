@@ -5063,3 +5063,36 @@ propose a superseding entry — don't silently diverge.
   with conventionally-sourced parameters, and running them is Liron's call by
   name. Block C supplies the sessions; it does not supply a verdict about an
   idea.
+- **D-0133** (2026-08-07) -- **A pooled config declaring `s0` is REFUSED. It was
+  being run with S0 silently skipped, and `assess` reading absent S0 evidence
+  reported `KILL` *decided at s0* — a fabricated predictor rejection
+  indistinguishable from a real one.** A defect in C6b-iii (D-0130), found and
+  fixed the same week.
+  **How it was found, because the route matters.** Not by a gate — every gate
+  runs `stages = ["s1", "s2"]` and none declares S0, so all ten were green
+  throughout. It surfaced when A4 pointed H-008 at the newly-runnable pooled
+  path: every combo came back `KILL` at `s0` having taken no S0 measurement, on
+  a hypothesis whose entire Gate 0 is an S0 test. A verdict table that reads
+  "killed at s0" for a config that never ran S0 is the most flattering possible
+  presentation of a missing stage, because it looks like the machinery working.
+  **`run_funnel` had the guard all along.** `validate_s0_report` refuses when
+  criteria declare S0 and its report is absent. The pooled path bypassed it
+  rather than repeating it — the C6b-iii orchestration was written as a sibling
+  of `run_funnel` and inherited its shape but not its refusals. That is the
+  general hazard in a second orchestration, and it is why this entry names the
+  mechanism rather than only the symptom: **a parallel path must inherit the
+  refusals, not just the steps.**
+  **The refusal is the fix, not a workaround.** Pooled S0 is genuinely
+  unimplemented and not a small gap: S0 is a forward-return join over one
+  series, and *which* series a pooled run means is an unanswered question —
+  each contract's own, concatenated, or the front-month stitch — with different
+  answers for the information coefficient and its bootstrap. Choosing one
+  silently is exactly what this entry refuses.
+  **What it costs, stated rather than discovered later.** H-008 cannot be pooled
+  in this build: its registered `stages` include `s0`, so it is refused. Its
+  A4 geometry amendment still lands (D-0134) because the amendment is correct
+  and independent, but H-008 stays unrunnable at its registered floors until
+  pooled S0 exists. H-007 declares no S0 and is unaffected.
+  **No gate moved**, and that is the point being made rather than a reassurance:
+  the pooled pin `30c62df587156ae9` declares `s1, s2`, so it could not have
+  caught this and did not.
