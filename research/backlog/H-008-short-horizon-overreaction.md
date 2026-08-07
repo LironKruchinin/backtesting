@@ -113,14 +113,39 @@ hypothesis_family = "es-short-horizon-reversal"
 economic_rationale = "Impatient liquidity takers push price beyond fair value; inventory-bearing liquidity providers push it back as they unwind, so extreme short-horizon deviations partially revert."
 
 [universe]
-# FOUR-digit year (D-0072); the grid commands do not resolve `ESH4`.
-instruments = ["ESH2024"]
+# EIGHT consecutive ES contracts, pooled. FOUR-digit years (D-0072): the vendor
+# spelling `ESH4` has a one-digit year that repeats every ten years and our
+# windows are sixteen years long.
+#
+# Eight rather than one because the registered 250-session floor is not
+# satisfiable by one contract and never was — a single ES front window is ~64
+# sessions (D-0119). Pooling is the sanctioned way to meet it, and it meets it
+# by supplying sessions honestly rather than by lowering the bar (D-0114).
+instruments = [
+  "ESM2022",
+  "ESU2022",
+  "ESZ2022",
+  "ESH2023",
+  "ESM2023",
+  "ESU2023",
+  "ESZ2023",
+  "ESH2024",
+]
 timeframes = ["1m"]
+
+[pooling]
+# Declared, never inferred from the symbols: a typo'd contract would otherwise
+# silently define its own root, and a pool is a claim that these contracts are
+# ONE instrument across time rather than a cross-instrument breadth claim.
+root = "ES"
 
 [data]
 source = "curated"
-start = "2023-12-15"
-end = "2024-03-15"
+# The span the pooled front windows live in. Each contract is evaluated on its
+# OWN front-month window, which the `.v` volume roll table decides (D-0119);
+# this range only has to contain them.
+start = "2022-03-01"
+end = "2024-03-20"
 
 [contract]
 tick_points = "0.25"
@@ -163,17 +188,50 @@ fill_model = "spread_cross"
 half_spread_ticks = 1
 fee_per_contract_usd = "1.25"
 
-# Fold geometry, in TRADING DAYS (D-0062), verbatim from
-# `configs/combo-smoke.toml` — the canonical layout that pins the walk-forward
-# determinism hash 711e1cb34a2ee2b4. Same reasoning and same caveat as H-007:
-# calibrated for a ~14-day fixture, and against this file's ~60-session contract
-# it pools to well under the 250 sessions registered below, so the run is killed
-# for sample adequacy by design.
+# ---------------------------------------------------------------------------
+# FOLD GEOMETRY — AMENDED 2026-08-07 (A4, D-0134). In TRADING DAYS (D-0062).
+#
+# **What it replaced, and why that had to go.** This file registered
+# `5 / 2 / 2`, taken verbatim from `configs/combo-smoke.toml`. The intent was
+# right — a fold layout invented per hypothesis is a free parameter chosen by
+# the person who wants the result — but the source was wrong: combo-smoke's
+# values are calibrated for a ~14-day SYNTHETIC fixture, so what this file
+# inherited was not a convention but another file's fixture. D-0119 names that
+# exact mistake as how H-007 and H-008 died at admission for a reason having
+# nothing to do with their ideas.
+#
+# **The RATIO is conventionally sourced.** Pardo, *The Evaluation and
+# Optimization of Trading Strategies*, 2nd ed. (Wiley, 2008), ch. 11: the
+# walk-forward out-of-sample window is conventionally 10–20 % of the in-sample
+# window. `4 / 21` = 19.0 %, inside that band and at its upper end — chosen at
+# the upper end deliberately, because more out-of-sample is the conservative
+# direction and §9's direction test says to take the choice that does not
+# flatter the strategy.
+#
+# **The SCALE is the conventional trading month.** `train_days = 21` is one
+# trading month, the standard count and the unit §4 already pins fold windows
+# to. `test_days = 4` is 19 % of it rounded to a whole session, because a fold
+# is a whole number of sessions and 4.2 is not one.
+#
+# **What is NOT sourced, stated rather than hidden.** The scale is *bounded*
+# as well as conventional: D-0119 cuts folds INSIDE each contract's front
+# window, so `train + test` must fit ~64 sessions whatever convention says.
+# One trading month fits with room for ~10 folds; one trading QUARTER (63)
+# would not fit at all. So the convention and the constraint agree here — but
+# they agree by luck, and a root with shorter front windows would force the
+# constraint to win. That is a limitation of the front-window pooling mode
+# (D-0119), not a property of this geometry.
+#
+# `step_days == test_days` so the out-of-sample windows TILE rather than
+# overlap: D-0062 refuses `step < test` because pooling overlapping windows
+# counts a session twice, which is the double-count D-0114 forbids across
+# contracts, applied within one.
+# ---------------------------------------------------------------------------
 [walk_forward]
 scheme = "rolling"
-train_days = 5
-test_days = 2
-step_days = 2
+train_days = 21
+test_days = 4
+step_days = 4
 
 # Gate 0 and Gate 0b, pre-registered. Every value verbatim from
 # `configs/s0-smoke.toml` (D-0085's registered defaults) except the horizons,

@@ -5096,3 +5096,66 @@ propose a superseding entry — don't silently diverge.
   **No gate moved**, and that is the point being made rather than a reassurance:
   the pooled pin `30c62df587156ae9` declares `s1, s2`, so it could not have
   caught this and did not.
+- **D-0134** (2026-08-07) -- **A4: H-007 and H-008 amended from combo-smoke's
+  synthetic `5 / 2 / 2` to `21 / 4 / 4` and pooled over eight ES contracts. The
+  RATIO is conventionally sourced, the SCALE is the trading month, and the part
+  that is neither is stated rather than hidden.**
+  **This is an amendment to a PRE-REGISTRATION, and the record has to say so.**
+  Made 2026-08-07, before either hypothesis had ever been run: the registry
+  carries **zero rows** for both families, verified before the edit. No result
+  influenced this change, because no result exists. That is the only condition
+  under which a registered geometry may be rewritten at all — an amendment made
+  after seeing a number is not an amendment, it is the thing pre-registration
+  exists to prevent.
+  **What was wrong with `5 / 2 / 2`.** Both files took it verbatim from
+  `configs/combo-smoke.toml` and said so, and the *intent* was right: a fold
+  layout invented per hypothesis is a free parameter chosen by whoever wants the
+  result. But the source was wrong. Combo-smoke's values are calibrated for a
+  ~14-day SYNTHETIC fixture, so what these files inherited was not a convention
+  but another file's fixture — and D-0119 already named that as how both
+  hypotheses came to die at admission for a reason having nothing to do with
+  their ideas.
+  **The ratio is sourced.** Pardo, *The Evaluation and Optimization of Trading
+  Strategies*, 2nd ed. (Wiley, 2008), ch. 11: the walk-forward out-of-sample
+  window is conventionally 10–20 % of the in-sample window. `4 / 21` = 19.0 %,
+  inside the band and at its **upper** end — chosen there deliberately, because
+  more out-of-sample is the conservative direction and §9's direction test says
+  to take the choice that does not flatter the strategy.
+  **The scale is the conventional trading month.** `train_days = 21` is one
+  trading month, the standard count, and the unit §4 already pins fold windows
+  to. `test_days = 4` is 19 % of it rounded to a whole session, because a fold
+  is a whole number of sessions and 4.2 is not one. `step_days = test_days` so
+  windows tile rather than overlap (D-0062).
+  **What is NOT sourced, and it would be dishonest to leave it implied.** The
+  scale is *bounded* as well as conventional. D-0119 cuts folds inside each
+  contract's front window, so `train + test` must fit ~64 sessions whatever a
+  convention says. One trading month fits, with room for ~10 folds; one trading
+  QUARTER — equally conventional, and the more natural choice for a
+  trend-following span hypothesis — does not fit at all. **The convention and
+  the constraint agree here by luck**, and on a root with shorter front windows
+  the constraint would simply win. That is a limitation of the front-window
+  pooling mode, not a property of this geometry, and it is the reason this entry
+  does not claim the geometry is purely conventional.
+  **Pooling, because the floors were never satisfiable otherwise.** Both files
+  register `min_oos_sessions = 250` and `min_oos_trades = 200`; one ES front
+  window is ~64 sessions. Eight consecutive contracts (ESM2022..ESH2024) supply
+  **344 distinct out-of-sample sessions** and 8,459 round-trips for H-007 —
+  measured, not projected. **The floors did not move.** They are met the only
+  way H-007 and H-008 permit: "when registry pooling supplies the sessions
+  honestly, never to make a short run pass".
+  **H-008 is amended but still cannot run**, and that is recorded here rather
+  than left for someone to rediscover. Its registered `stages` include `s0`, and
+  D-0133 refuses a pooled config declaring S0 because pooled S0 is
+  unimplemented. Its geometry amendment lands anyway — it is correct and
+  independent of the S0 question — but H-008 stays unrunnable at its registered
+  floors until pooled S0 exists. **H-007 is now runnable at its registered
+  floors and is the first hypothesis in this project that is.**
+  **Nothing has been run for the record.** The 344-session figure comes from a
+  probe writing to a TEMPORARY registry, deliberately, so no trial is charged to
+  either family and `results/registry.jsonl` is untouched. Running H-007 for the
+  record charges 800 trials to its family and is Liron's call by name.
+  **The cost of the pool is stated where it lands**: eight contracts times 100
+  combos is 800 trials, so the deflated Sharpe falls accordingly (D-0124). That
+  over-deflation is accepted on D-0124's terms — the preferred error is against
+  the strategy — and it is the price of the sample, not a side effect nobody
+  chose.
