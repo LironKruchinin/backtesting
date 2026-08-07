@@ -198,7 +198,13 @@ class DraftsCarryNoThirdPartyProse(unittest.TestCase):
         self.assertEqual(draft.find_reproduced_prose("any text at all", None), [])
 
     def test_the_committed_drafts_carry_no_abstract_block(self):
-        drafts = sorted((Path(__file__).resolve().parent.parent / "drafts").glob("*.md"))
+        # Drafts were promoted into research/backlog/ on 2026-08-07 and keep
+        # their DRAFT- prefix there, so this glob follows them rather than
+        # scanning an empty directory. The assertion below is what caught the
+        # move: without it this test would have passed over an empty list and
+        # gone on claiming to check something.
+        repo = Path(__file__).resolve().parents[3]
+        drafts = sorted((repo / "research" / "backlog").glob("DRAFT-*.md"))
         self.assertTrue(drafts, "there should be at least one committed draft")
         for path in drafts:
             text = path.read_text(encoding="utf-8")

@@ -12,6 +12,36 @@ a failure. A file whose kill criteria are written after the first equity curve
 is a rationalization (`docs/PROJECT_PLAN.md` §7.2). So the criteria are written
 here, first, by someone who does not yet know the answer.
 
+## 0. Two kinds of file live here, and the difference is the whole point
+
+Since the 2026-08-07 harvest this directory holds both, and **the filename tells
+you which**:
+
+| prefix | `criteria_status` | what it is |
+|---|---|---|
+| `H-0NN-*.md` | absent | **Registered.** Its kill criteria were chosen by the person who would be embarrassed if the idea failed, before any data was seen. This is a commitment. |
+| `DRAFT-*.md` | `proposed` | **Proposed.** An agent extracted the mechanism from a paper and *suggested* criteria. Nothing has been committed to. |
+
+That distinction is not ceremony. A pre-registration only has teeth because
+someone bound themselves to a number in advance; criteria you accept after
+reading a proposal are weaker than criteria you wrote blind, and a directory
+that cannot tell the two apart cannot support the claim the funnel is built to
+make. So `criteria_status: proposed` stays in the front matter until it is
+removed deliberately.
+
+**Promoting a draft** is three edits and they are Liron's alone: allocate the
+`id` (`H-0NN`, next free), rename the file to match, and **rewrite the kill
+criteria in your own terms** — then delete `criteria_status`. Rewriting is the
+step that matters; accepting the proposal verbatim leaves the field true and it
+should stay.
+
+**`INDEX.md` is the triage artifact** — every candidate on one line with its
+grade, asset class, mechanism and, for grade B and C, the named missing piece.
+Read it before opening any individual file.
+
+**Nothing here has been run**, drafted or registered alike, and nothing enters
+the funnel without Liron's approval by name, per hypothesis.
+
 ---
 
 ## 1. The binding rule for these files
